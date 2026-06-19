@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  spideybot:
+    build: .
+    image: spideybot
+    container_name: spideybot
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "6414:6414"  # gallery-dl OAuth callback (for: gallery-dl oauth:reddit)
+    volumes:
+      - ./data:/app/data
+      - gallery-dl-cache:/root/.gallery-dl
+
+volumes:
+  gallery-dl-cache:

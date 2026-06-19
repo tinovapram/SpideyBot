@@ -1,0 +1,20 @@
+# Example yt-dlp configuration file for gallery-dl integration
+# 
+# Copy this file to 'yt-dlp.conf' to customize your yt-dlp downloads.
+# For full documentation on available options, see:
+# https://github.com/yt-dlp/yt-dlp#configuration
+
+# Format selection: prefer best video and best audio merged, or fallback to best
+# -f bestvideo+bestaudio/best
+
+# Limit download rate (e.g. limit to 50M/s)
+# --limit-rate 50M
+
+# Restrict filenames to only ASCII characters, and avoid "&" and spaces in filenames
+# --restrict-filenames
+
+# Configure proxy (e.g. socks5 proxy)
+# --proxy "socks5://127.0.0.1:1080/"
+
+# Set user-agent
+# --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
