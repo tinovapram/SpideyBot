@@ -1,0 +1,29 @@
+{
+    "extractor": {
+        "twitter": {
+            "metadata": true
+        },
+        "instagram": {
+            "metadata": true
+        },
+        "reddit": {
+            "metadata": true,
+            "client-id": "6N9uN0krSDE-ig",
+            "refresh-token": "181551093630227-3Y2LYO_ajCkG_P8zOzr1bcCt4wAs8Q"
+        },
+        "tiktok": {
+            "metadata": true
+        },
+        "facebook": {
+            "metadata": true
+        },
+        "pinterest": {
+            "metadata": true
+        },
+        "ytdl": {
+            "enabled": true,
+            "module": "yt_dlp",
+            "config-file": "./yt-dlp.conf"
+        }
+    }
+}

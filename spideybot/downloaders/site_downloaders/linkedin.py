@@ -1,0 +1,47 @@
+import os
+from .base import BaseDownloader
+
+class LinkedInDownloader(BaseDownloader):
+    def fetch_media(self, url: str) -> dict:
+        headers = {
+            "Content-Type": "application/json",
+            "Referer": "https://saywhat.ai/tools/linkedin-video-downloader/",
+        }
+
+        try:
+            resp = self._request("POST", "https://saywhat.ai/api/fetch-linkedin-page/", headers=headers, json_data={"url": url})
+            return resp.json()
+        except Exception as e:
+            raise RuntimeError(f"Failed to fetch LinkedIn data: {e}")
+
+    def download(self, url: str, output_dir: str = "downloads") -> list:
+        info = self.fetch_media(url)
+        
+        # Check standard SayWhat API keys
+        download_url = info.get("downloadUrl") or info.get("url") or info.get("videoUrl")
+        title = info.get("title") or "LinkedIn_Video"
+
+        if not download_url:
+            # Fallback search
+            def find_url(d):
+                if isinstance(d, dict):
+                    for k, v in d.items():
+                        res = find_url(v)
+                        if res: return res
+                elif isinstance(d, list):
+                    for v in d:
+                        res = find_url(v)
+                        if res: return res
+                elif isinstance(d, str) and (d.startswith("http://") or d.startswith("https://")) and ".mp4" in d:
+                    return d
+                return None
+            
+            download_url = find_url(info)
+
+        if not download_url:
+            raise ValueError(f"No download URL found in LinkedIn response: {info}")
+
+        safe_title = self._sanitize_filename(title)
+        file_path = os.path.join(output_dir, f"{safe_title}.mp4")
+        self._download_file(download_url, file_path)
+        return [file_path]

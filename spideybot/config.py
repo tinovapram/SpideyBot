@@ -46,8 +46,20 @@ TERABOX_BDSTOKEN = os.getenv("TERABOX_BDSTOKEN")
 
 # ─── Reddit / Gallery-dl Configuration ──────────────────────────────
 
+# General / Fallback credentials
 REDDIT_CLIENT_ID = os.getenv("REDDIT_CLIENT_ID", "")
+REDDIT_CLIENT_SECRET = os.getenv("REDDIT_CLIENT_SECRET", "")
 REDDIT_REFRESH_TOKEN = os.getenv("REDDIT_REFRESH_TOKEN", "")
+
+# Specific to gallery-dl Reddit extractor
+GDL_REDDIT_CLIENT_ID = os.getenv("GDL_REDDIT_CLIENT_ID", REDDIT_CLIENT_ID)
+GDL_REDDIT_CLIENT_SECRET = os.getenv("GDL_REDDIT_CLIENT_SECRET", REDDIT_CLIENT_SECRET)
+GDL_REDDIT_REFRESH_TOKEN = os.getenv("GDL_REDDIT_REFRESH_TOKEN", REDDIT_REFRESH_TOKEN)
+
+# Specific to RedditDownloader (PRAW)
+REDDIT_PRAW_CLIENT_ID = os.getenv("REDDIT_PRAW_CLIENT_ID", REDDIT_CLIENT_ID)
+REDDIT_PRAW_CLIENT_SECRET = os.getenv("REDDIT_PRAW_CLIENT_SECRET", REDDIT_CLIENT_SECRET)
+REDDIT_PRAW_REFRESH_TOKEN = os.getenv("REDDIT_PRAW_REFRESH_TOKEN", REDDIT_REFRESH_TOKEN)
 
 # ─── Download Management ────────────────────────────────────────────
 

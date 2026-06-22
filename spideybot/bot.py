@@ -14,6 +14,7 @@ from spideybot import config
 from spideybot import db
 from spideybot.queue_manager import DownloadQueueManager
 from spideybot.downloaders.terabox_downloader import TeraBoxDownloader
+from spideybot.downloaders.reddit_downloader import RedditDownloader
 
 # Configure logging
 logging.basicConfig(
@@ -46,8 +47,20 @@ if config.TERABOX_COOKIE:
 else:
     logger.warning("TERABOX_COOKIE is not set. TeraBox features will be unavailable.")
 
+# Initialize Reddit Downloader
+reddit_downloader = None
+try:
+    reddit_downloader = RedditDownloader(
+        client_id=config.REDDIT_PRAW_CLIENT_ID,
+        client_secret=config.REDDIT_PRAW_CLIENT_SECRET,
+        refresh_token=config.REDDIT_PRAW_REFRESH_TOKEN
+    )
+    logger.info("Reddit downloader initialized successfully.")
+except Exception as e:
+    logger.error(f"Failed to initialize Reddit downloader: {e}")
+
 # Initialize Queue Manager
-download_manager = DownloadQueueManager(bot, tb_downloader, max_concurrent=config.MAX_CONCURRENT_DOWNLOADS)
+download_manager = DownloadQueueManager(bot, tb_downloader, reddit_downloader, max_concurrent=config.MAX_CONCURRENT_DOWNLOADS)
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────

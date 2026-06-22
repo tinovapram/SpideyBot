@@ -5,26 +5,26 @@ Orchestrates the full gallery-dl download flow: download → sanitize → upload
 Extracted from queue_manager._run_gallerydl for single-responsibility.
 """
 
-from lib2to3.fixes import fix_numliterals
 import os
 import shutil
 import logging
+import asyncio
 from urllib.parse import urlparse
 
 from spideybot.config import get_size_limit
 from spideybot.utils.files import sanitize_filename, extract_post_text
 from spideybot.utils.progress import ProgressCallback
-from spideybot.downloaders.twitter_downloader import download_twitter_fallback
+from spideybot.downloaders.universal_downloader import UniversalDownloader
 
 logger = logging.getLogger(__name__)
 
 
-async def run_gallerydl(task, bot, gallerydl_downloader):
+async def run_gallerydl(task, bot, gallerydl_downloader, reddit_downloader=None):
     """
     Execute a gallery-dl download task end-to-end.
 
     Flow:
-        1. Download media via gallery-dl subprocess
+        1. Download media via gallery-dl or custom RedditDownloader/UniversalDownloader (with fallback)
         2. Sanitize filenames for cross-platform compatibility
         3. Separate JSON metadata from media files
         4. Extract post caption from metadata
@@ -35,6 +35,7 @@ async def run_gallerydl(task, bot, gallerydl_downloader):
         task: DownloadTask instance with user info and link.
         bot: Telethon TelegramClient instance.
         gallerydl_downloader: GalleryDLDownloader instance.
+        reddit_downloader: RedditDownloader instance.
     """
     status_msg = task.status_msg
     if not status_msg:
@@ -58,30 +59,83 @@ async def run_gallerydl(task, bot, gallerydl_downloader):
                 except Exception:
                     pass
 
+        async def run_twitter_fallback(dest_dir):
+            from spideybot.downloaders.site_downloaders.twitter import TwitterDownloader
+            td = TwitterDownloader()
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(
+                None,
+                td.download,
+                task.link,
+                dest_dir
+            )
+
         # Download files
         is_twitter = any(domain in task.link.lower() for domain in ["twitter.com", "x.com"])
+        is_reddit = "reddit.com" in task.link.lower()
+        
+        ud = UniversalDownloader()
+        platform = ud.detect_platform(task.link)
         downloaded_files = None
         
         try:
-            downloaded_files = await gallerydl_downloader.download(
-                task.link, task_dir_id, max_size_bytes, progress_callback=progress_callback
-            )
+            if is_reddit and reddit_downloader:
+                logger.info("Attempting Reddit download via custom RedditDownloader...")
+                dest_dir = os.path.join(gallerydl_downloader.download_dir, task_dir_id)
+                loop = asyncio.get_event_loop()
+                downloaded_files = await loop.run_in_executor(
+                    None,
+                    reddit_downloader.download,
+                    task.link,
+                    dest_dir
+                )
+            elif platform != "unknown":
+                logger.info(f"Attempting download via custom UniversalDownloader ({platform})...")
+                dest_dir = os.path.join(gallerydl_downloader.download_dir, task_dir_id)
+                loop = asyncio.get_event_loop()
+                downloaded_files = await loop.run_in_executor(
+                    None,
+                    ud.download,
+                    task.link,
+                    dest_dir
+                )
+            else:
+                downloaded_files = await gallerydl_downloader.download(
+                    task.link, task_dir_id, max_size_bytes, progress_callback=progress_callback
+                )
         except Exception as e:
-            if is_twitter:
+            if is_reddit and reddit_downloader:
+                logger.warning(f"Custom RedditDownloader failed: {e}. Falling back to gallery-dl...")
+                try:
+                    downloaded_files = await gallerydl_downloader.download(
+                        task.link, task_dir_id, max_size_bytes, progress_callback=progress_callback
+                    )
+                except Exception as fallback_err:
+                    raise fallback_err
+            elif platform != "unknown":
+                logger.warning(f"UniversalDownloader failed for {platform}: {e}. Falling back to gallery-dl...")
+                try:
+                    downloaded_files = await gallerydl_downloader.download(
+                        task.link, task_dir_id, max_size_bytes, progress_callback=progress_callback
+                    )
+                except Exception as fallback_err:
+                    if platform == "twitter":
+                        logger.warning(f"gallery-dl failed for Twitter link: {fallback_err}. Trying fallback scraper...")
+                        dest_dir = os.path.join(gallerydl_downloader.download_dir, task_dir_id)
+                        downloaded_files = await run_twitter_fallback(dest_dir)
+                    else:
+                        raise fallback_err
+            elif is_twitter:
                 logger.warning(f"gallery-dl failed for Twitter link: {e}. Trying fallback scraper...")
                 dest_dir = os.path.join(gallerydl_downloader.download_dir, task_dir_id)
-                downloaded_files = await download_twitter_fallback(
-                    task.link, dest_dir, max_size_bytes, progress_callback=progress_callback
-                )
+                downloaded_files = await run_twitter_fallback(dest_dir)
             else:
                 raise e
 
         if is_twitter and not downloaded_files:
             logger.info("gallery-dl returned no files for Twitter link. Trying fallback scraper...")
             dest_dir = os.path.join(gallerydl_downloader.download_dir, task_dir_id)
-            downloaded_files = await download_twitter_fallback(
-                task.link, dest_dir, max_size_bytes, progress_callback=progress_callback
-            )
+            downloaded_files = await run_twitter_fallback(dest_dir)
 
         if not downloaded_files:
             await status_msg.edit("📥 **SpideyBot: No files downloaded from the link.**")
