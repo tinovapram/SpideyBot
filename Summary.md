@@ -128,4 +128,10 @@ SpideyBot is fully dockerized to ensure that external CLI tools (like `Deno` and
 2. Start the service in the background:
    ```bash
    docker compose up -d --build
+
+---
+
+## Changelog
+
+- 2026-06-22: Renamed environment variables `REDDIT_CLIENT_ID` -> `REDDIT_GDL_CLIENT_ID` and `REDDIT_REFRESH_TOKEN` -> `REDDIT_GDL_REFRESH_TOKEN`. Updated `spideybot/config.py`, `spideybot/downloaders/gallerydl_downloader.py`, `.env`, and `.env.example` to use the new names and fallback logic.
    ```

@@ -35,14 +35,22 @@ class GalleryDLDownloader:
             "enabled": True,
             "module": "yt_dlp"
         }
-        # Reference yt-dlp.conf if it exists
-        if os.path.exists("./yt-dlp.conf"):
-            extractor_config["ytdl"]["config-file"] = "./yt-dlp.conf"
+        # Ensure a yt-dlp config file exists to avoid yt-dlp errors; create empty if missing
+        yt_conf_path = "./yt-dlp.conf"
+        try:
+            if not os.path.exists(yt_conf_path):
+                # Create an empty file so yt-dlp won't error when gallery-dl points to it
+                open(yt_conf_path, "a", encoding="utf-8").close()
+                logger.info(f"Created empty {yt_conf_path} to avoid yt-dlp errors")
+        except Exception as e:
+            logger.error(f"Failed to ensure {yt_conf_path} exists: {e}")
+        # Always reference the config file (now guaranteed to exist or attempted)
+        extractor_config["ytdl"]["config-file"] = yt_conf_path
 
         # Apply Reddit env credentials if present (checking GDL-specific keys first)
-        reddit_client_id = (os.getenv("GDL_REDDIT_CLIENT_ID") or os.getenv("REDDIT_CLIENT_ID") or "").strip()
-        reddit_client_secret = (os.getenv("GDL_REDDIT_CLIENT_SECRET") or os.getenv("REDDIT_CLIENT_SECRET") or "").strip()
-        reddit_refresh_token = (os.getenv("GDL_REDDIT_REFRESH_TOKEN") or os.getenv("REDDIT_REFRESH_TOKEN") or "").strip()
+        reddit_client_id = (os.getenv("GDL_REDDIT_CLIENT_ID") or os.getenv("REDDIT_GDL_CLIENT_ID") or "").strip()
+        reddit_client_secret = (os.getenv("GDL_REDDIT_CLIENT_SECRET") or os.getenv("REDDIT_GDL_CLIENT_SECRET") or "").strip()
+        reddit_refresh_token = (os.getenv("GDL_REDDIT_REFRESH_TOKEN") or os.getenv("REDDIT_GDL_REFRESH_TOKEN") or "").strip()
         if reddit_client_id or reddit_client_secret or reddit_refresh_token:
             reddit = extractor_config.setdefault("reddit", {})
             if reddit_client_id:
