@@ -5,5 +5,10 @@ hachoir
 pillow
 cryptg
 gallery-dl
-yt-dlp
+yt-dlp[default,curl-cffi]
 beautifulsoup4
+praw
+mutagen
+pycryptodomex
+zstandard
+PySocks
