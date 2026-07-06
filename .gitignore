@@ -136,7 +136,7 @@ dmypy.json
 *.session
 *.session-journal
 
-.vscode/*
+# gallery-dl runtime config (auto-generated)
+data/gallery-dl-runtime.json
 
-gallery-dl.json
-yt-dlp.conf
+.vscode/*

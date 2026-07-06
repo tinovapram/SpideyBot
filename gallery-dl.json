@@ -1,0 +1,27 @@
+{
+    "extractor": {
+        "twitter": {
+            "metadata": true
+        },
+        "instagram": {
+            "metadata": true
+        },
+        "reddit": {
+            "metadata": true
+        },
+        "tiktok": {
+            "metadata": true
+        },
+        "facebook": {
+            "metadata": true
+        },
+        "pinterest": {
+            "metadata": true
+        },
+        "ytdl": {
+            "enabled": true,
+            "module": "yt_dlp",
+            "config-file": "./yt-dlp.conf"
+        }
+    }
+}
