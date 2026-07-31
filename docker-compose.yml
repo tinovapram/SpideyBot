@@ -1,9 +1,8 @@
-version: '3.8'
-
 services:
   spideybot:
-    build: .
-    image: spideybot
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: spideybot
     restart: unless-stopped
     env_file:
@@ -12,7 +11,34 @@ services:
       - "6414:6414"  # gallery-dl OAuth callback (for: gallery-dl oauth:reddit)
     volumes:
       - ./data:/app/data
-      - gallery-dl-cache:/root/.gallery-dl
+      - ./user_sessions:/app/user_sessions
+      - ./config/runtime:/app/config/runtime
+      - gallery-dl-cache:/app/.gallery-dl
+
+    # ── Health Check ─────────────────────────────────────────────
+    healthcheck:
+      test: ["CMD", "python", "-c", "import telethon"]
+      interval: 60s
+      timeout: 10s
+      start_period: 15s
+      retries: 3
+
+    # ── Resource Limits ──────────────────────────────────────────
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "2.0"
+        reservations:
+          memory: 256M
+          cpus: "0.5"
+
+    # ── Logging ──────────────────────────────────────────────────
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   gallery-dl-cache:

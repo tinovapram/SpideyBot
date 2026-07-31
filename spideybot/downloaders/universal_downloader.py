@@ -1,4 +1,6 @@
 import os
+
+import structlog
 from spideybot.downloaders.site_downloaders.youtube import YouTubeDownloader
 from spideybot.downloaders.site_downloaders.tiktok import TikTokDownloader
 from spideybot.downloaders.site_downloaders.pinterest import PinterestDownloader
@@ -14,6 +16,8 @@ from spideybot.downloaders.site_downloaders.tumblr import TumblrDownloader
 from spideybot.downloaders.site_downloaders.dailymotion import DailymotionDownloader
 from spideybot.downloaders.site_downloaders.douyin import DouyinDownloader
 from spideybot.downloaders.site_downloaders.kuaishou import KuaishouDownloader
+
+logger = structlog.get_logger(__name__)
 
 class UniversalDownloader:
     def __init__(self):
@@ -78,5 +82,5 @@ class UniversalDownloader:
         if not downloader:
             raise ValueError(f"Downloader for platform '{platform}' not configured")
         
-        print(f"[INFO] Routing URL to {downloader.__class__.__name__}...")
+        logger.info("Routing URL to downloader", platform=platform, downloader=downloader.__class__.__name__)
         return downloader.download(url, output_dir=output_dir)

@@ -7,9 +7,11 @@ for file upload operations.
 
 import time
 import asyncio
-import logging
 
-logger = logging.getLogger(__name__)
+import structlog
+from telethon.errors import RPCError as TelethonRPCError
+
+logger = structlog.get_logger(__name__)
 
 
 def format_size(bytes_size: float) -> str:
@@ -26,8 +28,7 @@ class ProgressCallback:
     Telegram message-editing progress callback for file uploads.
 
     Renders a progress bar and file size info, rate-limited to one
-    edit every 3 seconds to avoid Telegram flood limits.
-
+        edit every 5 seconds to avoid Telegram flood limits.
     Args:
         event: The Telegram event to reply to.
         message: The Telegram message object to edit in-place.
@@ -36,7 +37,7 @@ class ProgressCallback:
         total_files: Total number of files being uploaded.
     """
 
-    def __init__(self, event, message, prefix_text="", file_index=None, total_files=None):
+    def __init__(self, event, message, prefix_text: str = "", file_index: int = None, total_files: int = None) -> None:
         self.event = event
         self.message = message
         self.prefix_text = prefix_text
@@ -44,8 +45,9 @@ class ProgressCallback:
         self.total_files = total_files
         self.last_msg_time = time.time()
         self.last_text = ""
+        self.last_percent = 0.0
 
-    def update(self, current, total):
+    def update(self, current, total) -> None:
         """
         Called by Telethon during file upload with byte counts.
 
@@ -57,8 +59,8 @@ class ProgressCallback:
             return
 
         current_time = time.time()
-        # Rate limit updates to every 3 seconds to prevent Telegram flood limits,
-        # but always allow the final 100% update.
+        # Rate limit updates to every 5 seconds to prevent Telegram flood limits,
+        # but always allow the final 100% update and meaningful progress changes.
         if current_time - self.last_msg_time > 5 or current == total:
             if isinstance(current, float):
                 # Float/chunk based custom formatting support
@@ -91,8 +93,8 @@ class ProgressCallback:
                             await self.message.edit(text)
                         elif hasattr(self.message, 'edit_text'):
                             await self.message.edit_text(text)
-                    except Exception:
-                        pass
+                    except TelethonRPCError:
+                        pass  # Telegram rate-limit or message deleted
 
                 try:
                     loop = asyncio.get_running_loop()

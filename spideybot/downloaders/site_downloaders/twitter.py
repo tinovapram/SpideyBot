@@ -1,8 +1,12 @@
 import os
 import re
 import json
+
+import structlog
 from bs4 import BeautifulSoup
 from .base import BaseDownloader
+
+logger = structlog.get_logger(__name__)
 
 class TwitterDownloader(BaseDownloader):
     def _fetch_vxtwitter(self, url: str) -> dict:
@@ -93,15 +97,15 @@ class TwitterDownloader(BaseDownloader):
     def fetch_media(self, url: str) -> dict:
         # We try vxtwitter first, then fall back to savetwitter
         try:
-            print("[INFO] Attempting Twitter download via vxtwitter API...")
+            logger.info("Attempting Twitter download via vxtwitter API...")
             return self._fetch_vxtwitter(url)
         except Exception as e:
-            print(f"[Warning] vxtwitter failed: {e}. Trying savetwitter API fallback...")
+            logger.warning("vxtwitter failed, trying savetwitter", error=str(e))
             return self._fetch_savetwitter(url)
 
     def download(self, url: str, output_dir: str = "downloads") -> list:
         info = self.fetch_media(url)
-        title = self._sanitize_filename(info["title"])
+        safe_title = self._sanitize_filename(info["title"])
         
         downloaded_paths = []
         os.makedirs(output_dir, exist_ok=True)
@@ -116,7 +120,7 @@ class TwitterDownloader(BaseDownloader):
                 if ext.lower() in [".mp4", ".m3u8"]:
                     ext = ".mp4"
             
-            file_path = os.path.join(output_dir, f"{title}_{idx}{ext}" if len(info["media_urls"]) > 1 else f"{title}{ext}")
+            file_path = os.path.join(output_dir, f"{safe_title}_{idx}{ext}" if len(info["media_urls"]) > 1 else f"{safe_title}{ext}")
             self._download_file(media_url, file_path)
             downloaded_paths.append(file_path)
 
@@ -133,6 +137,6 @@ class TwitterDownloader(BaseDownloader):
                     json.dump(meta_data, f, indent=4)
                 downloaded_paths.append(meta_path)
             except Exception as meta_err:
-                print(f"[Warning] Failed to write metadata.json: {meta_err}")
+                logger.warning("Failed to write metadata.json", error=str(meta_err))
 
         return downloaded_paths

@@ -58,13 +58,13 @@ class PinterestDownloader(BaseDownloader):
 
     def download(self, url: str, output_dir: str = "downloads") -> list:
         info = self.fetch_media(url)
-        title = self._sanitize_filename(info["title"])
+        safe_title = self._sanitize_filename(info["title"])
 
         if not info["downloads"]:
             # Maybe it's a direct image pin? Let's check if the thumbnail is the only image, or try to fallback
             if info["thumbnail"]:
                 ext = ".jpg"
-                file_path = os.path.join(output_dir, f"{title}{ext}")
+                file_path = os.path.join(output_dir, f"{safe_title}{ext}")
                 self._download_file(info["thumbnail"], file_path)
                 return [file_path]
             raise ValueError("No download links found for Pinterest")
@@ -72,7 +72,7 @@ class PinterestDownloader(BaseDownloader):
         # Take the best quality option
         best_option = info["downloads"][0]
         ext = ".mp4" if "video" in best_option["format"].lower() else ".jpg"
-        file_path = os.path.join(output_dir, f"{title}{ext}")
+        file_path = os.path.join(output_dir, f"{safe_title}{ext}")
         
         self._download_file(best_option["url"], file_path)
         return [file_path]

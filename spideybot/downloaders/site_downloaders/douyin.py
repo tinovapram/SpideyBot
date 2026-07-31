@@ -60,7 +60,7 @@ class DouyinDownloader(BaseDownloader):
 
     def download(self, url: str, output_dir: str = "downloads") -> list:
         info = self.fetch_media(url)
-        title = self._sanitize_filename(info["title"])
+        safe_title = self._sanitize_filename(info["title"])
         
         # Determine download URL: take the preview or first download link
         download_url = None
@@ -72,6 +72,6 @@ class DouyinDownloader(BaseDownloader):
         if not download_url:
             raise ValueError("No download links resolved for Douyin post")
 
-        file_path = os.path.join(output_dir, f"{title}.mp4")
+        file_path = os.path.join(output_dir, f"{safe_title}.mp4")
         self._download_file(download_url, file_path)
         return [file_path]

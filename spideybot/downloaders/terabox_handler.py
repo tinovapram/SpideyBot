@@ -7,16 +7,34 @@ Extracted from queue_manager._run_terabox for single-responsibility.
 
 import os
 import shutil
-import logging
+import asyncio
+from dataclasses import dataclass
+from typing import Optional, List
+
+import structlog
+from telethon import Button
 
 from spideybot.config import get_size_limit
 from spideybot.utils.files import download_file_async
 from spideybot.utils.progress import ProgressCallback
+from spideybot.utils.task_progress import TaskProgress
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
+
+# Pipeline buffer: how many files to download ahead of upload
+_PIPELINE_BUFFER = 2
 
 
-async def run_terabox(task, bot, tb_downloader):
+@dataclass
+class _PipelineItem:
+    """An item flowing through the download→upload pipeline."""
+    index: int
+    filename: str
+    filepath: Optional[str] = None
+    error: Optional[str] = None
+
+
+async def run_terabox(task, bot, terabox_downloader) -> None:
     """
     Execute a TeraBox download task end-to-end.
 
@@ -31,13 +49,13 @@ async def run_terabox(task, bot, tb_downloader):
     Args:
         task: DownloadTask instance with user info and link.
         bot: Telethon TelegramClient instance.
-        tb_downloader: TeraBoxDownloader instance (or None if not configured).
+        terabox_downloader: TeraBoxDownloader instance (or None if not configured).
     """
     status_msg = task.status_msg
     if not status_msg:
         status_msg = await task.event.reply("⏳ **SpideyBot:** Starting download...")
 
-    if not tb_downloader:
+    if not terabox_downloader:
         await status_msg.edit(
             "⚠️ **SpideyBot: TeraBox Downloader is not configured.**\n"
             "Please ensure `TERABOX_COOKIE` is set in the `.env` file."
@@ -47,7 +65,13 @@ async def run_terabox(task, bot, tb_downloader):
     try:
         await status_msg.edit("🔍 **SpideyBot: Resolving TeraBox link...**")
 
-        result = tb_downloader.resolve(task.link, mode="download")
+        # Per-user staging folder: /downloads/{user_id}/terabox
+        saved_root = terabox_downloader.root_path
+        terabox_downloader.root_path = f"/downloads/{task.user_id}/terabox"
+        try:
+            result = await terabox_downloader.resolve(task.link, mode="download")
+        finally:
+            terabox_downloader.root_path = saved_root
         if not result.ok:
             await status_msg.edit(f"❌ **SpideyBot: Failed to resolve link.**\nReason: `{result.error or 'Unknown error'}`")
             return
@@ -76,57 +100,134 @@ async def run_terabox(task, bot, tb_downloader):
 
         output_dir = f"./downloads/tb_{task.user_id}_{task.entry_id}"
         files_handlers = []
+        failed_files = []
 
+        # ── Unified Progress Tracker ─────────────────────────────────────
+        progress = TaskProgress(title, total_files=length_of_files)
         for i, tb_file in enumerate(files_to_send):
-            await status_msg.edit(
-                f"📥 **SpideyBot: Downloading share...**\n"
-                f"• **Title:** `{title}`\n"
-                f"• **Files:** {length_of_files} ({total_size_mb:.2f} MB)\n"
-                f"• **Status:** Downloading file {i+1}/{length_of_files} (`{tb_file.filename}` - {tb_file.size_mb:.2f} MB)"
-            )
+            progress.add_file(i, tb_file.filename, total_bytes=tb_file.size_bytes)
 
-            try:
-                filepath = await download_file_async(tb_downloader, tb_file, output_dir)
+        # Cancel button to persist through all progress messages
+        _cancel_buttons = [[Button.inline("❌ Cancel", data=f"cancel:{task.entry_id}")]]
 
-                callback = ProgressCallback(
-                    task.event,
-                    status_msg,
-                    prefix_text=f"📤 **SpideyBot: Uploading share...**\n• **Title:** `{title}`\n• **Files:** {length_of_files} ({total_size_mb:.2f} MB)",
-                    file_index=i+1,
-                    total_files=length_of_files
-                )
-                file_handle = await bot.upload_file(filepath, progress_callback=callback.update)
-                if file_handle:
-                    files_handlers.append(file_handle)
+        # ── Pipeline: download next while uploading current ──────────────
+        dl_queue: asyncio.Queue[_PipelineItem] = asyncio.Queue(maxsize=_PIPELINE_BUFFER)
 
-                if os.path.exists(filepath):
-                    os.remove(filepath)
-            except Exception as file_err:
-                logger.exception(f"Error processing file {tb_file.filename}: {file_err}")
-                await task.event.reply(f"❌ **Failed to send file:** `{tb_file.filename}`\nError: `{str(file_err)}`")
+        async def _producer():
+            """Download files and push them into the pipeline queue."""
+            for i, tb_file in enumerate(files_to_send):
+                if task.is_cancelled:
+                    break
+                item = _PipelineItem(index=i, filename=tb_file.filename)
+                try:
+                    progress.mark_downloading(i, total_bytes=tb_file.size_bytes)
+                    await progress.update_message(status_msg, buttons=_cancel_buttons)
+                    item.filepath = await download_file_async(terabox_downloader, tb_file, output_dir)
+                except Exception as file_err:
+                    # str(TimeoutError()) can be empty — always produce a
+                    # truthy error string so the consumer never falls through.
+                    err_msg = str(file_err) or f"{type(file_err).__name__}: {file_err}"
+                    logger.exception("Error downloading file", filename=tb_file.filename, error=err_msg)
+                    item.error = err_msg
+                await dl_queue.put(item)
+
+            # Sentinel: signal producer is done
+            await dl_queue.put(_PipelineItem(index=-1, filename="__DONE__"))
+
+        async def _consumer():
+            """Upload files as they arrive from the download queue."""
+            nonlocal files_handlers
+            while True:
+                item = await dl_queue.get()
+                if item.index == -1:
+                    break  # Producer is done
+
+                # Check cancellation before upload
+                if task.is_cancelled:
+                    if item.filepath and os.path.exists(item.filepath):
+                        os.remove(item.filepath)
+                    progress.mark_skipped(item.index)
+                    await progress.update_message(status_msg, buttons=_cancel_buttons)
+                    continue
+
+                # Defensive: catch both truthy error AND missing filepath
+                if item.error or item.filepath is None:
+                    err = item.error or "Download produced no file"
+                    failed_files.append((item.filename, err))
+                    progress.mark_failed(item.index, error=err)
+                    await progress.update_message(status_msg, buttons=_cancel_buttons)
+                    await task.event.reply(f"❌ **Failed to download file:** `{item.filename}`\nError: `{err}`")
+                    continue
+
+                try:
+                    progress.mark_uploading(item.index)
+                    await progress.update_message(status_msg, buttons=_cancel_buttons)
+
+                    # Create a progress callback that feeds into TaskProgress
+                    def _make_cb(idx):
+                        def cb(current, total):
+                            if total:
+                                progress.update_upload(idx, current)
+                                progress.update_message(status_msg, buttons=_cancel_buttons)
+                        return cb
+
+                    file_handle = await bot.upload_file(
+                        item.filepath,
+                        progress_callback=_make_cb(item.index)
+                    )
+                    if file_handle:
+                        files_handlers.append(file_handle)
+                    progress.mark_sent(item.index)
+                    await progress.update_message(status_msg, buttons=_cancel_buttons)
+
+                    # Clean up downloaded file immediately after upload
+                    if item.filepath and os.path.exists(item.filepath):
+                        os.remove(item.filepath)
+                except Exception as upload_err:
+                    logger.exception("Error uploading file", filename=item.filename, error=str(upload_err))
+                    failed_files.append((item.filename, str(upload_err)))
+                    progress.mark_failed(item.index, error=str(upload_err))
+                    await progress.update_message(status_msg, buttons=_cancel_buttons)
+                    await task.event.reply(f"❌ **Failed to upload file:** `{item.filename}`\nError: `{str(upload_err)}`")
+                    if item.filepath and os.path.exists(item.filepath):
+                        os.remove(item.filepath)
+
+        # Run producer and consumer concurrently
+        await asyncio.gather(_producer(), _consumer())
+
+        # Finalize progress message
+        await progress.finalize(status_msg)
 
         if files_handlers:
-            await status_msg.edit(
-                f"📤 **SpideyBot: Finalizing upload...**\n"
-                f"• **Title:** `{title}`\n"
-                f"• **Status:** Sending files to chat..."
-            )
-            try:
-                await task.event.reply(message=f"{title}\n\nDownloaded by SpideyBot from [link]({task.link})\n\n", file=files_handlers, supports_streaming=True)
+            if task.is_cancelled:
+                await status_msg.edit("❌ **SpideyBot:** Download cancelled.")
+            else:
                 await status_msg.edit(
-                    f"✅ **SpideyBot: Download completed!**\n"
+                    f"📤 **SpideyBot: Finalizing upload...**\n"
                     f"• **Title:** `{title}`\n"
-                    f"• **Files:** {length_of_files} ({total_size_mb:.2f} MB) successfully sent."
+                    f"• **Status:** Sending files to chat..."
                 )
-            except Exception as e:
-                logger.exception(f"Error sending files: {e}")
-                await status_msg.edit(f"❌ **SpideyBot: Error sending files.**\nError: `{str(e)}`")
+                try:
+                    await task.event.reply(message=f"{title}\n\nDownloaded by SpideyBot from [link]({task.link})\n\n", file=files_handlers, supports_streaming=True)
+                    success_count = len(files_handlers)
+                    msg = f"✅ **SpideyBot: Download completed!**\n• **Title:** `{title}`\n• **Files:** {success_count}/{length_of_files} ({total_size_mb:.2f} MB) successfully sent."
+                    if failed_files:
+                        msg += f"\n⚠️ {len(failed_files)} file(s) failed."
+                    await status_msg.edit(msg)
+                except Exception as e:
+                    logger.exception("Error sending files to chat", error=str(e))
+                    await status_msg.edit(f"❌ **SpideyBot: Error sending files.**\nError: `{str(e)}`")
         else:
             await status_msg.edit("❌ **SpideyBot: No files were successfully downloaded.**")
+
+        # Report per-file failures if any
+        error_summary = progress.get_error_summary()
+        if error_summary:
+            await task.event.reply(error_summary)
 
         if os.path.exists(output_dir):
             shutil.rmtree(output_dir)
 
     except Exception as e:
-        logger.exception(f"Error processing TeraBox task: {e}")
+        logger.exception("Error processing TeraBox task", link=task.link, error=str(e))
         await status_msg.edit(f"❌ **SpideyBot: An error occurred.**\nError: `{str(e)}`")

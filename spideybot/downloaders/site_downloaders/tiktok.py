@@ -62,7 +62,7 @@ class TikTokDownloader(BaseDownloader):
 
     def download(self, url: str, output_dir: str = "downloads") -> list:
         info = self.fetch_media(url)
-        title = self._sanitize_filename(info["title"])
+        safe_title = self._sanitize_filename(info["title"])
         
         downloaded_paths = []
         
@@ -72,12 +72,12 @@ class TikTokDownloader(BaseDownloader):
 
         if images:
             for idx, img in enumerate(images, 1):
-                file_path = os.path.join(output_dir, f"{title}_{idx}.jpg")
+                file_path = os.path.join(output_dir, f"{safe_title}_{idx}.jpg")
                 self._download_file(img["url"], file_path)
                 downloaded_paths.append(file_path)
         elif videos:
             # Take the first video url (typically without watermark)
-            file_path = os.path.join(output_dir, f"{title}.mp4")
+            file_path = os.path.join(output_dir, f"{safe_title}.mp4")
             self._download_file(videos[0]["url"], file_path)
             downloaded_paths.append(file_path)
         else:

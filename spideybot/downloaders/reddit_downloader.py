@@ -1,10 +1,15 @@
 import os
 import re
 import html
+import glob
 import urllib.parse
 import json
 import requests
 import praw
+
+import structlog
+
+from spideybot.utils.files import sanitize_filename
 
 try:
     import yt_dlp
@@ -12,11 +17,15 @@ try:
 except ImportError:
     HAS_YTDLP = False
 
+logger = structlog.get_logger(__name__)
+
 class RedditDownloader:
-    def __init__(self, client_id=None, client_secret=None, refresh_token=None, user_agent='my_app/1.0'):
+    def __init__(self, client_id=None, client_secret=None, refresh_token=None, refresh_token_client_id=None, refresh_token_client_secret=None, user_agent='SpideyBot/1.0 (+https://github.com/SpideyBot)'):
         self.client_id = client_id
         self.client_secret = client_secret
         self.refresh_token = refresh_token
+        self.refresh_token_client_id = refresh_token_client_id
+        self.refresh_token_client_secret = refresh_token_client_secret
         self.user_agent = user_agent
         self.reddit = None
         self._authenticate()
@@ -24,6 +33,9 @@ class RedditDownloader:
     def _authenticate(self):
         # 1. Compile the list of candidate client ID + secret pairs (in order of priority)
         pairs_to_try = []
+        # If the refresh token was created for a different app, try that pair FIRST
+        if self.refresh_token and self.refresh_token_client_id:
+            pairs_to_try.append((self.refresh_token_client_id, self.refresh_token_client_secret or ''))
         if self.client_id:
             if self.client_secret:
                 pairs_to_try.append((self.client_id, self.client_secret))
@@ -59,10 +71,10 @@ class RedditDownloader:
                     self.reddit.auth.scopes()
                     self.client_id = cid
                     self.client_secret = csec
-                    print(f"[INFO] Authenticated successfully using Reddit refresh token with client_id: {cid}")
+                    logger.info("Authenticated via refresh token", client_id=cid)
                     return
                 except Exception as e:
-                    print(f"[Warning] Refresh token auth failed for client_id {cid}: {e}. Trying next candidate.")
+                    logger.warning("Refresh token auth failed, trying next candidate", client_id=cid, error=str(e))
 
         # 3. Try client credentials flow (manual token first, then standard PRAW client credentials)
         for cid, csec in pairs_to_try:
@@ -86,10 +98,10 @@ class RedditDownloader:
                     self.reddit.auth.scopes()
                     self.client_id = cid
                     self.client_secret = csec
-                    print(f"[INFO] Authenticated successfully using manual access token with client_id: {cid}")
+                    logger.info("Authenticated via manual access token", client_id=cid)
                     return
             except Exception as e:
-                print(f"[Warning] Manual token auth failed for client_id {cid}: {e}. Trying standard PRAW auth.")
+                logger.warning("Manual token auth failed, trying standard PRAW auth", client_id=cid, error=str(e))
 
             # B. Try standard PRAW authentication
             try:
@@ -102,19 +114,12 @@ class RedditDownloader:
                 self.reddit.auth.scopes()
                 self.client_id = cid
                 self.client_secret = csec
-                print(f"[INFO] Authenticated using standard PRAW client credentials with client_id: {cid}")
+                logger.info("Authenticated via standard PRAW client credentials", client_id=cid)
                 return
             except Exception as e:
-                print(f"[Warning] Standard PRAW auth failed for client_id {cid}: {e}.")
+                logger.warning("Standard PRAW auth failed", client_id=cid, error=str(e))
 
         raise RuntimeError("Failed to authenticate with Reddit API using any of the available credential pairs.")
-
-    def sanitize_filename(self, filename: str) -> str:
-        # Replace invalid characters
-        filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
-        filename = filename.replace(' ', '_')
-        filename = filename.strip('. ')
-        return filename[:200]
 
     def download(self, url: str, output_dir: str = "downloads") -> list:
         """
@@ -124,20 +129,20 @@ class RedditDownloader:
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
 
-        print(f"Resolving Reddit submission: {url}")
+        logger.info("Resolving Reddit submission", url=url)
         submission = self.reddit.submission(url=url)
         
         # Access attributes to force lazy loading
         title = submission.title
         upvotes = submission.ups
-        print(f"Post Title: {title} (Upvotes: {upvotes})")
+        logger.info("Post resolved", title=title, upvotes=upvotes)
 
-        safe_title = self.sanitize_filename(title)
+        safe_title = sanitize_filename(title)
         downloaded_paths = []
 
         # 1. Check if it's a video
         if getattr(submission, 'is_video', False):
-            print("Detected video post.")
+            logger.info("Detected video post.")
             video_url = None
             if submission.media and 'reddit_video' in submission.media:
                 video_url = submission.media['reddit_video'].get('fallback_url')
@@ -151,7 +156,7 @@ class RedditDownloader:
             ytdlp_success = False
             if HAS_YTDLP:
                 try:
-                    print("Attempting to download with yt-dlp for merged audio/video...")
+                    logger.info("Attempting to download with yt-dlp for merged audio/video...")
                     # Pass the original post url to yt-dlp so it can find and merge the audio track
                     ydl_opts = {
                         'outtmpl': os.path.join(output_dir, f"{upvotes}_{safe_title}.%(ext)s"),
@@ -171,24 +176,24 @@ class RedditDownloader:
                         if os.path.exists(path):
                             downloaded_paths.append(path)
                             ytdlp_success = True
-                            print(f"Success! Video downloaded via yt-dlp: {path}")
                             break
+                    logger.info("Downloaded video via yt-dlp", path=path)
                 except Exception as e:
-                    print(f"[Warning] yt-dlp download failed: {e}. Falling back to direct video URL download.")
+                    logger.warning("yt-dlp download failed, falling back to direct video URL", error=str(e))
             
             if not ytdlp_success:
-                print(f"Downloading video from fallback url: {video_url}")
+                logger.info("Downloading video from fallback URL", url=video_url)
                 resp = requests.get(video_url, stream=True)
                 resp.raise_for_status()
                 with open(file_path, 'wb') as f:
                     for chunk in resp.iter_content(chunk_size=8192):
                         f.write(chunk)
                 downloaded_paths.append(file_path)
-                print(f"Success! Direct video downloaded (no audio): {file_path}")
+                logger.info("Direct video downloaded (no audio)", path=file_path)
 
         # 2. Check if it's a gallery
         elif getattr(submission, 'is_gallery', False):
-            print("Detected gallery post.")
+            logger.info("Detected gallery post.")
             if hasattr(submission, 'media_metadata'):
                 index = 1
                 for item_id, item in submission.media_metadata.items():
@@ -204,7 +209,7 @@ class RedditDownloader:
                                     ext = f".{mime.split('/')[-1]}"
                             
                             file_path = os.path.join(output_dir, f"{upvotes}_{safe_title}_{index}{ext}")
-                            print(f"Downloading gallery image {index}: {img_url}")
+                            logger.info("Downloading gallery image", index=index, url=img_url)
                             resp = requests.get(img_url, stream=True)
                             resp.raise_for_status()
                             with open(file_path, 'wb') as f:
@@ -218,24 +223,24 @@ class RedditDownloader:
         # 3. Check if it's a simple image
         else:
             post_url = submission.url
-            print(f"Detected standard link/image post. URL: {post_url}")
+            logger.info("Detected standard link/image post", url=post_url)
             if post_url.lower().endswith(('.jpg', '.jpeg', '.png', '.gif')):
                 ext = os.path.splitext(urllib.parse.urlparse(post_url).path)[1] or '.jpg'
                 file_path = os.path.join(output_dir, f"{upvotes}_{safe_title}{ext}")
-                print(f"Downloading image: {post_url}")
+                logger.info("Downloading image", url=post_url)
                 resp = requests.get(post_url, stream=True)
                 resp.raise_for_status()
                 with open(file_path, 'wb') as f:
                     for chunk in resp.iter_content(chunk_size=8192):
                         f.write(chunk)
                 downloaded_paths.append(file_path)
-                print(f"Success! Image downloaded: {file_path}")
+                logger.info("Image downloaded", path=file_path)
             else:
                 # If it's not a direct image URL, try downloading via yt-dlp
                 ytdlp_success = False
                 if HAS_YTDLP:
                     try:
-                        print("Attempting to download with yt-dlp...")
+                        logger.info("Attempting to download with yt-dlp...")
                         ydl_opts = {
                             'outtmpl': os.path.join(output_dir, f"{upvotes}_{safe_title}.%(ext)s"),
                             'quiet': True,
@@ -244,15 +249,14 @@ class RedditDownloader:
                         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                             ydl.download([post_url])
                         
-                        import glob
                         pattern = os.path.join(output_dir, f"{upvotes}_{safe_title}.*")
                         files = glob.glob(pattern)
                         if files:
                             downloaded_paths.extend(files)
                             ytdlp_success = True
-                            print(f"Success! Downloaded via yt-dlp: {files}")
+                            logger.info("Downloaded via yt-dlp", files=files)
                     except Exception as e:
-                        print(f"[Warning] yt-dlp download failed: {e}")
+                        logger.warning("yt-dlp download failed", error=str(e))
                 
                 if not ytdlp_success:
                     raise ValueError(f"Submission URL is not a supported media format and yt-dlp failed: {post_url}")
@@ -270,8 +274,8 @@ class RedditDownloader:
             with open(meta_path, "w", encoding="utf-8") as f:
                 json.dump(meta_data, f, indent=4)
             downloaded_paths.append(meta_path)
-            print(f"Saved metadata JSON: {meta_path}")
+            logger.info("Saved metadata JSON", path=meta_path)
         except Exception as e:
-            print(f"[Warning] Failed to save metadata JSON: {e}")
+            logger.warning("Failed to save metadata JSON", error=str(e))
 
         return downloaded_paths

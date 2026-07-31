@@ -9,10 +9,12 @@ import os
 import re
 import json
 import asyncio
-import logging
+import aiohttp
 from typing import Optional, List
 
-logger = logging.getLogger(__name__)
+import structlog
+
+logger = structlog.get_logger(__name__)
 
 
 def sanitize_filename(filename: str, max_len: int = 120) -> str:
@@ -110,57 +112,76 @@ def extract_post_text(json_paths: List[str]) -> Optional[str]:
             with open(jp, 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 search_recursive(data)
-        except Exception:
-            pass
+        except (json.JSONDecodeError, OSError):
+            logger.debug(f"Failed to read metadata JSON: {jp}")
 
     # Priority order for selecting the best caption key
     priority_order = [
         'content', 'description', 'caption', 'text', 'desc',
         'selftext', 'tweet_text', 'title', 'message'
     ]
-    caption=''
-    if found_texts['category']=='reddit':
-        caption= found_texts['title'][:1024]
+    caption = ''
+    category = found_texts.get('category', '')
+    author = found_texts.get('author', 'unknown')
+    if category == 'reddit':
+        caption = found_texts.get('title', '')[:1024]
     else:
         for pk in priority_order:
             if pk in found_texts:
-                caption= found_texts[pk][:1024]
+                caption = found_texts[pk][:1024]
                 break
     if caption:
-        caption=f"{found_texts['author']} on {found_texts['category']}:\n\n{caption}\n"
+        caption = f"{author} on {category}:\n\n{caption}\n"
         return caption
     return None
 
 
-async def download_file_async(tb_downloader, tb_file, output_dir: str) -> str:
+async def download_file_async(terabox_downloader, tb_file, output_dir: str) -> str:
     """
-    Download a TeraBox file asynchronously using a thread pool executor.
+    Download a TeraBox file asynchronously using aiohttp streaming.
+
+    Uses a generous per-request timeout (10 min total, 2 min per read)
+    so large video files don't fail on slow connections.
+    Partial files are cleaned up on any error.
 
     Args:
-        tb_downloader: TeraBoxDownloader instance.
+        terabox_downloader: TeraBoxDownloader instance.
         tb_file: TeraBoxFile with a valid dlink.
         output_dir: Directory to save the downloaded file.
 
     Returns:
         The path to the downloaded file.
+
+    Raises:
+        Exception: On network, timeout, or I/O errors. The partial file
+                    is removed before the exception propagates.
     """
     os.makedirs(output_dir, exist_ok=True)
     safe_filename = sanitize_filename(tb_file.filename)
     filepath = os.path.join(output_dir, safe_filename)
 
-    def _download():
-        r = tb_downloader.session.get(
-            tb_file.dlink,
-            stream=True,
-            timeout=tb_downloader.timeout,
-            headers={"User-Agent": tb_downloader.USER_AGENT},
-        )
-        r.raise_for_status()
-        with open(filepath, "wb") as f:
-            for chunk in r.iter_content(chunk_size=8192):
-                if chunk:
-                    f.write(chunk)
-        return filepath
+    # Per-request timeout: generous limits for large file streaming.
+    # The session-level timeout (30s) is too short for video downloads.
+    dl_timeout = aiohttp.ClientTimeout(total=600, connect=30, sock_read=120)
 
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _download)
+    r = await terabox_downloader._request_with_retry(
+        "GET",
+        tb_file.dlink,
+        headers={"User-Agent": terabox_downloader.USER_AGENT},
+        timeout=dl_timeout,
+    )
+    try:
+        with open(filepath, "wb") as f:
+            async for chunk in r.content.iter_chunked(8192):
+                f.write(chunk)
+    except (asyncio.CancelledError, Exception):
+        # Clean up partial file on any failure (timeout, I/O, cancel)
+        try:
+            if os.path.exists(filepath):
+                os.remove(filepath)
+        except OSError:
+            pass
+        raise
+    finally:
+        await r.release()
+    return filepath

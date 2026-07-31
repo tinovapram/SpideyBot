@@ -26,7 +26,7 @@ class UserInfo:
 _user_cache: Dict[int, UserInfo] = {}
 
 
-def init_db():
+def init_db() -> None:
     """Initialize the database and create tables if they don't exist."""
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
@@ -57,7 +57,7 @@ def _get_user_from_db(user_id: int) -> Optional[UserInfo]:
     return None
 
 
-def _save_user_to_db(user: UserInfo):
+def _save_user_to_db(user: UserInfo) -> None:
     """Insert or update a user record in the database."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()

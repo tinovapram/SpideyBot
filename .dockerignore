@@ -1,31 +1,58 @@
-**/__pycache__
-**/.venv
-**/.classpath
-**/.dockerignore
-**/*.env
+# ═══════════════════════════════════════════════════════════════════════
+# SpideyBot — .dockerignore
+# ═══════════════════════════════════════════════════════════════════════
+
+# ─── Python ─────────────────────────────────────────────────────────
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
+
+# ─── Virtual Environments ───────────────────────────────────────────
+**/.venv/
+**/venv/
+
+# ─── Sensitive / Secrets ────────────────────────────────────────────
+**/.env*
+!.env.example
+
+# ─── Session Files ──────────────────────────────────────────────────
 **/*.session
 **/*.session-journal
-**/data
-**/downloads
-**/.git
-**/.gitignore
-**/.project
-**/.settings
-**/.toolstarget
-**/.vs
-**/.vscode
-**/*.*proj.user
-**/*.dbmdl
-**/*.jfm
-**/bin
-**/charts
-**/docker-compose*
-**/compose*
-**/Dockerfile*
-**/node_modules
-**/npm-debug.log
-**/obj
-**/secrets.dev.yaml
-**/values.dev.yaml
-LICENSE
+**/user_sessions/
+
+# ─── Data (mounted via volume, not baked in) ────────────────────────
+**/data/
+**/downloads/
+**/.gallery-dl/
+
+# ─── Config (mounted or generated at runtime) ───────────────────────
+**/config/runtime/
+
+# ─── Tests & Dev Config ─────────────────────────────────────────────
+tests/
+pyproject.toml
+
+# ─── IDE / Editor ───────────────────────────────────────────────────
+.vscode/
+.idea/
+
+# ─── Git ────────────────────────────────────────────────────────────
+.git/
+.gitignore
+
+# ─── Docker (prevent recursive) ─────────────────────────────────────
+Dockerfile*
+docker-compose*
+compose*
+
+# ─── Documentation ──────────────────────────────────────────────────
 README.md
+Summary.md
+LICENSE
+
+# ─── OS Files ───────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db

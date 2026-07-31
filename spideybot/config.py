@@ -7,10 +7,11 @@ All configuration is loaded once at import time and made available as module-lev
 
 import os
 import re
-import logging
+
+import structlog
 from dotenv import load_dotenv
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 # Load environment variables
 load_dotenv()
@@ -25,15 +26,17 @@ def validate_telegram_config():
     """Validate that required Telegram config is present and well-formed."""
     if not TG_API_ID or not TG_API_HASH or not TG_BOT_TOKEN:
         logger.error(
-            "Missing configuration! Please ensure TG_API_ID, TG_API_HASH, "
-            "and TG_BOT_TOKEN are set in your .env file."
+            "Missing configuration",
+            tg_api_id=bool(TG_API_ID),
+            tg_api_hash=bool(TG_API_HASH),
+            tg_bot_token=bool(TG_BOT_TOKEN),
         )
         raise SystemExit(1)
 
     try:
         api_id = int(TG_API_ID)
     except ValueError:
-        logger.error("TG_API_ID must be a valid integer.")
+        logger.error("TG_API_ID must be a valid integer")
         raise SystemExit(1)
 
     return api_id
@@ -44,22 +47,23 @@ TERABOX_COOKIE = os.getenv("TERABOX_COOKIE")
 TERABOX_JSTOKEN = os.getenv("TERABOX_JSTOKEN")
 TERABOX_BDSTOKEN = os.getenv("TERABOX_BDSTOKEN")
 
-# ─── Reddit / Gallery-dl Configuration ──────────────────────────────
+# ─── Reddit Configuration ─────────────────────────────────────────
+# Fallback chain: PRAW → gallery-dl extractor → fallback defaults
 
-# General / Fallback credentials (gallery-dl specific)
-REDDIT_GDL_CLIENT_ID = os.getenv("REDDIT_GDL_CLIENT_ID", "")
-REDDIT_GDL_CLIENT_SECRET = os.getenv("REDDIT_GDL_CLIENT_SECRET", "")
-REDDIT_GDL_REFRESH_TOKEN = os.getenv("REDDIT_GDL_REFRESH_TOKEN", "")
+# Fallback Reddit credentials (used when PRAW-specific are not set)
+REDDIT_FALLBACK_CLIENT_ID = os.getenv("REDDIT_FALLBACK_CLIENT_ID", os.getenv("REDDIT_GDL_CLIENT_ID", ""))
+REDDIT_FALLBACK_CLIENT_SECRET = os.getenv("REDDIT_FALLBACK_CLIENT_SECRET", os.getenv("REDDIT_GDL_CLIENT_SECRET", ""))
+REDDIT_FALLBACK_REFRESH_TOKEN = os.getenv("REDDIT_FALLBACK_REFRESH_TOKEN", os.getenv("REDDIT_GDL_REFRESH_TOKEN", ""))
 
-# Specific to gallery-dl Reddit extractor
-GDL_REDDIT_CLIENT_ID = os.getenv("GDL_REDDIT_CLIENT_ID", REDDIT_GDL_CLIENT_ID)
-GDL_REDDIT_CLIENT_SECRET = os.getenv("GDL_REDDIT_CLIENT_SECRET", REDDIT_GDL_CLIENT_SECRET)
-GDL_REDDIT_REFRESH_TOKEN = os.getenv("GDL_REDDIT_REFRESH_TOKEN", REDDIT_GDL_REFRESH_TOKEN)
+# gallery-dl Reddit extractor credentials (falls back to REDDIT_FALLBACK_*)
+GDL_REDDIT_CLIENT_ID = os.getenv("GDL_REDDIT_CLIENT_ID", REDDIT_FALLBACK_CLIENT_ID)
+GDL_REDDIT_CLIENT_SECRET = os.getenv("GDL_REDDIT_CLIENT_SECRET", REDDIT_FALLBACK_CLIENT_SECRET)
+GDL_REDDIT_REFRESH_TOKEN = os.getenv("GDL_REDDIT_REFRESH_TOKEN", REDDIT_FALLBACK_REFRESH_TOKEN)
 
-# Specific to RedditDownloader (PRAW)
-REDDIT_PRAW_CLIENT_ID = os.getenv("REDDIT_PRAW_CLIENT_ID", REDDIT_GDL_CLIENT_ID)
-REDDIT_PRAW_CLIENT_SECRET = os.getenv("REDDIT_PRAW_CLIENT_SECRET", REDDIT_GDL_CLIENT_SECRET)
-REDDIT_PRAW_REFRESH_TOKEN = os.getenv("REDDIT_PRAW_REFRESH_TOKEN", REDDIT_GDL_REFRESH_TOKEN)
+# RedditDownloader (PRAW) credentials (falls back to REDDIT_FALLBACK_*)
+REDDIT_PRAW_CLIENT_ID = os.getenv("REDDIT_PRAW_CLIENT_ID", REDDIT_FALLBACK_CLIENT_ID)
+REDDIT_PRAW_CLIENT_SECRET = os.getenv("REDDIT_PRAW_CLIENT_SECRET", REDDIT_FALLBACK_CLIENT_SECRET)
+REDDIT_PRAW_REFRESH_TOKEN = os.getenv("REDDIT_PRAW_REFRESH_TOKEN", REDDIT_FALLBACK_REFRESH_TOKEN)
 
 # ─── Download Management ────────────────────────────────────────────
 
@@ -132,7 +136,7 @@ def _format_size_limit(size_bytes: int) -> str:
     return f"{mb:.0f}MB"
 
 
-def get_size_limit(is_premium: bool, is_admin: bool) -> tuple:
+def get_size_limit(is_premium: bool, is_admin: bool) -> tuple[float | str, str]:
     """
     Get the download size limit for a user tier.
 
@@ -149,5 +153,12 @@ def get_size_limit(is_premium: bool, is_admin: bool) -> tuple:
 
 
 def get_concurrent_limit(is_premium: bool) -> int:
-    """Get the concurrent download limit for a user tier."""
+    """Get the concurrent download limit for a user tier.
+
+    Args:
+        is_premium: Whether the user has a premium subscription.
+
+    Returns:
+        Maximum number of concurrent downloads allowed.
+    """
     return CONCURRENT_LIMIT_PREMIUM if is_premium else CONCURRENT_LIMIT_FREE

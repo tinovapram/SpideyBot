@@ -61,12 +61,12 @@ class YouTubeDownloader(BaseDownloader):
                         "videos": [{"quality": "best", "url": url, "format": "mp4", "use_ytdlp": True}],
                         "audios": []
                     }
-            except Exception:
-                raise RuntimeError(f"Failed to fetch YouTube data: {e}")
+            except Exception as ytdlp_err:
+                raise RuntimeError(f"Failed to fetch YouTube data: vidssave error={e}, yt-dlp error={ytdlp_err}") from e
 
     def download(self, url: str, output_dir: str = "downloads") -> list:
         info = self.fetch_media(url)
-        title = self._sanitize_filename(info["title"])
+        safe_title = self._sanitize_filename(info["title"])
         
         # Download best quality video
         video_url = None
@@ -80,7 +80,7 @@ class YouTubeDownloader(BaseDownloader):
         if not video_url:
             raise ValueError("No download links found for YouTube video")
 
-        file_path = os.path.join(output_dir, f"{title}.mp4")
+        file_path = os.path.join(output_dir, f"{safe_title}.mp4")
         
         if use_ytdlp:
             import yt_dlp

@@ -49,17 +49,17 @@ Usage:
     result = tb("https://terabox.com/s/1ABCDEFG...")
 """
 
-import requests
+import aiohttp
+import asyncio
 import json
 import urllib.parse
 import re
 import os
 import time
-import logging
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Tuple, Callable
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+
+import structlog
 
 # Auto-load .env file if python-dotenv is installed
 try:
@@ -179,7 +179,8 @@ class TeraBoxDownloader:
         sign:      Request signature (or env TERABOX_SIGN)
         timestamp: Request timestamp (or env TERABOX_TIMESTAMP)
         logid:     Log ID (or env TERABOX_LOGID)
-        root_path: Account folder to copy files into (default: /cloudvids)
+        root_path: Account folder to copy shared files into before downloading
+                    (default: /downloads, overridden per-user in handler)
         timeout:   HTTP request timeout in seconds (default: 30)
         auto_resolve_tokens: If True, auto-resolve jsToken and bdstoken
                              from session when not provided (default: True)
@@ -231,7 +232,7 @@ class TeraBoxDownloader:
         sign: str = None,
         timestamp: str = None,
         logid: str = None,
-        root_path: str = "/cloudvids",
+        root_path: str = None,
         timeout: int = 30,
         auto_resolve_tokens: bool = True,
         max_retries: int = 3,
@@ -239,7 +240,7 @@ class TeraBoxDownloader:
         pool_connections: int = 10,
         pool_maxsize: int = 20,
     ):
-        self.logger = logging.getLogger("TeraBoxDownloader")
+        self.logger = structlog.get_logger("TeraBoxDownloader")
 
         # ── Cookie ───────────────────────────────────────────────────
         self.cookie = cookie or os.environ.get("TERABOX_COOKIE", "")
@@ -258,9 +259,16 @@ class TeraBoxDownloader:
         self.timestamp = timestamp or os.environ.get("TERABOX_TIMESTAMP", "")
         self.logid = logid or os.environ.get("TERABOX_LOGID", "")
 
-        self.root_path = root_path
+        # root_path: staging folder on the bot's own TeraBox account.
+        # Overridden per-task in terabox_handler to /downloads/{user_id}/terabox.
+        self.root_path = root_path or "/downloads"
         self.timeout = timeout
         self._tokens_resolved = False
+
+        # ── Store config for lazy session creation ───────────────────
+        self._max_retries = max_retries
+        self._backoff_factor = backoff_factor
+        self._pool_maxsize = pool_maxsize
 
         # ── HTTP Headers ─────────────────────────────────────────────
         self._headers = {
@@ -271,61 +279,109 @@ class TeraBoxDownloader:
             "X-Requested-With": "XMLHttpRequest",
         }
 
-        # ── Build session with connection pooling and retry ──────────
-        self.session = requests.Session()
-        self.session.headers.update(self._headers)
-        self.session.cookies.update(self._cookies_dict)
+        # ── Lazy aiohttp session (created on first request) ─────────
+        self.session: Optional[aiohttp.ClientSession] = None
+        self._auto_resolve_tokens = auto_resolve_tokens
+        self._session_lock = asyncio.Lock() if hasattr(asyncio, '_get_running_loop') else None
 
-        retry_strategy = Retry(
-            total=max_retries,
-            backoff_factor=backoff_factor,
-            status_forcelist=[500, 502, 503, 504],
-            allowed_methods=["GET", "POST"],
-        )
-        adapter = HTTPAdapter(
-            pool_connections=pool_connections,
-            pool_maxsize=pool_maxsize,
-            max_retries=retry_strategy,
-        )
-        self.session.mount("https://", adapter)
-        self.session.mount("http://", adapter)
+    # ─── Session Lifecycle ──────────────────────────────────────────
 
-        # ── Auto-resolve tokens if needed ────────────────────────────
-        if auto_resolve_tokens and (not self.js_token or not self.bds_token):
+    async def _ensure_session(self) -> aiohttp.ClientSession:
+        """Lazily create the aiohttp session on first use."""
+        if self.session is None or self.session.closed:
+            connector = aiohttp.TCPConnector(
+                limit=10,
+                limit_per_host=self._pool_maxsize,
+                enable_cleanup_closed=True,
+            )
+            timeout = aiohttp.ClientTimeout(total=self.timeout)
+            self.session = aiohttp.ClientSession(
+                headers=self._headers,
+                cookies=self._cookies_dict,
+                connector=connector,
+                timeout=timeout,
+            )
+            # Auto-resolve tokens on first use
+            if self._auto_resolve_tokens and (not self.js_token or not self.bds_token):
+                try:
+                    await self._resolve_tokens()
+                except Exception as e:
+                    self.logger.warning(
+                        "Auto-resolve tokens failed, manual tokens may be needed",
+                        error=str(e),
+                    )
+        return self.session
+
+    async def close(self):
+        """Close the aiohttp session and release resources."""
+        if self.session and not self.session.closed:
+            await self.session.close()
+            self.session = None
+
+    async def __aenter__(self):
+        await self._ensure_session()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.close()
+
+    async def _request_with_retry(
+        self,
+        method: str,
+        url: str,
+        **kwargs,
+    ) -> aiohttp.ClientResponse:
+        """HTTP request with exponential backoff retry."""
+        session = await self._ensure_session()
+        last_exc = None
+        for attempt in range(self._max_retries):
             try:
-                self._resolve_tokens()
-            except Exception as e:
-                self.logger.warning(
-                    f"Auto-resolve tokens failed: {e}. "
-                    f"You may need to provide js_token and bds_token manually."
-                )
+                resp = await session.request(method, url, **kwargs)
+                if resp.status in (500, 502, 503, 504) and attempt < self._max_retries - 1:
+                    await resp.release()
+                    wait = self._backoff_factor * (2 ** attempt)
+                    self.logger.debug("HTTP retry", status=resp.status, url=url, wait=f"{wait:.1f}s", attempt=attempt+1)
+                    await asyncio.sleep(wait)
+                    continue
+                return resp
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                last_exc = e
+                if attempt < self._max_retries - 1:
+                    wait = self._backoff_factor * (2 ** attempt)
+                    self.logger.debug("Request error, retrying", url=url, error=str(e), wait=f"{wait:.1f}s")
+                    await asyncio.sleep(wait)
+                    continue
+                raise
+        raise last_exc or RuntimeError("Request failed after retries")
 
     # ─── Token Auto-Resolution ───────────────────────────────────────
 
-    def _resolve_tokens(self):
+    async def _resolve_tokens(self):
         """
         Scrape jsToken and bdstoken from the TeraBox main page.
 
         The TeraBox web app embeds these tokens in the page HTML/JS when
         you load the main drive page with a valid session cookie.
         """
-        self.logger.info("Auto-resolving jsToken and bdstoken from session...")
+        self.logger.info("Auto-resolving tokens from session")
 
         try:
-            r = self.session.get(f"{self.BASE_API}/main", timeout=self.timeout)
-            if r.status_code != 200:
+            r = await self._request_with_retry("GET", f"{self.BASE_API}/main")
+            if r.status != 200:
+                await r.release()
                 raise TeraBoxAuthError(
-                    f"Main page returned HTTP {r.status_code}. Cookie may be invalid."
+                    f"Main page returned HTTP {r.status}. Cookie may be invalid."
                 )
 
-            html = urllib.parse.unquote(r.text)
+            html = urllib.parse.unquote(await r.text())
+            await r.release()
 
             # Extract bdstoken
             if not self.bds_token:
                 m = self._BDSTOKEN_PATTERN.findall(html)
                 if m:
                     self.bds_token = m[0]
-                    self.logger.info(f"Resolved bdstoken: {self.bds_token[:8]}...")
+                    self.logger.info("Resolved bdstoken", prefix=f"{self.bds_token[:8]}...")
                 else:
                     self.logger.warning("Could not find bdstoken in page HTML")
 
@@ -335,7 +391,7 @@ class TeraBoxDownloader:
                     m = pattern.findall(html)
                     if m:
                         self.js_token = m[0]
-                        self.logger.info(f"Resolved jsToken: {self.js_token[:16]}...")
+                        self.logger.info("Resolved jsToken", prefix=f"{self.js_token[:16]}...")
                         break
                 if not self.js_token:
                     self.logger.warning("Could not find jsToken in page HTML")
@@ -381,8 +437,10 @@ class TeraBoxDownloader:
         if cookie:
             self.cookie = cookie
             self._cookies_dict = self._parse_cookies(cookie)
-            self.session.cookies.clear()
-            self.session.cookies.update(self._cookies_dict)
+            if self.session and not self.session.closed:
+                # aiohttp cookies are immutable after creation; recreate is simplest
+                self.logger.info("Cookie updated, session will be recreated")
+                self.session = None
         if js_token:
             self.js_token = js_token
         if bds_token:
@@ -394,7 +452,7 @@ class TeraBoxDownloader:
         if logid:
             self.logid = logid
 
-    def validate_session(self) -> Tuple[bool, str]:
+    async def validate_session(self) -> Tuple[bool, str]:
         """
         Verify if the current cookie session is valid by checking for a
         bdstoken in the main page response.
@@ -403,11 +461,14 @@ class TeraBoxDownloader:
             (bool, str): (is_valid, message)
         """
         try:
-            r = self.session.get(f"{self.BASE_API}/main", timeout=self.timeout)
-            if r.status_code != 200:
-                return False, f"HTTP status {r.status_code}"
+            r = await self._request_with_retry("GET", f"{self.BASE_API}/main")
+            if r.status != 200:
+                await r.release()
+                return False, f"HTTP status {r.status}"
 
-            m = self._BDSTOKEN_PATTERN.findall(r.text)
+            text = await r.text()
+            await r.release()
+            m = self._BDSTOKEN_PATTERN.findall(text)
             if m:
                 return True, "Valid"
             return False, "bdstoken not found (session likely expired or invalid)"
@@ -508,7 +569,7 @@ class TeraBoxDownloader:
             params += f"&dp-logid={self.logid}"
         return params
 
-    def _get_share_list(
+    async def _get_share_list(
         self, surl: str, dir_path: str = "/", root: int = 1
     ) -> Dict[str, Any]:
         """
@@ -538,10 +599,12 @@ class TeraBoxDownloader:
             f"&order=time&desc=1"
             f"&num=100&page=1"
         )
-        self.logger.debug(f"Resolving share: GET {url}")
-        r = self.session.get(url, timeout=self.timeout)
-        r.raise_for_status()
-        data = r.json()
+        self.logger.debug("Resolving share", url=url)
+        r = await self._request_with_retry("GET", url)
+        try:
+            data = await r.json()
+        finally:
+            await r.release()
 
         errno = data.get("errno", -1)
         if errno != 0:
@@ -564,7 +627,7 @@ class TeraBoxDownloader:
 
 
 
-    def _list_dir(self, path: str) -> List[Dict]:
+    async def _list_dir(self, path: str) -> List[Dict]:
         """
         List files in a directory in the user's own storage.
 
@@ -583,17 +646,24 @@ class TeraBoxDownloader:
             f"&order=time&desc=1&num=1000"
         )
         try:
-            r = self.session.get(url, timeout=self.timeout)
-            data = r.json()
+            r = await self._request_with_retry("GET", url)
+            try:
+                data = await r.json()
+            finally:
+                await r.release()
             if data.get("errno") == 0:
                 return data.get("list") or []
-        except Exception:
-            pass
+            else:
+                self.logger.warning(
+                    "_list_dir API error", path=path, errno=data.get("errno"), errmsg=data.get("errmsg", "unknown")
+                )
+        except Exception as e:
+            self.logger.warning("_list_dir request failed", path=path, error=str(e))
         return []
 
-    def _get_existing_files(self) -> Dict[str, Dict[str, Any]]:
+    async def _get_existing_files(self) -> Dict[str, Dict[str, Any]]:
         """Get dict of filenames already in the root_path folder mapped to their metadata."""
-        items = self._list_dir(self.root_path)
+        items = await self._list_dir(self.root_path)
         return {
             item.get("server_filename"): {
                 "fs_id": str(item.get("fs_id", "")),
@@ -603,7 +673,7 @@ class TeraBoxDownloader:
             for item in items if item.get("server_filename")
         }
 
-    def _ensure_root_dir(self):
+    async def _ensure_root_dir(self):
         """Create the root_path directory if it doesn't exist."""
         url = (
             f"{self.BASE_API}/api/create"
@@ -616,11 +686,12 @@ class TeraBoxDownloader:
             "block_list": "[]",
         }
         try:
-            self.session.post(url, data=payload, timeout=self.timeout)
-        except Exception:
-            pass  # Directory may already exist
+            r = await self._request_with_retry("POST", url, data=payload)
+            await r.release()
+        except Exception as e:
+            self.logger.warning("Failed to create root directory", path=self.root_path, error=str(e))  # Directory may already exist
 
-    def _transfer_file(
+    async def _transfer_file(
         self, share_id: int, uk: int, fs_id: str, filename: str
     ) -> Dict[str, Any]:
         """
@@ -648,9 +719,12 @@ class TeraBoxDownloader:
             "path": self.root_path,
         }
 
-        self.logger.debug(f"Transferring {filename} (fs_id={fs_id})")
-        r = self.session.post(url, data=payload, timeout=self.timeout)
-        data = r.json()
+        self.logger.debug("Transferring file", filename=filename, fs_id=fs_id)
+        r = await self._request_with_retry("POST", url, data=payload)
+        try:
+            data = await r.json()
+        finally:
+            await r.release()
         errno = data.get("errno", -1)
 
         result = {"status": "success", "errno": errno, "raw": data}
@@ -669,7 +743,7 @@ class TeraBoxDownloader:
 
         return result
 
-    def _get_download_link(self, fs_id: str) -> Optional[str]:
+    async def _get_download_link(self, fs_id: str) -> Optional[str]:
         """
         Step 3: Resolve the direct download link for a file in account storage.
 
@@ -694,8 +768,11 @@ class TeraBoxDownloader:
             f"&bdstoken={self.bds_token}"
         )
 
-        r = self.session.get(url, timeout=self.timeout)
-        data = r.json()
+        r = await self._request_with_retry("GET", url)
+        try:
+            data = await r.json()
+        finally:
+            await r.release()
 
         if data.get("errno") == 0:
             info = data.get("list") or data.get("info") or []
@@ -704,7 +781,7 @@ class TeraBoxDownloader:
 
         return None
 
-    def _get_stream_info(
+    async def _get_stream_info(
         self,
         path: str,
         wait_for_transcoding: bool = False,
@@ -733,22 +810,26 @@ class TeraBoxDownloader:
 
         max_attempts = 10 if wait_for_transcoding else 1
         for attempt in range(max_attempts):
-            r = self.session.get(url, timeout=self.timeout)
-            
-            # If the response contains EXTM3U playlist, it means it is ready and transcoded
-            if r.status_code == 200 and "#EXTM3U" in r.text:
-                return {
-                    "stream_url": url,
-                    "stream_ready": True,
-                    "stream_m3u8": r.text,
-                }
-            
+            r = await self._request_with_retry("GET", url)
             try:
-                data = r.json()
-                errno = data.get("errno", -1)
-            except Exception:
-                errno = -1
-                data = {}
+                # If the response contains EXTM3U playlist, it means it is ready and transcoded
+                text = await r.text()
+                if r.status == 200 and "#EXTM3U" in text:
+                    return {
+                        "stream_url": url,
+                        "stream_ready": True,
+                        "stream_m3u8": text,
+                    }
+
+                try:
+                    data = await r.json()
+                    errno = data.get("errno", -1)
+                except Exception as json_err:
+                    self.logger.debug("Failed to parse stream info response as JSON", error=str(json_err))
+                    errno = -1
+                    data = {}
+            finally:
+                await r.release()
 
             if errno == 0:
                 return {
@@ -757,12 +838,12 @@ class TeraBoxDownloader:
                     "ltime": data.get("ltime"),
                 }
             elif errno == 130 and wait_for_transcoding:
-                # errno 130 = transcoding in progress
+                # errno 130 = transcoding in progress — wait and retry
                 self.logger.info(
-                    f"Transcoding in progress (attempt {attempt + 1}/{max_attempts}), "
-                    f"waiting 5s..."
+                    "Transcoding in progress, waiting",
+                    attempt=f"{attempt + 1}/{max_attempts}",
                 )
-                time.sleep(5)
+                await asyncio.sleep(5)
             else:
                 break
 
@@ -773,7 +854,7 @@ class TeraBoxDownloader:
             "error": data.get("errmsg") if data else f"Streaming error (errno {errno})"
         }
 
-    def _process_file(
+    async def _process_file(
         self,
         item: Dict,
         share_id: int,
@@ -832,7 +913,7 @@ class TeraBoxDownloader:
         my_fs_id = fs_id
         try:
             if filename not in existing_files:
-                transfer = self._transfer_file(share_id, uk, fs_id, filename)
+                transfer = await self._transfer_file(share_id, uk, fs_id, filename)
                 result.transfer_status = transfer["status"]
                 if transfer["status"] == "error":
                     result.error = transfer.get("error")
@@ -844,8 +925,8 @@ class TeraBoxDownloader:
                         to_fs_id = str(extra_list[0].get("to_fs_id", ""))
                         if to_fs_id:
                             my_fs_id = to_fs_id
-                except Exception:
-                    pass
+                except Exception as to_fs_err:
+                    self.logger.debug("Failed to extract to_fs_id from transfer response", error=str(to_fs_err))
             else:
                 result.transfer_status = "already_exists"
                 my_fs_id = existing_files[filename].get("fs_id") or fs_id
@@ -857,7 +938,7 @@ class TeraBoxDownloader:
         # Resolve download link
         if action in ("download", "stream"):
             try:
-                dlink = self._get_download_link(my_fs_id)
+                dlink = await self._get_download_link(my_fs_id)
                 result.dlink = dlink
             except Exception as e:
                 result.error = f"Failed to get download link: {e}"
@@ -866,7 +947,7 @@ class TeraBoxDownloader:
         if action == "stream" and category in (1, 3):
             try:
                 target_path = f"{self.root_path}/{filename}"
-                stream_info = self._get_stream_info(
+                stream_info = await self._get_stream_info(
                     target_path,
                     wait_for_transcoding=wait_for_transcoding,
                 )
@@ -884,7 +965,7 @@ class TeraBoxDownloader:
 
     # ─── Public API ──────────────────────────────────────────────────
 
-    def resolve(
+    async def resolve(
         self,
         url: str,
         mode: str = "download",
@@ -922,16 +1003,16 @@ class TeraBoxDownloader:
         except Exception as e:
             raise TeraBoxURLError(f"Failed to parse URL: {e}")
 
-        self.logger.info(f"Resolving surl={surl}, mode={mode}")
+        self.logger.info("Resolving surl", surl=surl, mode=mode)
 
         # Ensure root directory exists (for transfer)
         if mode != "list":
-            self._ensure_root_dir()
+            await self._ensure_root_dir()
 
         # Get share info (Step 1: resolve link)
         try:
             # First fetch root folder list to get share_id, uk, and title
-            root_info = self._get_share_list(surl, dir_path="/", root=1)
+            root_info = await self._get_share_list(surl, dir_path="/", root=1)
             share_id = root_info["share_id"]
             uk = root_info["uk"]
             title = root_info["title"]
@@ -943,14 +1024,14 @@ class TeraBoxDownloader:
             while queue:
                 current_dir, is_root = queue.pop(0)
                 try:
-                    dir_info = self._get_share_list(surl, dir_path=current_dir, root=is_root)
+                    dir_info = await self._get_share_list(surl, dir_path=current_dir, root=is_root)
                     items = dir_info.get("file_list") or []
                     for item in items:
                         file_list.append(item)
                         if int(item.get("isdir", 0)) == 1:
                             queue.append((item.get("path"), 0))
                 except Exception as e:
-                    self.logger.error(f"Failed to list directory {current_dir}: {e}")
+                    self.logger.error("Failed to list directory", directory=current_dir, error=str(e))
         except TeraBoxAPIError:
             raise
         except Exception as e:
@@ -971,20 +1052,21 @@ class TeraBoxDownloader:
         # Get existing files to skip re-transfers
         existing_files = set()
         if mode != "list":
-            existing_files = self._get_existing_files()
+            existing_files = await self._get_existing_files()
 
-        # Process each file
-        resolved_files = []
-        for item in file_list:
-            tb_file = self._process_file(
-                item=item,
-                share_id=share_id,
-                uk=uk,
-                existing_files=existing_files,
-                action=mode,
-                wait_for_transcoding=wait_for_transcoding,
-            )
-            resolved_files.append(tb_file)
+        # Parallel file processing with concurrency limit
+        semaphore = asyncio.Semaphore(5)
+        async def _process_with_limit(item):
+            async with semaphore:
+                return await self._process_file(
+                    item=item,
+                    share_id=share_id,
+                    uk=uk,
+                    existing_files=existing_files,
+                    action=mode,
+                    wait_for_transcoding=wait_for_transcoding,
+                )
+        resolved_files = list(await asyncio.gather(*[_process_with_limit(item) for item in file_list]))
 
         return TeraBoxResult(
             status="success",
@@ -995,7 +1077,7 @@ class TeraBoxDownloader:
             raw_response=raw_response,
         )
 
-    def list_files(self, url: str) -> TeraBoxResult:
+    async def list_files(self, url: str) -> TeraBoxResult:
         """
         List files in a TeraBox share without downloading or transferring.
 
@@ -1005,9 +1087,9 @@ class TeraBoxDownloader:
         Returns:
             TeraBoxResult with file metadata only
         """
-        return self.resolve(url, mode="list")
+        return await self.resolve(url, mode="list")
 
-    def get_download_links(self, url: str) -> TeraBoxResult:
+    async def get_download_links(self, url: str) -> TeraBoxResult:
         """
         Resolve a TeraBox share link and get direct download links.
 
@@ -1017,9 +1099,9 @@ class TeraBoxDownloader:
         Returns:
             TeraBoxResult with direct download links in each file's dlink
         """
-        return self.resolve(url, mode="download")
+        return await self.resolve(url, mode="download")
 
-    def get_stream_links(
+    async def get_stream_links(
         self, url: str, wait: bool = False
     ) -> TeraBoxResult:
         """
@@ -1032,9 +1114,9 @@ class TeraBoxDownloader:
         Returns:
             TeraBoxResult with HLS streaming URLs
         """
-        return self.resolve(url, mode="stream", wait_for_transcoding=wait)
+        return await self.resolve(url, mode="stream", wait_for_transcoding=wait)
 
-    def download(
+    async def download(
         self,
         url: str,
         output_dir: str = ".",
@@ -1057,7 +1139,7 @@ class TeraBoxDownloader:
         Raises:
             TeraBoxError: If resolution or download fails
         """
-        result = self.resolve(url, mode="download")
+        result = await self.resolve(url, mode="download")
 
         if not result.ok:
             raise TeraBoxError(f"Failed to resolve: {result.error}")
@@ -1067,30 +1149,27 @@ class TeraBoxDownloader:
 
         for tb_file in result.files:
             if not tb_file.dlink:
-                self.logger.warning(f"No download link for {tb_file.filename}")
+                self.logger.warning("No download link for file", filename=tb_file.filename)
                 continue
 
             filepath = os.path.join(output_dir, tb_file.filename)
             self.logger.info(
-                f"Downloading {tb_file.filename} ({tb_file.size_mb:.2f} MB)..."
+                "Downloading file", filename=tb_file.filename, size_mb=tb_file.size_mb
             )
 
             try:
                 # Download with proper User-Agent (required by TeraBox CDN)
-                r = self.session.get(
+                r = await self._request_with_retry(
+                    "GET",
                     tb_file.dlink,
-                    stream=True,
-                    timeout=self.timeout,
                     headers={"User-Agent": self.USER_AGENT},
                 )
-                r.raise_for_status()
+                try:
+                    total = int(r.headers.get("content-length", 0))
+                    downloaded = 0
 
-                total = int(r.headers.get("content-length", 0))
-                downloaded = 0
-
-                with open(filepath, "wb") as f:
-                    for chunk in r.iter_content(chunk_size=chunk_size):
-                        if chunk:
+                    with open(filepath, "wb") as f:
+                        async for chunk in r.content.iter_chunked(chunk_size):
                             f.write(chunk)
                             downloaded += len(chunk)
                             if progress_callback:
@@ -1098,11 +1177,13 @@ class TeraBoxDownloader:
                                     tb_file.filename, downloaded, total
                                 )
 
-                downloaded_paths.append(filepath)
-                self.logger.info(f"Saved: {filepath}")
+                    downloaded_paths.append(filepath)
+                    self.logger.info("File saved", path=filepath)
+                finally:
+                    await r.release()
 
             except Exception as e:
-                self.logger.error(f"Download failed for {tb_file.filename}: {e}")
+                self.logger.error("Download failed", filename=tb_file.filename, error=str(e))
                 raise TeraBoxError(
                     f"Download failed for {tb_file.filename}: {e}"
                 )
@@ -1168,7 +1249,7 @@ class TeraBoxDownloader:
         tokens = "resolved" if self._tokens_resolved else "manual"
         return f"TeraBoxDownloader(ndus={masked!r}, tokens={tokens}, root={self.root_path!r})"
 
-    def __call__(self, url: str, mode: str = "download", **kwargs) -> TeraBoxResult:
+    async def __call__(self, url: str, mode: str = "download", **kwargs) -> TeraBoxResult:
         """
         Make the instance callable — resolves a share link directly.
 
@@ -1176,7 +1257,7 @@ class TeraBoxDownloader:
             tb = TeraBoxDownloader(...)
             result = tb("https://terabox.com/s/1ABCDEFG...")
         """
-        return self.resolve(url, mode=mode, **kwargs)
+        return await self.resolve(url, mode=mode, **kwargs)
 
 
 # ─── CLI Entry Point ─────────────────────────────────────────────────
@@ -1210,76 +1291,83 @@ if __name__ == "__main__":
         sys.exit(1)
 
     # Configure logger to only output warnings/errors to prevent polluting stdout JSON
-    logging.getLogger("TeraBoxDownloader").setLevel(logging.WARNING)
-    logging.basicConfig(level=logging.WARNING, format="%(asctime)s - %(levelname)s - %(message)s")
+    import logging as _logging
+    _logging.getLogger("TeraBoxDownloader").setLevel(_logging.WARNING)
+    _logging.basicConfig(level=_logging.WARNING, format="%(asctime)s - %(levelname)s - %(message)s")
 
-    # Action 1: Validate session cookie
-    if args.validate:
+    async def main():
+        # Action 1: Validate session cookie
+        if args.validate:
+            try:
+                tb = TeraBoxDownloader(cookie=args.cookie) if args.cookie else TeraBoxDownloader()
+                is_valid, msg = await tb.validate_session()
+                print(json.dumps({
+                    "valid": is_valid,
+                    "message": msg
+                }, indent=2))
+                await tb.close()
+                sys.exit(0 if is_valid else 1)
+            except Exception as e:
+                print(json.dumps({
+                    "valid": False,
+                    "error": str(e)
+                }, indent=2))
+                sys.exit(1)
+
+        # Action 2: Resolve URL
+        tb = TeraBoxDownloader(cookie=args.cookie) if args.cookie else TeraBoxDownloader()
         try:
-            tb = TeraBoxDownloader(cookie=args.cookie) if args.cookie else TeraBoxDownloader()
-            is_valid, msg = tb.validate_session()
-            print(json.dumps({
-                "valid": is_valid,
-                "message": msg
-            }, indent=2))
-            sys.exit(0 if is_valid else 1)
+            result = await tb.resolve(args.url, mode=args.mode)
+
+            # Print results as JSON
+            print(json.dumps(tb.to_dict(result), indent=2))
+
+            if not result.ok:
+                sys.exit(1)
+
+            # Download files if requested
+            if args.mode == "download" and args.download:
+                sys.stderr.write("\nStarting download of resolved files...\n")
+
+                def progress(filename, downloaded, total):
+                    if total > 0:
+                        pct = downloaded / total * 100
+                        sys.stderr.write(f"\r  {filename}: {pct:.1f}% ({downloaded / 1024 / 1024:.2f} / {total / 1024 / 1024:.2f} MB)")
+                        sys.stderr.flush()
+
+                for tb_file in result.files:
+                    if tb_file.is_dir or not tb_file.dlink or tb_file.error:
+                        continue
+                    filepath = os.path.join(args.output_dir, tb_file.filename)
+                    sys.stderr.write(f"\nDownloading {tb_file.filename} ({tb_file.size_mb:.2f} MB)...\n")
+
+                    os.makedirs(args.output_dir, exist_ok=True)
+                    r = await tb._request_with_retry(
+                        "GET",
+                        tb_file.dlink,
+                        headers={"User-Agent": tb.USER_AGENT},
+                    )
+                    try:
+                        total = int(r.headers.get("content-length", 0))
+                        downloaded = 0
+                        with open(filepath, "wb") as f:
+                            async for chunk in r.content.iter_chunked(8192):
+                                f.write(chunk)
+                                downloaded += len(chunk)
+                                progress(tb_file.filename, downloaded, total)
+                    finally:
+                        await r.release()
+                    sys.stderr.write("\n")
+
+                sys.stderr.write("\n[SUCCESS] All downloads completed!\n")
+
         except Exception as e:
             print(json.dumps({
-                "valid": False,
+                "status": "error",
                 "error": str(e)
             }, indent=2))
             sys.exit(1)
+        finally:
+            await tb.close()
 
-    # Action 2: Resolve URL
-    try:
-        tb = TeraBoxDownloader(cookie=args.cookie) if args.cookie else TeraBoxDownloader()
-        result = tb.resolve(args.url, mode=args.mode)
-        
-        # Print results as JSON
-        print(json.dumps(tb.to_dict(result), indent=2))
-        
-        if not result.ok:
-            sys.exit(1)
-            
-        # Download files if requested
-        if args.mode == "download" and args.download:
-            sys.stderr.write("\nStarting download of resolved files...\n")
-            
-            def progress(filename, downloaded, total):
-                if total > 0:
-                    pct = downloaded / total * 100
-                    sys.stderr.write(f"\r  {filename}: {pct:.1f}% ({downloaded / 1024 / 1024:.2f} / {total / 1024 / 1024:.2f} MB)")
-                    sys.stderr.flush()
-                    
-            for tb_file in result.files:
-                if tb_file.is_dir or not tb_file.dlink or tb_file.error:
-                    continue
-                filepath = os.path.join(args.output_dir, tb_file.filename)
-                sys.stderr.write(f"\nDownloading {tb_file.filename} ({tb_file.size_mb:.2f} MB)...\n")
-                
-                os.makedirs(args.output_dir, exist_ok=True)
-                r = tb.session.get(
-                    tb_file.dlink,
-                    stream=True,
-                    timeout=tb.timeout,
-                    headers={"User-Agent": tb.USER_AGENT},
-                )
-                r.raise_for_status()
-                total = int(r.headers.get("content-length", 0))
-                downloaded = 0
-                with open(filepath, "wb") as f:
-                    for chunk in r.iter_content(chunk_size=8192):
-                        if chunk:
-                            f.write(chunk)
-                            downloaded += len(chunk)
-                            progress(tb_file.filename, downloaded, total)
-                sys.stderr.write("\n")
-            
-            sys.stderr.write("\n[SUCCESS] All downloads completed!\n")
-            
-    except Exception as e:
-        print(json.dumps({
-            "status": "error",
-            "error": str(e)
-        }, indent=2))
-        sys.exit(1)
+    asyncio.run(main())

@@ -1,14 +1,33 @@
-telethon>=1.35.0
+# ── Telegram Client ──────────────────────────────────────────────
+telethon[speedup]>=1.35.0       # [speedup] includes cryptg for faster crypto
+cryptg                          # C-accelerated decrypt (recommended by Telethon for fast downloads)
+hachoir                         # Media metadata extraction (used by Telethon for audio/video)
+pillow                          # Photo auto-resize (used by Telethon to avoid PhotoInvalidDimensionsError)
+
+# ── Configuration ───────────────────────────────────────────────
 python-dotenv>=1.0.1
+structlog>=24.1.0
+
+# ── HTTP & Networking ───────────────────────────────────────────
 requests>=2.31.0
-hachoir
-pillow
-cryptg
-gallery-dl
-yt-dlp[default,curl-cffi]
-beautifulsoup4
-praw
-mutagen
-pycryptodomex
-zstandard
-PySocks
+aiohttp>=3.9.0
+requests[socks]                  # SOCKS proxy support (PySocks backend)
+PySocks                          # SOCKS proxy (Telethon + requests)
+beautifulsoup4                   # HTML parsing (TikTok, Pinterest, Threads, etc.)
+
+# ── Security & Encryption ──────────────────────────────────────
+cryptography>=42.0.0             # Fernet session encryption
+
+# ── Media Downloaders (CLI tools) ──────────────────────────────
+gallery-dl                       # Multi-site media downloader (subprocess)
+yt-dlp[default,curl-cffi]        # Video downloader (subprocess)
+
+# ── Reddit ──────────────────────────────────────────────────────
+praw                             # Reddit API (PRAW-based downloader)
+
+# ── TeraBox ────────────────────────────────────────────────────
+pycryptodomex                    # AES decryption for TeraBox streams (yt-dlp dep)
+
+# ── Testing ────────────────────────────────────────────────────
+pytest                           # Test framework
+pytest-asyncio                   # Async test support for pytest

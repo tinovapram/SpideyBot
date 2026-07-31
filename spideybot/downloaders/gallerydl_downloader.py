@@ -2,14 +2,15 @@ import os
 import sys
 import json
 import asyncio
-import logging
 import shutil
 from typing import List
 
-logger = logging.getLogger(__name__)
+import structlog
+
+logger = structlog.get_logger(__name__)
 
 class GalleryDLDownloader:
-    def __init__(self, download_dir="./downloads", user_config_path="./gallery-dl.json", runtime_config_path="./data/gallery-dl-runtime.json"):
+    def __init__(self, download_dir="./downloads", user_config_path="./config/gallery-dl.json", runtime_config_path="./config/runtime/gallery-dl-runtime.json"):
         self.download_dir = download_dir
         self.user_config_path = user_config_path
         self.runtime_config_path = runtime_config_path
@@ -36,14 +37,15 @@ class GalleryDLDownloader:
             "module": "yt_dlp"
         }
         # Ensure a yt-dlp config file exists to avoid yt-dlp errors; create empty if missing
-        yt_conf_path = "./yt-dlp.conf"
+        yt_conf_path = "./config/yt-dlp.conf"
         try:
             if not os.path.exists(yt_conf_path):
                 # Create an empty file so yt-dlp won't error when gallery-dl points to it
-                open(yt_conf_path, "a", encoding="utf-8").close()
-                logger.info(f"Created empty {yt_conf_path} to avoid yt-dlp errors")
+                from pathlib import Path
+                Path(yt_conf_path).touch(exist_ok=True)
+                logger.info("Created empty config to avoid yt-dlp errors", path=yt_conf_path)
         except Exception as e:
-            logger.error(f"Failed to ensure {yt_conf_path} exists: {e}")
+            logger.error("Failed to ensure config exists", path=yt_conf_path, error=str(e))
         # Always reference the config file (now guaranteed to exist or attempted)
         extractor_config["ytdl"]["config-file"] = yt_conf_path
 
@@ -68,9 +70,9 @@ class GalleryDLDownloader:
         try:
             with open(self.runtime_config_path, "w", encoding="utf-8") as f:
                 json.dump(config_data, f, indent=4)
-            logger.info(f"Generated runtime gallery-dl config at {self.runtime_config_path}")
+            logger.info("Generated runtime gallery-dl config", path=self.runtime_config_path)
         except Exception as e:
-            logger.error(f"Failed to write runtime gallery-dl config: {e}")
+            logger.error("Failed to write runtime gallery-dl config", error=str(e))
 
     async def download(self, url: str, task_id: str, max_size_bytes: int, progress_callback=None) -> List[str]:
         """
@@ -89,7 +91,7 @@ class GalleryDLDownloader:
         cmd.extend(["--config", self.runtime_config_path])
         cmd.extend(["--destination", dest_dir, "--no-mtime", "--write-metadata", url])
         
-        logger.info(f"Running gallery-dl command: {' '.join(cmd)}")
+        logger.info("Running gallery-dl command", command=" ".join(cmd))
         
         try:
             process = await asyncio.create_subprocess_exec(
@@ -98,7 +100,7 @@ class GalleryDLDownloader:
                 stderr=asyncio.subprocess.PIPE
             )
         except FileNotFoundError:
-            logger.info("gallery-dl executable not found in PATH. Falling back to python -m gallery_dl...")
+            logger.info("gallery-dl not found in PATH, falling back to python -m gallery_dl")
             cmd = [sys.executable, "-m", "gallery_dl"]
             if os.path.exists(self.user_config_path):
                 cmd.extend(["--config", self.user_config_path])
@@ -137,12 +139,12 @@ class GalleryDLDownloader:
             while process.returncode is None:
                 current_size = get_dir_size(dest_dir)
                 if current_size > max_size_bytes:
-                    logger.warning(f"Download size {current_size} bytes exceeded limit of {max_size_bytes} bytes. Terminating process.")
+                    logger.warning("Download size exceeded limit, terminating", current_size=current_size, limit=max_size_bytes)
                     exceeded = True
                     try:
                         process.terminate()
                     except Exception as e:
-                        logger.error(f"Failed to terminate gallery-dl process: {e}")
+                        logger.error("Failed to terminate gallery-dl process", error=str(e))
                     break
                 await asyncio.sleep(1.0)
 
@@ -191,7 +193,7 @@ class GalleryDLDownloader:
         if process.returncode != 0:
             stderr_data = await process.stderr.read()
             stderr_str = stderr_data.decode('utf-8', errors='ignore').strip()
-            logger.error(f"gallery-dl failed with exit code {process.returncode}: {stderr_str}")
+            logger.error("gallery-dl failed", exit_code=process.returncode, stderr=stderr_str)
             
             if os.path.exists(dest_dir):
                 shutil.rmtree(dest_dir)
