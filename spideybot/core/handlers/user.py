@@ -14,7 +14,12 @@ from spideybot import config
 from spideybot import db
 from spideybot import user_sessions
 from spideybot.downloaders.terabox_downloader import TeraBoxDownloader
-from spideybot.downloaders.telegram_msg_downloader import download_tg_message, parse_tg_link
+from spideybot.downloaders.telegram_msg_downloader import (
+    download_tg_message,
+    download_tg_range,
+    is_tg_range_url,
+    parse_tg_link,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -178,6 +183,7 @@ def register_user_handlers(bot, download_manager):
             "**\U0001F4E5 Download**\n"
             "  \u2022 `/dl <link>` \u2014 Download from TeraBox, YouTube, Twitter, Reddit, etc.\n"
             "  \u2022 `/dt <t.me link>` \u2014 Download media from a Telegram message\n"
+            "  \u2022 `/dt <range>` \u2014 Download a range: `t.me/c/X/5-t.me/c/X/54`\n"
             "  \u2022 Paste any supported link and I\u2019ll auto-detect it\n"
             "  \u2022 `/cancel` \u2014 Cancel downloads (shows list if multiple)\n"
             "**\U0001F513 Account Session**\n"
@@ -223,7 +229,8 @@ def register_user_handlers(bot, download_manager):
         client = user_sessions.get_client(user_id)
         if client is not None:
             await event.reply(
-                "\u2705 **Processing via your user account.**"
+                "\u2705 **Processing via your user account.**\n"
+                "Queueing download… Use `/cancel` to abort."
             )
             # The outgoing /dl handler on the user's client will fire
             # for this same message and handle the actual download.
@@ -256,7 +263,7 @@ def register_user_handlers(bot, download_manager):
 
     @bot.on(events.NewMessage(pattern=r"/dt(?:\s+(https?://\S+))?"))
     async def dt_command_handler(event):
-        """Download media from a Telegram message link."""
+        """Download media from a Telegram message link (single or range)."""
         user = await event.get_sender()
         user_id = event.sender_id
         username = user.username if user else None
@@ -266,19 +273,33 @@ def register_user_handlers(bot, download_manager):
         if not link:
             await event.reply(
                 "\u26A0\uFE0F Please specify a Telegram message link.\n"
-                "Usage: `/dt <t.me link>`"
+                "Usage: `/dt <t.me link>` or `/dt <range>`"
             )
             return
 
+        # Determine single vs range
+        is_range = is_tg_range_url(link)
+
         # Validate link format
-        try:
-            parse_tg_link(link)
-        except ValueError:
-            await event.reply(
-                "\u274C Not a valid Telegram message link.\n"
-                "Expected: `https://t.me/channel/12345` or `https://t.me/c/123456/12345`"
-            )
-            return
+        if is_range:
+            from spideybot.downloaders.telegram_msg_downloader import parse_tg_range
+            try:
+                parse_tg_range(link)
+            except ValueError:
+                await event.reply(
+                    "\u274C Not a valid Telegram range link.\n"
+                    "Expected: `https://t.me/c/X/5-https://t.me/c/X/54` (same channel)"
+                )
+                return
+        else:
+            try:
+                parse_tg_link(link)
+            except ValueError:
+                await event.reply(
+                    "\u274C Not a valid Telegram message link.\n"
+                    "Expected: `https://t.me/channel/12345` or `https://t.me/c/123456/12345`"
+                )
+                return
 
         # If user session is active, delegate to outgoing handler
         client = user_sessions.get_client(user_id)
@@ -290,12 +311,17 @@ def register_user_handlers(bot, download_manager):
             return
 
         # No session — try with bot client (works for public channels only)
+        range_label = " (range)" if is_range else ""
         status_msg = await event.reply(
-            "\u23F3 **SpideyBot:** Downloading from Telegram..."
+            f"\u23F3 **SpideyBot:** Downloading from Telegram{range_label}..."
         )
 
         output_dir = f"./downloads/tg_{user_id}"
-        result = await download_tg_message(bot, link, output_dir=output_dir)
+
+        if is_range:
+            result = await download_tg_range(bot, link, output_dir=output_dir)
+        else:
+            result = await download_tg_message(bot, link, output_dir=output_dir)
 
         if not result["ok"]:
             await status_msg.edit(f"\u274C **SpideyBot:** {result['error']}")
@@ -309,9 +335,18 @@ def register_user_handlers(bot, download_manager):
             for fp in files:
                 await event.reply(file=fp, message=caption_text)
                 caption_text = ""  # only first file gets caption
-            await status_msg.edit(
-                f"\u2705 **SpideyBot:** Downloaded {len(files)} file(s) from `{result['chat_title']}`."
-            )
+
+            total = result.get("total_messages", len(files))
+            dl_count = result.get("downloaded_messages", len(files))
+            if is_range:
+                await status_msg.edit(
+                    f"\u2705 **SpideyBot:** Downloaded {dl_count} file(s) "
+                    f"from {total} messages in `{result['chat_title']}`."
+                )
+            else:
+                await status_msg.edit(
+                    f"\u2705 **SpideyBot:** Downloaded {len(files)} file(s) from `{result['chat_title']}`."
+                )
         except Exception as e:
             logger.error("Failed to send TG files", error=str(e))
             await status_msg.edit(f"\u274C **SpideyBot:** Failed to send files: `{e}`")
@@ -326,7 +361,7 @@ def register_user_handlers(bot, download_manager):
             except OSError:
                 pass
 
-        logger.info("/dt handled", user_id=user_id, link=link, files=len(files))
+        logger.info("/dt handled", user_id=user_id, link=link, files=len(files), is_range=is_range)
 
     # ── /cancel ────────────────────────────────────────────────────────────
 

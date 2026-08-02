@@ -22,7 +22,12 @@ from telethon import events
 from telethon.errors import RPCError as TelethonRPCError
 
 from spideybot import config, db, user_sessions
-from spideybot.downloaders.telegram_msg_downloader import download_tg_message, parse_tg_link
+from spideybot.downloaders.telegram_msg_downloader import (
+    download_tg_message,
+    download_tg_range,
+    is_tg_range_url,
+    parse_tg_link,
+)
 
 if TYPE_CHECKING:
     from spideybot.queue_manager import DownloadQueueManager
@@ -71,7 +76,7 @@ def register_outgoing_handlers(client, user_id: int) -> None:
 
     @client.on(events.NewMessage(outgoing=True, pattern=re.compile(r"/dt", re.IGNORECASE)))
     async def dt_handler(event):
-        """Download media from a Telegram message link using the user's client."""
+        """Download media from a Telegram message link (single or range)."""
         m = re.match(r"/dt(?:\s+(https?://\S+))?", event.raw_text or "", re.IGNORECASE)
         if not m:
             return
@@ -84,26 +89,48 @@ def register_outgoing_handlers(client, user_id: int) -> None:
                 pass
             return
 
-        # Validate it's a Telegram link
-        try:
-            parse_tg_link(link)
-        except ValueError:
-            try:
-                await event.respond(
-                    "\u274C Not a valid Telegram message link.\n"
-                    "Expected format: `https://t.me/channel/12345` or `https://t.me/c/123456/12345`"
-                )
-            except TelethonRPCError:
-                pass
-            return
+        # Determine single vs range
+        is_range = is_tg_range_url(link)
 
+        # Validate link format
+        if is_range:
+            from spideybot.downloaders.telegram_msg_downloader import parse_tg_range
+            try:
+                parse_tg_range(link)
+            except ValueError:
+                try:
+                    await event.respond(
+                        "\u274C Not a valid Telegram range link.\n"
+                        "Expected: `https://t.me/c/X/5-https://t.me/c/X/54` (same channel)"
+                    )
+                except TelethonRPCError:
+                    pass
+                return
+        else:
+            try:
+                parse_tg_link(link)
+            except ValueError:
+                try:
+                    await event.respond(
+                        "\u274C Not a valid Telegram message link.\n"
+                        "Expected: `https://t.me/channel/12345` or `https://t.me/c/123456/12345`"
+                    )
+                except TelethonRPCError:
+                    pass
+                return
+
+        range_label = " (range)" if is_range else ""
         status_msg = await event.respond(
-            "\u23F3 **SpideyBot:** Downloading from Telegram..."
+            f"\u23F3 **SpideyBot:** Downloading from Telegram{range_label}..."
         )
 
         import os
         output_dir = f"./downloads/tg_{user_id}"
-        result = await download_tg_message(client, link, output_dir=output_dir)
+
+        if is_range:
+            result = await download_tg_range(client, link, output_dir=output_dir)
+        else:
+            result = await download_tg_message(client, link, output_dir=output_dir)
 
         if not result["ok"]:
             try:
@@ -120,9 +147,18 @@ def register_outgoing_handlers(client, user_id: int) -> None:
             for fp in files:
                 await event.respond(file=fp, message=caption_text)
                 caption_text = ""  # only first file gets caption
-            await status_msg.edit(
-                f"\u2705 **SpideyBot:** Downloaded {len(files)} file(s) from `{result['chat_title']}`."
-            )
+
+            total = result.get("total_messages", len(files))
+            dl_count = result.get("downloaded_messages", len(files))
+            if is_range:
+                await status_msg.edit(
+                    f"\u2705 **SpideyBot:** Downloaded {dl_count} file(s) "
+                    f"from {total} messages in `{result['chat_title']}`."
+                )
+            else:
+                await status_msg.edit(
+                    f"\u2705 **SpideyBot:** Downloaded {len(files)} file(s) from `{result['chat_title']}`."
+                )
         except Exception as e:
             logger.error("Failed to send TG files", error=str(e))
             try:
@@ -141,7 +177,7 @@ def register_outgoing_handlers(client, user_id: int) -> None:
             except OSError:
                 pass
 
-        logger.info("Outgoing /dt handled", user_id=user_id, link=link, files=len(files))
+        logger.info("Outgoing /dt handled", user_id=user_id, link=link, files=len(files), is_range=is_range)
 
     # ── /dl ────────────────────────────────────────────────────────
 
@@ -183,7 +219,8 @@ def register_outgoing_handlers(client, user_id: int) -> None:
             pos = dm.get_queue_position(task.entry_id)
             try:
                 await status_msg.edit(
-                    f"\u23F3 **SpideyBot:** Task queued (position #{pos} in queue)"
+                    f"\u23F3 **SpideyBot:** Task queued (position #{pos} in queue)\n"
+                    f"Send `/cancel {task.entry_id}` to abort."
                 )
             except TelethonRPCError:
                 pass

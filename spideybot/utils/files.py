@@ -140,9 +140,8 @@ async def download_file_async(terabox_downloader, tb_file, output_dir: str) -> s
     """
     Download a TeraBox file asynchronously using aiohttp streaming.
 
-    Uses a generous per-request timeout (10 min total, 2 min per read)
-    so large video files don't fail on slow connections.
-    Partial files are cleaned up on any error.
+    Uses adaptive per-read timeouts scaled to file size so large videos
+    don't fail on slow connections.  Partial files are cleaned up on error.
 
     Args:
         terabox_downloader: TeraBoxDownloader instance.
@@ -160,9 +159,29 @@ async def download_file_async(terabox_downloader, tb_file, output_dir: str) -> s
     safe_filename = sanitize_filename(tb_file.filename)
     filepath = os.path.join(output_dir, safe_filename)
 
-    # Per-request timeout: generous limits for large file streaming.
-    # The session-level timeout (30s) is too short for video downloads.
-    dl_timeout = aiohttp.ClientTimeout(total=600, connect=30, sock_read=120)
+    # ── Adaptive timeout based on file size ────────────────────────
+    # sock_read is per-chunk read.  TeraBox throttles large files,
+    # so small fixed values fail on slow connections.  Scale up.
+    size_mb = (tb_file.size_bytes or 0) / (1024 * 1024)
+
+    if size_mb < 50:
+        sock_read = 120        # small files: 2 min per read
+    elif size_mb < 500:
+        sock_read = 300        # medium: 5 min per read
+    elif size_mb < 2048:
+        sock_read = 600        # large (2 GB): 10 min per read
+    else:
+        sock_read = 900        # huge (>2 GB): 15 min per read
+
+    # total = 0 (uncapped) — let sock_read guard individual stalls
+    dl_timeout = aiohttp.ClientTimeout(total=0, connect=30, sock_read=sock_read)
+
+    logger.debug(
+        "Download timeout set",
+        filename=tb_file.filename,
+        size_mb=f"{size_mb:.1f}",
+        sock_read=sock_read,
+    )
 
     r = await terabox_downloader._request_with_retry(
         "GET",
