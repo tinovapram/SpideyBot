@@ -23,16 +23,6 @@ services:
       start_period: 15s
       retries: 3
 
-    # ── Resource Limits ──────────────────────────────────────────
-    deploy:
-      resources:
-        limits:
-          memory: 2G
-          cpus: "1.0"
-        reservations:
-          memory: 256M
-          cpus: "0.25"
-
     # ── Logging ──────────────────────────────────────────────────
     logging:
       driver: json-file
