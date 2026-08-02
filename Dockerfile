@@ -34,6 +34,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     mkvtoolnix \
     atomicparsley \
+    gosu \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy Deno binary from build stage
@@ -54,11 +55,12 @@ COPY --chown=spideybot:spideybot . .
 RUN mkdir -p data downloads user_sessions config/runtime .gallery-dl \
     && chown -R spideybot:spideybot data downloads user_sessions config/runtime .gallery-dl
 
-# Switch to non-root user
-USER spideybot
-
 # Health check: verify Python process is alive
 HEALTHCHECK --interval=60s --timeout=5s --start-period=15s --retries=3 \
     CMD python -c "import telethon" || exit 1
 
-CMD ["python", "main.py"]
+COPY --chown=spideybot:spideybot entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
+# Entrypoint runs as root to fix bind-mount permissions, then drops to spideybot via gosu
+CMD ["/app/entrypoint.sh"]
