@@ -41,6 +41,11 @@ def validate_telegram_config():
 
     return api_id
 
+# ─── Session Encryption ─────────────────────────────────────────────
+# Fernet key used to encrypt user sessions at rest.
+# Generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+SESSION_ENCRYPT_KEY = os.getenv("SESSION_ENCRYPT_KEY", "")
+
 # ─── TeraBox Configuration ──────────────────────────────────────────
 
 TERABOX_COOKIE = os.getenv("TERABOX_COOKIE")

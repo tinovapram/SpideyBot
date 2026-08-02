@@ -20,6 +20,8 @@ from spideybot.downloaders.terabox_downloader import TeraBoxDownloader
 from spideybot.downloaders.reddit_downloader import RedditDownloader
 from spideybot.core.handlers.user import register_user_handlers
 from spideybot.core.handlers.admin import register_admin_handlers
+from spideybot.core.handlers.login import register_login_handlers
+from spideybot import user_sessions
 
 # ─── Logging Setup ──────────────────────────────────────────────────
 setup_logging()
@@ -71,6 +73,10 @@ download_queue_manager = DownloadQueueManager(
 
 register_user_handlers(bot, download_queue_manager)
 register_admin_handlers(bot)
+register_login_handlers(bot)
+
+from spideybot.core.handlers.outgoing import set_download_manager
+set_download_manager(download_queue_manager)
 logger.info("All handlers registered")
 
 # ─── Graceful Shutdown ──────────────────────────────────────────────
@@ -107,7 +113,11 @@ async def _handle_shutdown(signal_name: str) -> None:
             pass
         log.info("TeraBox session closed")
 
-    # 5. Disconnect Telegram client
+    # 5. Disconnect all user account clients
+    await user_sessions.stop_all_clients()
+    log.info("User account clients stopped")
+
+    # 6. Disconnect Telegram client
     if bot.is_connected():
         await bot.disconnect()
         log.info("Telegram client disconnected")

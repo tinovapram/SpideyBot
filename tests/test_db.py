@@ -22,11 +22,16 @@ if PROJECT_ROOT not in sys.path:
 @pytest.fixture(autouse=True)
 def isolated_db(tmp_path, monkeypatch):
     """
-    Override DB_PATH to a temp file and clear the in-memory cache
-    before every test.
+    Override DB_PATH to a temp file, reset the SQLAlchemy engine,
+    and clear the in-memory cache before every test.
     """
     db_file = tmp_path / "test_bot_database.db"
     monkeypatch.setattr("spideybot.db.DB_PATH", str(db_file))
+
+    # Reset the SQLAlchemy engine so each test gets a fresh DB
+    import spideybot.models as models_mod
+    models_mod._engine = None
+    models_mod._SessionLocal = None
 
     # Reset the module-level cache
     import spideybot.db as db_mod
@@ -39,6 +44,8 @@ def isolated_db(tmp_path, monkeypatch):
 
     # Cleanup: clear cache after test
     db_mod._user_cache.clear()
+    models_mod._engine = None
+    models_mod._SessionLocal = None
 
 
 # ════════════════════════════════════════════════════════════════════

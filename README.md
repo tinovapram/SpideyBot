@@ -1,179 +1,265 @@
-# SpideyBot - Multi-purpose Telegram Bot
+# SpideyBot — Telegram Media Downloader Bot
 
-SpideyBot is a high-performance, asynchronous Telegram bot built with [Telethon](https://github.com/LonamiWebs/Telethon). Its primary feature is a premium media downloader that resolves and downloads files from **TeraBox** shared links, plus hundreds of other galleries and video hosts supported by **gallery-dl** (YouTube, Twitter/X, Instagram, TikTok, Reddit, etc.) with custom fallbacks for platforms that need special handling.
+Download media from **TeraBox**, **Twitter/X**, **Instagram**, **TikTok**, **YouTube**, **Reddit**, **Bluesky**, **Pinterest**, **Spotify**, and 20+ more platforms — all from a single Telegram bot.
+
+Send a link, get the files in chat. It's that simple.
 
 ---
 
-## Key Features
+## ✨ Highlights
 
-| Feature | Description |
+- **30+ platforms** — TeraBox, YouTube, Twitter/X, Instagram, TikTok, Reddit, and more
+- **Works anywhere** — send commands in private chat, groups, or channels
+- **Real-time progress** — live progress bars with speed, ETA, and per-file status
+- **Smart queue** — Premium users get priority; free users are fairly scheduled
+- **User account mode** — log in with your own Telegram account for private content access
+- **Cancel anytime** — cancel all downloads or target a specific one
+- **Concurrent pipeline** — downloads and uploads run in parallel for maximum speed
+
+---
+
+## 📋 Supported Platforms
+
+| Category | Platforms |
 |:---|:---|
-| **Unified Download (`/dl <link>`)** | Resolves, downloads, and uploads media directly to the chat. Supports TeraBox, Twitter/X, Instagram, TikTok, YouTube, Reddit, Bluesky, Pinterest, Spotify, and 20+ more platforms. |
-| **Cancel Button** | Inline ❌ Cancel button appears on all progress messages during download/upload — click it at any time to abort. |
-| **Priority-Based Queue** | Async priority queue with fair-share scheduling. Premium/Admin tasks are processed before Free tasks; FIFO within the same tier. |
-| **Pipeline Downloads** | TeraBox downloads use a producer/consumer pipeline — files are downloaded and uploaded concurrently for maximum throughput. |
-| **Structured Logging** | All 14 modules use [structlog](https://www.structlog.org/) with key-value pairs for clean, searchable, JSON-compatible logs. |
-| **Graceful Shutdown** | SIGINT/SIGTERM handlers drain workers, close sessions, and disconnect the bot cleanly. Works on both Linux and Windows. |
-| **In-Memory User Cache** | User membership state is cached in memory to eliminate redundant SQLite disk reads during rate-limit checks. |
-| **Subprocess Size Monitoring** | Real-time folder size monitoring during gallery-dl processes. Downloads exceeding tier limits are automatically killed and cleaned up. |
+| **Cloud Storage** | TeraBox, Teraboxapp, Dubox, Nephobox, 1024tera |
+| **Social Media** | Twitter/X, Instagram, TikTok, Facebook, Threads, LinkedIn |
+| **Video** | YouTube, Dailymotion, Douyin, Kuaishou, CapCut |
+| **Music** | Spotify, SoundCloud |
+| **Image/Media** | Pinterest, Bluesky, Tumblr, Snapchat, Reddit |
+| **Universal** | Any URL supported by [gallery-dl](https://github.com/mikf/gallery-dl) or [yt-dlp](https://github.com/yt-dlp/yt-dlp) |
 
 ---
 
-## User Tiers & Limits
+## 🎯 How to Use
 
-| Privilege / Limit | Free Tier | Premium Tier | Admin Tier |
-| :--- | :--- | :--- | :--- |
-| **Download Size Limit** | 100 MB total | 1 GB total | **Unlimited** |
-| **Concurrent Downloads** | Max 1 active | Max 5 active | Max 5 active |
-| **Queue Priority** | Standard (Low) | Priority (High) | Priority (High) |
-| **Admin Commands** | No | No | **Yes** |
+### Quick Start
 
----
+1. Open your Telegram bot and send `/start`
+2. Paste any supported link — the bot auto-detects it
+3. Or use `/dl <link>` for explicit control
 
-## Commands
+### Download Media
 
-### General Commands
-| Command | Description |
-|:---|:---|
-| `/start` | Start the bot and get a welcome message |
-| `/help` | View membership status, limits, and usage instructions |
-| `/dl <link>` | Queue a download request (TeraBox, gallery-dl, Reddit, etc.) |
-| `/cancel` | Cancel all your queued/active downloads |
-
-### Admin Commands (Admin Tier only)
-Admins are defined via the `ADMIN_IDS` environment variable.
-| Command | Description |
-|:---|:---|
-| `/addpremium <user> <days>` | Grant or extend a user's Premium subscription |
-| `/removepremium <user>` | Revoke a user's Premium subscription |
-| `/checkpremium <user>` | View detailed subscription status of any user |
-
----
-
-## Project Structure
-
-```text
-MyBot/
-├── main.py                     # Root entry point
-├── requirements.txt            # Python package dependencies
-├── Dockerfile                  # Multi-stage image (Python 3.11 + Deno + FFmpeg)
-├── docker-compose.yml          # Container service definition & volume mapping
-├── .env                        # Environment variables (not in Git)
-├── gallery-dl.json             # gallery-dl configuration
-├── yt-dlp.conf                 # Global yt-dlp options
-├── data/                       # SQLite DB (mounted to container volume)
-├── downloads/                  # Temporary downloads (gitignored)
-├── spideybot/                  # Main package
-│   ├── __init__.py
-│   ├── __main__.py             # Package execution (python -m spideybot)
-│   ├── bot.py                  # Bot lifecycle, handler registration, graceful shutdown
-│   ├── config.py               # Environment variables, validation, constants
-│   ├── db.py                   # SQLite database + in-memory user tier cache
-│   ├── logging_config.py       # structlog setup on stdlib logging backbone
-│   ├── queue_manager.py        # Async priority queue with per-user concurrency limits
-│   ├── core/
-│   │   ├── handlers/
-│   │   │   ├── user.py         # /dl, /start, /help, /cancel, cancel-button callback
-│   │   │   └── admin.py        # /addpremium, /removepremium, /checkpremium
-│   ├── downloaders/
-│   │   ├── download_handler.py # gallery-dl / Reddit / universal download orchestration
-│   │   ├── terabox_downloader.py  # TeraBox API client (resolve, transfer, download links)
-│   │   ├── terabox_handler.py  # TeraBox pipeline (resolve → download → upload → send)
-│   │   ├── reddit_downloader.py   # Reddit downloader with multi-client refresh token auth
-│   │   ├── gallerydl_downloader.py # gallery-dl CLI wrapper
-│   │   ├── gallerydl_handler.py   # gallery-dl file pipeline with size monitoring
-│   │   ├── universal_downloader.py # Platform detection + yt-dlp integration
-│   │   └── site_downloaders/   # Per-site custom scrapers
-│   │       ├── twitter.py, tiktok.py, youtube.py, bluesky.py, ...
-│   └── utils/
-│       ├── files.py            # Filename sanitization, async TeraBox file download
-│       ├── formatting.py       # Human-readable size/speed formatting
-│       ├── progress.py         # Upload progress callback wrapper
-│       └── task_progress.py    # Telegram progress bar with speed, ETA, and cancel button
+```
+/dl https://terabox.com/s/1AbCdEfG
+/dl https://x.com/user/status/123456789
+/dl https://www.instagram.com/p/ABC123/
+/dl https://www.reddit.com/r/submission/abc123
+/dl https://youtube.com/watch?v=dQw4w9WgXcQ
 ```
 
+You can also just **paste a link directly** — no command needed.
+
+### Cancel Downloads
+
+```
+/cancel          — shows your active tasks (or cancels if only one)
+/cancel 3        — cancel task #3 specifically
+```
+
+When you have multiple downloads running, `/cancel` lists them with IDs so you can pick which one to stop.
+
 ---
 
-## Prerequisites
+## 🔐 User Account (Session)
+
+Log in with your **own Telegram account** to access private/restricted content that the bot alone can't reach.
+
+### Session Commands
+
+| Command | Description |
+|:---|:---|
+| `/login` | Start the login flow (phone → code → optional 2FA) |
+| `/logout` | Revoke your saved session permanently |
+| `/start` | Welcome message — also auto-connects your saved session |
+| `/stop` | Disconnect your session without deleting it |
+
+### How It Works
+
+1. Send `/login` and follow the prompts (phone number → verification code → 2FA password if enabled)
+2. Your session is **encrypted** and stored securely on disk
+3. On next `/start`, your session auto-connects — no re-login needed
+4. Use `/stop` to disconnect, or `/logout` to revoke entirely
+
+### What Changes With a Session
+
+| Feature | Without Session | With Session |
+|:---|:---|:---|
+| `/dl` in private chat | Processed by bot | **Delegated to your account** |
+| `/dl` in groups | ✗ Not supported | ✓ Works from any chat |
+| `/ping` | ✗ | ✓ Tests your session connection |
+| Private content | ✗ | ✓ Access restricted media |
+
+When you send `/dl` to the bot with an active session, the bot replies **"Processing via your user account"** and the download runs through your own Telegram client.
+
+---
+
+## 🌐 Commands Anywhere (Outgoing Commands)
+
+When your session is active, these commands work **in any chat** — private, groups, or channels:
+
+| Command | Description |
+|:---|:---|
+| `/dl <link>` | Download media (results delivered to your DM) |
+| `/cancel` | Cancel your active/queued downloads |
+| `/ping` | Test your session by pinging google.com |
+
+Just type the command in any conversation and your account handles it. No need to open the bot chat.
+
+---
+
+## 📝 All Commands
+
+### User Commands
+
+| Command | Description |
+|:---|:---|
+| `/start` | Welcome message + auto-connect session |
+| `/help` | Your tier, limits, session status, and full command list |
+| `/dl <link>` | Download from any supported platform |
+| `/cancel` | List or cancel your downloads |
+| `/cancel <id>` | Cancel a specific download by task ID |
+| `/login` | Log in with your Telegram account |
+| `/logout` | Revoke your saved session |
+| `/stop` | Disconnect your session (keeps it saved) |
+| `/ping` | Test your session connection |
+
+### Admin Commands
+
+| Command | Description |
+|:---|:---|
+| `/addpremium <user> <days>` | Grant or extend Premium access |
+| `/removepremium <user>` | Revoke Premium access |
+| `/checkpremium <user>` | View detailed subscription status |
+
+---
+
+## 👑 User Tiers
+
+| | Free | Premium | Admin |
+|:---|:---|:---|:---|
+| **Size Limit** | 100 MB | 1 GB | Unlimited |
+| **Concurrent Downloads** | 1 | 5 | 5 |
+| **Queue Priority** | Standard | Priority | Priority |
+
+---
+
+## 🔒 Security
+
+- **Encrypted sessions** — your Telegram login session is encrypted with [Fernet](https://cryptography.io/en/latest/fernet/) (AES-128-CBC) before being stored on disk
+- **No session in database** — sessions are stored as separate files, not in SQLite
+- **Bot never sees your password** — 2FA passwords are handled directly by Telethon and never logged or stored
+- **Revoke anytime** — `/logout` immediately deletes your session file and disconnects
+
+---
+
+## 🚀 Setup & Running
+
+### Prerequisites
 
 - **Python 3.11+**
-- **FFmpeg** (installed on the host system and added to PATH, required by gallery-dl and yt-dlp for media stitching)
+- **FFmpeg** (for video/audio merging — install from [ffmpeg.org](https://ffmpeg.org))
 
----
+### Quick Start (Local)
 
-## Configuration
-
-1. Copy the example environment file:
-   ```bash
-   cp .env.example .env
-   ```
-2. Open `.env` and configure:
-
-| Variable | Required | Description |
-|:---|:---|:---|
-| `TG_API_ID` | ✅ | Telegram API ID (from [my.telegram.org](https://my.telegram.org)) |
-| `TG_API_HASH` | ✅ | Telegram API Hash |
-| `TG_BOT_TOKEN` | ✅ | Telegram bot token (from [@BotFather](https://t.me/BotFather)) |
-| `TERABOX_COOKIE` | ⚠️ | TeraBox cookie containing `ndus` from your browser session |
-| `ADMIN_IDS` | Optional | Comma-separated Telegram User IDs for admin access |
-| `MAX_CONCURRENT_DOWNLOADS` | Optional | Global worker pool size (default: `20`) |
-| `REDDIT_PRAW_CLIENT_ID` | Optional | Reddit app client ID for PRAW auth |
-| `REDDIT_PRAW_CLIENT_SECRET` | Optional | Reddit app client secret |
-| `REDDIT_GDL_REFRESH_TOKEN` | Optional | Reddit refresh token (for gallery-dl auth) |
-
----
-
-## Running the Bot
-
-### Local Execution
 ```bash
-# Install dependencies
+# 1. Clone and install
+git clone https://github.com/your-username/MyBot.git
+cd MyBot
 pip install -r requirements.txt
 
-# Run the bot
+# 2. Configure — copy and edit the env file
+cp .env.example .env
+# Fill in: TG_API_ID, TG_API_HASH, TG_BOT_TOKEN, TERABOX_COOKIE
+
+# 3. Run
 python main.py
 ```
 
-### Docker Execution (Recommended)
-FFmpeg, Deno, and all required Python dependencies are pre-installed in the Docker image.
+### Docker (Recommended)
 
-#### Using Docker Compose (Simplest)
 ```bash
-# Start in background
+# Start
 docker compose up --build -d
 
-# View logs
+# View live logs
 docker compose logs -f
 
 # Stop
 docker compose down
 ```
 
-#### Manual Docker CLI
-```bash
-# Build
-docker build -t spideybot .
+---
 
-# Run (mount /app/data to persist the SQLite database)
-docker run -d \
-  --name spideybot-container \
-  --env-file .env \
-  -v ./data:/app/data \
-  spideybot
+## ⚙️ Configuration
+
+Copy `.env.example` to `.env` and fill in:
+
+| Variable | Required | Description |
+|:---|:---|:---|
+| `TG_API_ID` | ✅ | Get from [my.telegram.org](https://my.telegram.org) |
+| `TG_API_HASH` | ✅ | Get from [my.telegram.org](https://my.telegram.org) |
+| `TG_BOT_TOKEN` | ✅ | Get from [@BotFather](https://t.me/BotFather) |
+| `TERABOX_COOKIE` | ⚠️ | Browser cookie containing `ndus` for TeraBox |
+| `ADMIN_IDS` | Optional | Comma-separated Telegram User IDs for admin access |
+| `SESSION_ENCRYPT_KEY` | Optional | Fernet key for session encryption (auto-generated if unset) |
+| `MAX_CONCURRENT_DOWNLOADS` | Optional | Worker pool size (default: `20`) |
+
+---
+
+## 📁 Project Structure
+
+```text
+spideybot/
+├── bot.py                  # Bot lifecycle & graceful shutdown
+├── config.py               # Environment variables & validation
+├── db.py                   # User tiers & subscription database
+├── models.py               # SQLAlchemy ORM (users table)
+├── user_sessions.py        # Encrypted session storage & client lifecycle
+├── queue_manager.py        # Priority queue with concurrency limits
+├── core/
+│   ├── bot.py              # Entry point: wires everything together
+│   └── handlers/
+│       ├── user.py         # /dl, /start, /help, /cancel + cancel button
+│       ├── login.py        # /login, /logout conversation flow
+│       ├── admin.py        # /addpremium, /removepremium, /checkpremium
+│       └── outgoing.py     # Outgoing commands (work in any chat)
+├── downloaders/
+│   ├── terabox_downloader.py   # TeraBox API client
+│   ├── terabox_handler.py      # TeraBox download pipeline
+│   ├── download_handler.py     # gallery-dl / Reddit orchestration
+│   ├── reddit_downloader.py    # Reddit with refresh token auth
+│   ├── gallerydl_downloader.py # gallery-dl CLI wrapper
+│   ├── universal_downloader.py # yt-dlp + platform detection
+│   └── site_downloaders/       # Per-site scrapers (20+ platforms)
+└── utils/
+    ├── files.py            # File download & sanitization
+    ├── formatting.py       # Human-readable sizes & speeds
+    └── task_progress.py    # Progress bar with speed, ETA, cancel button
 ```
 
 ---
 
-## Architecture Highlights
+## ❓ FAQ
 
-### Structured Logging
-All modules use `structlog` with key-value pairs for production-grade observability:
-```python
-logger.info("Download completed", filename="video.mp4", size_mb=45.2, duration_s=12)
-```
+**Q: Why is my TeraBox download failing?**
+A: Make sure `TERABOX_COOKIE` is set with a valid `ndus` cookie from your browser. Cookies expire — refresh them if downloads stop working.
 
-### Graceful Shutdown
-SIGINT/SIGTERM triggers a 5-step cleanup: stop accepting tasks → cancel queued tasks → drain workers → close HTTP sessions → disconnect Telegram client.
+**Q: Can I use the bot in group chats?**
+A: Yes! When your session is active, `/dl`, `/cancel`, and `/ping` all work in any group or channel.
 
-### Cross-Platform
-Runs on both Linux (Docker) and Windows (local dev). Signal handling adapts automatically: `loop.add_signal_handler()` on Linux, `signal.signal()` on Windows.
+**Q: Is my Telegram account safe?**
+A: The bot uses Telethon (a well-known Telegram client library). Your session is encrypted at rest. You can revoke access anytime with `/logout`.
+
+**Q: What happens if a download is too large?**
+A: Free users are limited to 100 MB, Premium to 1 GB. The bot will tell you if a file exceeds your tier limit.
+
+**Q: How do I cancel just one download?**
+A: Send `/cancel` — if you have multiple active tasks, it lists them with IDs. Then send `/cancel <id>` to target a specific one.
+
+---
+
+## 📄 License
+
+This project is open source. See the repository for license details.

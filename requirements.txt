@@ -17,6 +17,7 @@ beautifulsoup4                   # HTML parsing (TikTok, Pinterest, Threads, etc
 
 # ── Security & Encryption ──────────────────────────────────────
 cryptography>=42.0.0             # Fernet session encryption
+SQLAlchemy>=2.0.0                # ORM for user sessions
 
 # ── Media Downloaders (CLI tools) ──────────────────────────────
 gallery-dl                       # Multi-site media downloader (subprocess)
