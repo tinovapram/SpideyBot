@@ -28,10 +28,10 @@ services:
       resources:
         limits:
           memory: 2G
-          cpus: "2.0"
+          cpus: "1.0"
         reservations:
           memory: 256M
-          cpus: "0.5"
+          cpus: "0.25"
 
     # ── Logging ──────────────────────────────────────────────────
     logging:
