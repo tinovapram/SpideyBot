@@ -14,6 +14,7 @@ from spideybot import config
 from spideybot import db
 from spideybot import user_sessions
 from spideybot.downloaders.terabox_downloader import TeraBoxDownloader
+from spideybot.downloaders.telegram_msg_downloader import download_tg_message, parse_tg_link
 
 logger = structlog.get_logger(__name__)
 
@@ -176,6 +177,7 @@ def register_user_handlers(bot, download_manager):
             f"**Session:** {session_info}\n\n"
             "**\U0001F4E5 Download**\n"
             "  \u2022 `/dl <link>` \u2014 Download from TeraBox, YouTube, Twitter, Reddit, etc.\n"
+            "  \u2022 `/dt <t.me link>` \u2014 Download media from a Telegram message\n"
             "  \u2022 Paste any supported link and I\u2019ll auto-detect it\n"
             "  \u2022 `/cancel` \u2014 Cancel downloads (shows list if multiple)\n"
             "**\U0001F513 Account Session**\n"
@@ -249,6 +251,82 @@ def register_user_handlers(bot, download_manager):
                     )]
                 ],
             )
+
+    # ── /dt (download from Telegram message link) ──────────────────────────
+
+    @bot.on(events.NewMessage(pattern=r"/dt(?:\s+(https?://\S+))?"))
+    async def dt_command_handler(event):
+        """Download media from a Telegram message link."""
+        user = await event.get_sender()
+        user_id = event.sender_id
+        username = user.username if user else None
+        db.save_or_update_user(user_id, username)
+
+        link = event.pattern_match.group(1)
+        if not link:
+            await event.reply(
+                "\u26A0\uFE0F Please specify a Telegram message link.\n"
+                "Usage: `/dt <t.me link>`"
+            )
+            return
+
+        # Validate link format
+        try:
+            parse_tg_link(link)
+        except ValueError:
+            await event.reply(
+                "\u274C Not a valid Telegram message link.\n"
+                "Expected: `https://t.me/channel/12345` or `https://t.me/c/123456/12345`"
+            )
+            return
+
+        # If user session is active, delegate to outgoing handler
+        client = user_sessions.get_client(user_id)
+        if client is not None:
+            await event.reply(
+                "\u2705 **Processing via your user account.**"
+            )
+            logger.info("/dt delegated to user account", user_id=user_id)
+            return
+
+        # No session — try with bot client (works for public channels only)
+        status_msg = await event.reply(
+            "\u23F3 **SpideyBot:** Downloading from Telegram..."
+        )
+
+        output_dir = f"./downloads/tg_{user_id}"
+        result = await download_tg_message(bot, link, output_dir=output_dir)
+
+        if not result["ok"]:
+            await status_msg.edit(f"\u274C **SpideyBot:** {result['error']}")
+            return
+
+        files = result["files"]
+        caption_text = result["caption"] or result["chat_title"]
+
+        try:
+            import os as _os
+            for fp in files:
+                await event.reply(file=fp, message=caption_text)
+                caption_text = ""  # only first file gets caption
+            await status_msg.edit(
+                f"\u2705 **SpideyBot:** Downloaded {len(files)} file(s) from `{result['chat_title']}`."
+            )
+        except Exception as e:
+            logger.error("Failed to send TG files", error=str(e))
+            await status_msg.edit(f"\u274C **SpideyBot:** Failed to send files: `{e}`")
+        finally:
+            for fp in files:
+                try:
+                    _os.remove(fp)
+                except OSError:
+                    pass
+            try:
+                _os.rmdir(output_dir)
+            except OSError:
+                pass
+
+        logger.info("/dt handled", user_id=user_id, link=link, files=len(files))
 
     # ── /cancel ────────────────────────────────────────────────────────────
 

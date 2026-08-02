@@ -7,6 +7,7 @@ and replies using the user's own TelegramClient.
 Currently handled:
   /ping  — test session connectivity
   /dl    — download media from any chat
+  /dt    — download media from a Telegram message link
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from telethon import events
 from telethon.errors import RPCError as TelethonRPCError
 
 from spideybot import config, db, user_sessions
+from spideybot.downloaders.telegram_msg_downloader import download_tg_message, parse_tg_link
 
 if TYPE_CHECKING:
     from spideybot.queue_manager import DownloadQueueManager
@@ -64,6 +66,82 @@ def register_outgoing_handlers(client, user_id: int) -> None:
             logger.info("Outgoing /ping handled", user_id=user_id)
         except Exception as e:
             logger.error("Failed to send /ping reply", user_id=user_id, error=str(e))
+
+    # ── /dt (Telegram message link) ─────────────────────────────
+
+    @client.on(events.NewMessage(outgoing=True, pattern=re.compile(r"/dt", re.IGNORECASE)))
+    async def dt_handler(event):
+        """Download media from a Telegram message link using the user's client."""
+        m = re.match(r"/dt(?:\s+(https?://\S+))?", event.raw_text or "", re.IGNORECASE)
+        if not m:
+            return
+
+        link = m.group(1)
+        if not link:
+            try:
+                await event.respond("\u26A0\uFE0F Please specify a Telegram message link.\nUsage: `/dt <t.me link>`")
+            except TelethonRPCError:
+                pass
+            return
+
+        # Validate it's a Telegram link
+        try:
+            parse_tg_link(link)
+        except ValueError:
+            try:
+                await event.respond(
+                    "\u274C Not a valid Telegram message link.\n"
+                    "Expected format: `https://t.me/channel/12345` or `https://t.me/c/123456/12345`"
+                )
+            except TelethonRPCError:
+                pass
+            return
+
+        status_msg = await event.respond(
+            "\u23F3 **SpideyBot:** Downloading from Telegram..."
+        )
+
+        import os
+        output_dir = f"./downloads/tg_{user_id}"
+        result = await download_tg_message(client, link, output_dir=output_dir)
+
+        if not result["ok"]:
+            try:
+                await status_msg.edit(f"\u274C **SpideyBot:** {result['error']}")
+            except TelethonRPCError:
+                pass
+            return
+
+        # Send files to the current chat
+        files = result["files"]
+        caption_text = result["caption"] or result["chat_title"]
+
+        try:
+            for fp in files:
+                await event.respond(file=fp, message=caption_text)
+                caption_text = ""  # only first file gets caption
+            await status_msg.edit(
+                f"\u2705 **SpideyBot:** Downloaded {len(files)} file(s) from `{result['chat_title']}`."
+            )
+        except Exception as e:
+            logger.error("Failed to send TG files", error=str(e))
+            try:
+                await status_msg.edit(f"\u274C **SpideyBot:** Failed to send files: `{e}`")
+            except TelethonRPCError:
+                pass
+        finally:
+            # Cleanup temp files
+            for fp in files:
+                try:
+                    os.remove(fp)
+                except OSError:
+                    pass
+            try:
+                os.rmdir(output_dir)
+            except OSError:
+                pass
+
+        logger.info("Outgoing /dt handled", user_id=user_id, link=link, files=len(files))
 
     # ── /dl ────────────────────────────────────────────────────────
 
