@@ -45,6 +45,7 @@ dmypy.json
 # ─── Database ───────────────────────────────────────────────────────
 data/*.db
 data/*.db-journal
+data/
 
 # ─── User Sessions (Encrypted) ─────────────────────────────────────
 # Each user has an encrypted .session file — never commit
@@ -73,3 +74,13 @@ desktop.ini
 
 # ─── Logs ───────────────────────────────────────────────────────────
 *.log
+
+# ─── Graph / Knowledge Graph ───────────────────────────────────────
+graphify-out/
+
+# ─── Session Notes / Plans (temporary) ─────────────────────────────
+*_WRAPUP*.md
+*_PLAN*.md
+SESSION_*.md
+Summary.md
+WRAPUP_*.md
