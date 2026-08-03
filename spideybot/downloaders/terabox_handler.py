@@ -159,6 +159,16 @@ async def run_terabox(task, bot, terabox_downloader) -> None:
                     await task.event.reply(f"❌ **Failed to download file:** `{item.filename}`\nError: `{err}`")
                     continue
 
+                # Skip 0-byte files — Telegram rejects them with
+                # "The length of a file part is invalid"
+                fsize = os.path.getsize(item.filepath) if item.filepath and os.path.exists(item.filepath) else 0
+                if fsize == 0:
+                    logger.warning("Skipping 0-byte file", file=item.filepath)
+                    progress.mark_failed(item.index, error="empty file (0 bytes)")
+                    failed_files.append((item.filename, "empty file (0 bytes)"))
+                    await progress.update_message(status_msg, buttons=_cancel_buttons)
+                    continue
+
                 try:
                     progress.mark_uploading(item.index)
                     await progress.update_message(status_msg, buttons=_cancel_buttons)
@@ -168,7 +178,15 @@ async def run_terabox(task, bot, terabox_downloader) -> None:
                         def cb(current, total):
                             if total:
                                 progress.update_upload(idx, current)
-                                progress.update_message(status_msg, buttons=_cancel_buttons)
+                                # update_message is async; schedule it without blocking
+                                try:
+                                    loop = asyncio.get_running_loop()
+                                    loop.call_soon(
+                                        asyncio.ensure_future,
+                                        progress.update_message(status_msg, buttons=_cancel_buttons),
+                                    )
+                                except RuntimeError:
+                                    pass  # no running loop — skip progress update
                         return cb
 
                     file_handle = await bot.upload_file(
@@ -208,15 +226,28 @@ async def run_terabox(task, bot, terabox_downloader) -> None:
                     f"• **Status:** Sending files to chat..."
                 )
                 try:
-                    await task.event.reply(message=f"{title}\n\nDownloaded by SpideyBot from [link]({task.link})\n\n", file=files_handlers, supports_streaming=True)
+                    if len(files_handlers) == 1:
+                        await task.event.reply(message=f"{title}\n\nDownloaded by SpideyBot from [link]({task.link})\n\n", file=files_handlers[0], supports_streaming=True)
+                    else:
+                        await task.event.reply(message=f"{title}\n\nDownloaded by SpideyBot from [link]({task.link})\n\n", file=files_handlers, supports_streaming=True)
                     success_count = len(files_handlers)
                     msg = f"✅ **SpideyBot: Download completed!**\n• **Title:** `{title}`\n• **Files:** {success_count}/{length_of_files} ({total_size_mb:.2f} MB) successfully sent."
                     if failed_files:
                         msg += f"\n⚠️ {len(failed_files)} file(s) failed."
                     await status_msg.edit(msg)
-                except Exception as e:
-                    logger.exception("Error sending files to chat", error=str(e))
-                    await status_msg.edit(f"❌ **SpideyBot: Error sending files.**\nError: `{str(e)}`")
+                except Exception as album_err:
+                    logger.warning("Failed to send as album, falling back to individual", error=str(album_err))
+                    sent_count = 0
+                    for fh in files_handlers:
+                        try:
+                            await task.event.reply(message=f"{title}\n\nDownloaded by SpideyBot from [link]({task.link})\n\n", file=fh, supports_streaming=True)
+                            sent_count += 1
+                        except Exception as send_err:
+                            logger.warning("Failed to send file individually", error=str(send_err))
+                    msg = f"✅ **SpideyBot: Download completed!**\n• **Title:** `{title}`\n• **Files:** {sent_count}/{length_of_files} ({total_size_mb:.2f} MB) successfully sent."
+                    if failed_files:
+                        msg += f"\n⚠️ {len(failed_files)} file(s) failed."
+                    await status_msg.edit(msg)
         else:
             await status_msg.edit("❌ **SpideyBot: No files were successfully downloaded.**")
 

@@ -84,3 +84,5 @@ graphify-out/
 SESSION_*.md
 Summary.md
 WRAPUP_*.md
+
+graphify-out/*

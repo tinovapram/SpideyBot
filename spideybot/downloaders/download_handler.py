@@ -217,6 +217,16 @@ async def run_download_task(task, bot, fallback_downloader, reddit_downloader=No
                 await progress.update_message(status_msg, force=True, buttons=_cancel_buttons)
                 continue
 
+            # Skip 0-byte files — Telegram rejects them with
+            # "The length of a file part is invalid"
+            fsize = os.path.getsize(fp) if os.path.exists(fp) else 0
+            if fsize == 0:
+                logger.warning("Skipping 0-byte file", file=fp)
+                progress.mark_failed(i, error="empty file (0 bytes)")
+                failed_files.append((os.path.basename(fp), "empty file (0 bytes)"))
+                await progress.update_message(status_msg, buttons=_cancel_buttons)
+                continue
+
             try:
                 progress.mark_uploading(i)
                 await progress.update_message(status_msg, buttons=_cancel_buttons)
@@ -225,7 +235,15 @@ async def run_download_task(task, bot, fallback_downloader, reddit_downloader=No
                     def cb(current, total):
                         if total:
                             progress.update_upload(idx, current)
-                            progress.update_message(status_msg, buttons=_cancel_buttons)
+                            # update_message is async; schedule it without blocking
+                            try:
+                                loop = asyncio.get_running_loop()
+                                loop.call_soon(
+                                    asyncio.ensure_future,
+                                    progress.update_message(status_msg, buttons=_cancel_buttons),
+                                )
+                            except RuntimeError:
+                                pass  # no running loop — skip progress update
                     return cb
 
                 handle = await bot.upload_file(fp, progress_callback=_make_cb(i))
@@ -261,7 +279,10 @@ async def run_download_task(task, bot, fallback_downloader, reddit_downloader=No
             # Attempt to send files as album if <= 10 files
             sent_success = False
             try:
-                await task.event.reply(file=uploaded_handles, message=final_caption, supports_streaming=True)
+                if len(uploaded_handles) == 1:
+                    await task.event.reply(file=uploaded_handles[0], message=final_caption, supports_streaming=True)
+                else:
+                    await task.event.reply(file=uploaded_handles, message=final_caption, supports_streaming=True)
                 sent_success = True
             except Exception as album_err:
                 logger.warning("Failed to send as album, falling back to individual", error=str(album_err))
@@ -279,9 +300,10 @@ async def run_download_task(task, bot, fallback_downloader, reddit_downloader=No
                             f_name = parsed.netloc or "Downloaded Media"
                         caption = f_name
                     try:
-                        await task.event.reply(file=handle, message=caption)
-                    except TelethonRPCError:
-                        pass
+                        await task.event.reply(file=handle, message=caption, supports_streaming=True)
+                    except Exception as send_err:
+                        logger.warning("Failed to send file individually", file=fp, error=str(send_err))
+                        failed_files.append((os.path.basename(fp), str(send_err)))
 
             await status_msg.edit(f"✅ **SpideyBot: Download completed!**\n• Sent {len(uploaded_handles)} file(s).")
         else:
