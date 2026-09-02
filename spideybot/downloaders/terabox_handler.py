@@ -1,9 +1,9 @@
-﻿"""
+"""
 SpideyBot - TeraBox Download Handler.
 
 Orchestrates the full TeraBox download flow: resolve -> download -> send -> cleanup.
 Uses send_file (not upload_file) for single-call upload+send with progress.
-Files are downloaded one-by-one, batched into groups of 10, sent, cleaned up.
+Pipelined: while uploading batch N, downloading batch N+1 concurrently.
 """
 
 import os
@@ -13,6 +13,7 @@ import asyncio
 
 import structlog
 from telethon.errors import RPCError as TelethonRPCError
+from telethon.errors import MessageNotModifiedError
 
 from spideybot.config import get_size_limit
 from spideybot.utils.files import download_file_async
@@ -36,12 +37,7 @@ async def run_terabox(task, bot, terabox_downloader) -> None:
     """
     Execute a TeraBox download task end-to-end.
 
-    Flow:
-        1. Resolve the TeraBox share link to get file metadata
-        2. Enforce per-tier size limits
-        3. Download each file, batch into groups of 10
-        4. Send each batch via send_file (upload+send in one call)
-        5. Cleanup batch files immediately
+    Pipelined: while uploading batch N, downloading batch N+1 concurrently.
 
     Args:
         task: DownloadTask instance with user info and link.
@@ -50,19 +46,18 @@ async def run_terabox(task, bot, terabox_downloader) -> None:
     """
     status_msg = task.status_msg
     if not status_msg:
-        status_msg = await task.event.reply("⏳ **SpideyBot:** Starting download...")
+        status_msg = await task.event.reply("\u23f3 **SpideyBot:** Starting download...")
 
     if not terabox_downloader:
         await status_msg.edit(
-            "⚠️ **SpideyBot: TeraBox Downloader is not configured.**\n"
+            "\u26a0\ufe0f **SpideyBot: TeraBox Downloader is not configured.**\n"
             "Please ensure `TERABOX_COOKIE` is set in the `.env` file."
         )
         return
 
     try:
-        await status_msg.edit("🔍 **SpideyBot:** Resolving TeraBox link...")
+        await status_msg.edit("\U0001f50d **SpideyBot:** Resolving TeraBox link...")
 
-        # Per-user staging folder: /downloads/{user_id}/terabox
         saved_root = terabox_downloader.root_path
         terabox_downloader.root_path = f"/downloads/{task.user_id}/terabox"
         try:
@@ -70,24 +65,25 @@ async def run_terabox(task, bot, terabox_downloader) -> None:
         finally:
             terabox_downloader.root_path = saved_root
         if not result.ok:
-            await status_msg.edit(f"❌ **SpideyBot: Failed to resolve link.**\nReason: `{result.error or 'Unknown error'}`")
+            await status_msg.edit(
+                f"\u274c **SpideyBot: Failed to resolve link.**\n"
+                f"Reason: `{result.error or 'Unknown error'}`"
+            )
             return
 
         files_to_send = [f for f in result.files if not f.is_dir and f.dlink]
         if not files_to_send:
-            await status_msg.edit("ℹ️ **SpideyBot:** No actual files found in this share.")
+            await status_msg.edit("\u2139\ufe0f **SpideyBot:** No actual files found in this share.")
             return
 
-        # Size limits
         max_size_bytes, limit_str = get_size_limit(task.is_premium, task.is_admin)
-
         total_size_bytes = sum(f.size_bytes for f in files_to_send)
         total_size_mb = total_size_bytes / (1024 * 1024)
         if total_size_bytes > max_size_bytes:
             await status_msg.edit(
-                f"⚠️ **SpideyBot: Limit Exceeded.** The total share size is `{total_size_mb:.2f} MB`, "
-                f"which exceeds your limit of `{limit_str}`.\n"
-                f"Download aborted."
+                f"\u26a0\ufe0f **SpideyBot: Limit Exceeded.** "
+                f"The total share size is `{total_size_mb:.2f} MB`, "
+                f"which exceeds your limit of `{limit_str}`.\nDownload aborted."
             )
             return
 
@@ -97,30 +93,49 @@ async def run_terabox(task, bot, terabox_downloader) -> None:
 
         output_dir = f"./downloads/tb_{task.user_id}_{task.entry_id}"
         caption = f"{title}\n\nDownloaded by SpideyBot from [link]({task.link})\n\n"
-
         os.makedirs(output_dir, exist_ok=True)
+
+        # --- Shared progress state ---
         total_sent = 0
         failed_files = []
-        last_update = 0.0
+        dl_done = 0          # files downloaded so far
+        ul_done = 0          # files uploaded so far
+        last_status_ts = 0.0 # throttle for status edits
+
+        async def _update_status():
+            """Build a combined download+upload status and edit (throttled)."""
+            nonlocal last_status_ts
+            now = time.time()
+            if now - last_status_ts < 3.0:
+                return
+            last_status_ts = now
+            parts = []
+            if dl_done < length_of_files:
+                parts.append(f"\U0001f4e5 Downloading {dl_done}/{length_of_files}")
+            if ul_done > 0:
+                parts.append(f"\U0001f4e4 Uploaded {ul_done}/{length_of_files}")
+            if not parts:
+                return
+            text = " \u2502 ".join(parts)
+            try:
+                await status_msg.edit(f"**SpideyBot:** {text}...")
+            except (MessageNotModifiedError, TelethonRPCError):
+                pass
 
         def _progress_cb(sent_f, total_f):
-            nonlocal last_update
-            now = time.time()
-            if now - last_update < 3.0:
-                return
-            last_update = now
+            """send_file progress callback: update upload count."""
+            nonlocal ul_done
+            new_ul = int(sent_f) + 1
+            if new_ul > ul_done:
+                ul_done = new_ul
             try:
                 loop = asyncio.get_running_loop()
-                loop.call_soon(
-                    asyncio.ensure_future,
-                    status_msg.edit(
-                        f"\U0001f4e4 **SpideyBot:** Sending {int(sent_f) + 1}/{length_of_files}..."
-                    ),
-                )
+                loop.call_soon(asyncio.ensure_future, _update_status())
             except RuntimeError:
                 pass
 
         async def _send_batch(files):
+            """Upload+send a batch via send_file."""
             nonlocal total_sent
             if not files:
                 return
@@ -151,12 +166,12 @@ async def run_terabox(task, bot, terabox_downloader) -> None:
                     except Exception as send_err:
                         logger.warning("Individual send failed", error=str(send_err))
 
+        # --- Pipelined download + upload ---
         files_iter = iter(files_to_send)
-        downloaded_count = 0
 
         async def _prefetch_batch(count):
-            """Download up to *count* files from files_iter."""
-            nonlocal downloaded_count
+            """Download up to *count* files, updating dl_done."""
+            nonlocal dl_done
             batch = []
             for _ in range(count):
                 if task.is_cancelled:
@@ -166,10 +181,8 @@ async def run_terabox(task, bot, terabox_downloader) -> None:
                 except StopIteration:
                     break
                 try:
-                    downloaded_count += 1
-                    await status_msg.edit(
-                        f"📥 **SpideyBot:** Downloading {downloaded_count}/{length_of_files}..."
-                    )
+                    dl_done += 1
+                    await _update_status()
                     filepath = await download_file_async(
                         terabox_downloader, tb_file, output_dir
                     )
@@ -183,11 +196,10 @@ async def run_terabox(task, bot, terabox_downloader) -> None:
                     logger.warning("Skipping 0-byte file", file=filepath)
                     failed_files.append((tb_file.filename, "empty file (0 bytes)"))
                     continue
-
                 batch.append(filepath)
             return batch
 
-        # Pipeline: while uploading batch N, download batch N+1 concurrently
+        # Prefetch first batch, then pipeline: upload N || download N+1
         batch = await _prefetch_batch(_BATCH_SIZE)
         while batch:
             next_batch_task = asyncio.create_task(_prefetch_batch(_BATCH_SIZE))
@@ -199,15 +211,24 @@ async def run_terabox(task, bot, terabox_downloader) -> None:
             shutil.rmtree(output_dir, ignore_errors=True)
 
         if task.is_cancelled:
-            await status_msg.edit("❌ **SpideyBot:** Download cancelled.")
+            await status_msg.edit("\u274c **SpideyBot:** Download cancelled.")
         elif total_sent > 0:
-            msg = f"✅ **SpideyBot: Done!** Sent {total_sent}/{length_of_files} files ({total_size_mb:.2f} MB)."
+            msg = (
+                f"\u2705 **SpideyBot: Done!** Sent {total_sent}/{length_of_files} "
+                f"files ({total_size_mb:.2f} MB)."
+            )
             if failed_files:
-                msg += f"\n⚠️ {len(failed_files)} file(s) failed."
+                msg += f"\n\u26a0\ufe0f {len(failed_files)} file(s) failed."
             await status_msg.edit(msg)
         else:
-            await status_msg.edit("❌ **SpideyBot:** No files were successfully sent.")
+            await status_msg.edit("\u274c **SpideyBot:** No files were successfully sent.")
 
     except Exception as e:
         logger.exception("Error processing TeraBox task", link=task.link, error=str(e))
-        await status_msg.edit(f"❌ **SpideyBot: An error occurred.**\nError: `{str(e)}`")
+        try:
+            await status_msg.edit(
+                f"\u274c **SpideyBot: An error occurred.**\nError: `{str(e)}`"
+            )
+        except (MessageNotModifiedError, TelethonRPCError):
+            pass
+
