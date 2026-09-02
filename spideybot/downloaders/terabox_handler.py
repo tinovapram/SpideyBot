@@ -147,6 +147,7 @@ async def run_terabox(task, bot, terabox_downloader) -> None:
                     task.event.chat_id,
                     valid,
                     caption=caption,
+                    reply_to=task.event.message.id,
                     supports_streaming=True,
                     progress_callback=_progress_cb,
                 )
@@ -159,6 +160,7 @@ async def run_terabox(task, bot, terabox_downloader) -> None:
                             task.event.chat_id,
                             fp,
                             caption=caption,
+                            reply_to=task.event.message.id,
                             supports_streaming=True,
                             progress_callback=_progress_cb,
                         )

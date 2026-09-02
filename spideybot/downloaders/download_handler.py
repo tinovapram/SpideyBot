@@ -97,6 +97,7 @@ async def _upload_and_send_batch(bot, task, batch_files, caption, status_msg):
             task.event.chat_id,
             valid,
             caption=caption,
+            reply_to=task.event.message.id,
             supports_streaming=True,
             progress_callback=_progress_cb,
         )
@@ -109,6 +110,7 @@ async def _upload_and_send_batch(bot, task, batch_files, caption, status_msg):
                     task.event.chat_id,
                     fp,
                     caption=caption,
+                    reply_to=task.event.message.id,
                     supports_streaming=True,
                     progress_callback=_progress_cb,
                 )
@@ -234,6 +236,7 @@ async def _send_all_at_once(bot, task, downloaded_files, caption, status_msg):
             task.event.chat_id,
             valid,
             caption=caption,
+            reply_to=task.event.message.id,
             supports_streaming=True,
             progress_callback=_progress_cb,
         )
@@ -246,6 +249,7 @@ async def _send_all_at_once(bot, task, downloaded_files, caption, status_msg):
                     task.event.chat_id,
                     fp,
                     caption=caption,
+                    reply_to=task.event.message.id,
                     supports_streaming=True,
                     progress_callback=_progress_cb,
                 )
