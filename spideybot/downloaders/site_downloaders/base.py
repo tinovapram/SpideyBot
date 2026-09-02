@@ -2,6 +2,7 @@ import os
 import re
 import urllib.parse
 import requests
+from typing import Iterator
 
 from spideybot.utils.files import sanitize_filename
 
@@ -57,3 +58,12 @@ class BaseDownloader:
                     f.write(chunk)
 
         return file_path
+
+    def download_streaming(self, url: str, output_dir: str = "downloads") -> Iterator[str]:
+        """Yield file paths one-by-one as they finish downloading.
+
+        Subclasses that download files individually (e.g. gallery posts)
+        should override this to yield each path immediately.  The default
+        falls back to ``download()`` which collects everything first.
+        """
+        yield from self.download(url, output_dir=output_dir)

@@ -1,6 +1,7 @@
 import os
 import re
 import json
+from typing import Iterator
 
 import structlog
 from bs4 import BeautifulSoup
@@ -140,3 +141,37 @@ class TwitterDownloader(BaseDownloader):
                 logger.warning("Failed to write metadata.json", error=str(meta_err))
 
         return downloaded_paths
+
+    def download_streaming(self, url: str, output_dir: str = "downloads") -> Iterator[str]:
+        """Yield media files one-by-one as they download."""
+        info = self.fetch_media(url)
+        safe_title = self._sanitize_filename(info["title"])
+        os.makedirs(output_dir, exist_ok=True)
+
+        for idx, media_url in enumerate(info["media_urls"], 1):
+            ext = ".jpg"
+            clean_url = media_url.split("?")[0]
+            match = re.search(r"\.(\w{3,4})$", clean_url)
+            if match:
+                ext = f".{match.group(1)}"
+                if ext.lower() in [".mp4", ".m3u8"]:
+                    ext = ".mp4"
+
+            file_path = os.path.join(output_dir, f"{safe_title}_{idx}{ext}" if len(info["media_urls"]) > 1 else f"{safe_title}{ext}")
+            self._download_file(media_url, file_path)
+            yield file_path
+
+        # Save metadata.json for caption extraction
+        if info.get("text"):
+            try:
+                meta_data = {
+                    "category": "twitter",
+                    "author": info["author"],
+                    "text": info["text"]
+                }
+                meta_path = os.path.join(output_dir, "metadata.json")
+                with open(meta_path, "w", encoding="utf-8") as f:
+                    json.dump(meta_data, f, indent=4)
+                yield meta_path
+            except Exception as meta_err:
+                logger.warning("Failed to write metadata.json", error=str(meta_err))

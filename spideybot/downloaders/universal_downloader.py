@@ -1,4 +1,5 @@
 import os
+from typing import Iterator
 
 import structlog
 from spideybot.downloaders.site_downloaders.youtube import YouTubeDownloader
@@ -84,3 +85,23 @@ class UniversalDownloader:
         
         logger.info("Routing URL to downloader", platform=platform, downloader=downloader.__class__.__name__)
         return downloader.download(url, output_dir=output_dir)
+
+    def download_streaming(self, url: str, output_dir: str = "downloads") -> Iterator[str]:
+        """Yield media files one-by-one as they download.
+
+        Delegates to the platform downloader's ``download_streaming()`` when
+        available, otherwise falls back to ``download()`` (yielding all at once).
+        """
+        platform = self.detect_platform(url)
+        if platform == "unknown":
+            raise ValueError(f"Unsupported platform or URL format: {url}")
+
+        downloader = self.downloaders.get(platform)
+        if not downloader:
+            raise ValueError(f"Downloader for platform '{platform}' not configured")
+
+        logger.info("Routing URL to streaming downloader", platform=platform)
+        if hasattr(downloader, 'download_streaming'):
+            yield from downloader.download_streaming(url, output_dir=output_dir)
+        else:
+            yield from downloader.download(url, output_dir=output_dir)

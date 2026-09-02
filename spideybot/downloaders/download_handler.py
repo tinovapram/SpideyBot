@@ -4,6 +4,11 @@ SpideyBot - Media Download Handler.
 Orchestrates the full download flow: download -> sanitize -> upload -> send -> cleanup.
 Routes to Reddit, UniversalDownloader, or gallery-dl as fallback.
 Extracted from queue_manager for single-responsibility.
+
+Supports streaming (incremental) downloads for site-specific downloaders:
+files are yielded one-by-one, batched into groups of 10, and sent as an
+album while disk space is reclaimed immediately after each batch.
+Gallery-dl downloads everything at once (no streaming) and sends all at once.
 """
 
 import os
@@ -13,43 +18,241 @@ import asyncio
 from urllib.parse import urlparse
 
 import structlog
-from telethon import Button
 from telethon.errors import RPCError as TelethonRPCError
 
 from spideybot.config import get_size_limit
 from spideybot.utils.files import sanitize_filename, extract_post_text
-from spideybot.utils.progress import ProgressCallback
-from spideybot.utils.task_progress import TaskProgress
 from spideybot.downloaders.universal_downloader import UniversalDownloader
 
 logger = structlog.get_logger(__name__)
+
+_BATCH_SIZE = 10  # Telegram album limit
+
+
+def _sanitize_path(fp):
+    """Rename *fp* on disk if the filename needs sanitization."""
+    if not os.path.exists(fp):
+        return fp
+    directory, filename = os.path.split(fp)
+    clean_name = sanitize_filename(filename)
+    if clean_name == filename:
+        return fp
+    clean_fp = os.path.join(directory, clean_name)
+    try:
+        if os.path.exists(clean_fp) and clean_fp != fp:
+            base, ext = os.path.splitext(clean_name)
+            counter = 1
+            while os.path.exists(os.path.join(directory, f"{base}_{counter}{ext}")):
+                counter += 1
+            clean_fp = os.path.join(directory, f"{base}_{counter}{ext}")
+        os.rename(fp, clean_fp)
+        return clean_fp
+    except Exception as e:
+        logger.warning("Failed to rename file", old=fp, new=clean_fp, error=str(e))
+        return fp
+
+
+def _cleanup_batch(batch_files):
+    """Remove downloaded files to free disk space."""
+    for fp in batch_files:
+        try:
+            if os.path.isfile(fp):
+                os.remove(fp)
+        except OSError:
+            pass
+
+
+async def _upload_and_send_batch(bot, task, batch_files, caption, status_msg):
+    """Upload *batch_files* and send as album. Returns count sent."""
+    handles = []
+    sent = 0
+
+    for i, fp in enumerate(batch_files):
+        if task.is_cancelled:
+            break
+        fsize = os.path.getsize(fp) if os.path.exists(fp) else 0
+        if fsize == 0:
+            logger.warning("Skipping 0-byte file", file=fp)
+            continue
+        try:
+            await status_msg.edit(
+                f"\U0001f4e4 **SpideyBot:** Uploading {i + 1}/{len(batch_files)}..."
+            )
+            handle = await bot.upload_file(fp, supports_streaming=True)
+            handles.append(handle)
+        except Exception as e:
+            logger.error("Failed to upload file", file=fp, error=str(e))
+            try:
+                await task.event.reply(
+                    f"\u274c **Failed to upload:** `{os.path.basename(fp)}`"
+                )
+            except TelethonRPCError:
+                pass
+
+    if not handles:
+        return 0
+
+    try:
+        if len(handles) == 1:
+            await task.event.reply(
+                file=handles[0], message=caption, supports_streaming=True
+            )
+        else:
+            await task.event.reply(
+                file=handles, message=caption, supports_streaming=True
+            )
+        sent = len(handles)
+    except Exception as e:
+        logger.warning("Album send failed, falling back to individual", error=str(e))
+        for h in handles:
+            try:
+                await task.event.reply(
+                    file=h, message=caption, supports_streaming=True
+                )
+                sent += 1
+            except Exception as send_err:
+                logger.warning("Individual send failed", error=str(send_err))
+    return sent
+
+
+async def _send_streaming(
+    task, bot, dest_dir, source_iter, fallback_downloader,
+    status_msg, caption, max_size_bytes, progress_callback,
+):
+    """Consume *source_iter* yielding file paths in batches of 10.
+    Upload + send each batch immediately, then clean up. Returns total sent."""
+    batch = []
+    total_sent = 0
+    json_files = []
+
+    try:
+        for file_path in source_iter:
+            clean = _sanitize_path(file_path)
+            if clean.lower().endswith(".json"):
+                json_files.append(clean)
+                continue
+            batch.append(clean)
+            if len(batch) >= _BATCH_SIZE:
+                total_sent += await _upload_and_send_batch(
+                    bot, task, batch, caption, status_msg
+                )
+                _cleanup_batch(batch)
+                batch = []
+        if batch:
+            total_sent += await _upload_and_send_batch(
+                bot, task, batch, caption, status_msg
+            )
+            _cleanup_batch(batch)
+    except Exception as e:
+        logger.warning(
+            "Streaming download failed, falling back to gallery-dl", error=str(e)
+        )
+        try:
+            await status_msg.edit(
+                "\u26a0\ufe0f **SpideyBot:** Primary download failed, "
+                "trying gallery-dl fallback..."
+            )
+        except TelethonRPCError:
+            pass
+        downloaded = await fallback_downloader.download(
+            task.link,
+            os.path.join(dest_dir, "gdl_fallback"),
+            max_size_bytes,
+            progress_callback=progress_callback,
+        )
+        if downloaded:
+            total_sent = await _send_all_at_once(
+                bot, task, downloaded, caption, status_msg
+            )
+
+    # Cleanup metadata + staging dir
+    for fp in json_files:
+        try:
+            if os.path.isfile(fp):
+                os.remove(fp)
+        except OSError:
+            pass
+    try:
+        if os.path.isdir(dest_dir):
+            shutil.rmtree(dest_dir, ignore_errors=True)
+    except Exception:
+        pass
+    return total_sent
+
+
+async def _send_all_at_once(bot, task, downloaded_files, caption, status_msg):
+    """Upload + send all files at once (gallery-dl path). Returns count sent."""
+    media_files = []
+    for fp in downloaded_files:
+        if os.path.exists(fp) and not fp.lower().endswith(".json"):
+            media_files.append(_sanitize_path(fp))
+
+    if not media_files:
+        return 0
+
+    handles = []
+    for i, fp in enumerate(media_files):
+        if task.is_cancelled:
+            break
+        fsize = os.path.getsize(fp) if os.path.exists(fp) else 0
+        if fsize == 0:
+            continue
+        try:
+            await status_msg.edit(
+                f"\U0001f4e4 **SpideyBot:** Uploading {i + 1}/{len(media_files)}..."
+            )
+            handle = await bot.upload_file(fp, supports_streaming=True)
+            handles.append(handle)
+        except Exception as e:
+            logger.error("Failed to upload file", file=fp, error=str(e))
+
+    if not handles:
+        return 0
+
+    sent = 0
+    try:
+        if len(handles) == 1:
+            await task.event.reply(
+                file=handles[0], message=caption, supports_streaming=True
+            )
+        else:
+            await task.event.reply(
+                file=handles, message=caption, supports_streaming=True
+            )
+        sent = len(handles)
+    except Exception as e:
+        logger.warning("Album send failed, falling back to individual", error=str(e))
+        for h in handles:
+            try:
+                await task.event.reply(
+                    file=h, message=caption, supports_streaming=True
+                )
+                sent += 1
+            except Exception as send_err:
+                logger.warning("Individual send failed", error=str(send_err))
+    return sent
 
 
 async def run_download_task(task, bot, fallback_downloader, reddit_downloader=None) -> None:
     """
     Execute a media download task end-to-end.
 
-    Flow:
-        1. Download media via Reddit/UniversalDownloader, or gallery-dl as fallback
-        2. Sanitize filenames for cross-platform compatibility
-        3. Separate JSON metadata from media files
-        4. Extract post caption from metadata
-        5. Upload and send files to the user
-        6. Cleanup temp directory
+    Streaming path (site-specific downloaders): files yielded one-by-one,
+    batched into groups of 10, sent as albums, cleaned up immediately.
+    Gallery-dl path: downloads everything, sends all at once.
 
     Args:
         task: DownloadTask instance with user info and link.
         bot: Telethon TelegramClient instance.
-        fallback_downloader: GalleryDLDownloader instance (used as generic fallback).
+        fallback_downloader: GalleryDLDownloader instance.
         reddit_downloader: RedditDownloader instance.
     """
     status_msg = task.status_msg
     if not status_msg:
-        status_msg = await task.event.reply("⏳ **SpideyBot:** Starting download...")
+        status_msg = await task.event.reply("\u23f3 **SpideyBot:** Starting download...")
 
     max_size_bytes, _ = get_size_limit(task.is_premium, task.is_admin)
 
-    # Detect platform early for per-user staging dir
     _ud = UniversalDownloader()
     _platform = _ud.detect_platform(task.link)
     if "reddit.com" in task.link.lower():
@@ -58,268 +261,130 @@ async def run_download_task(task, bot, fallback_downloader, reddit_downloader=No
         _site = _platform
     else:
         _site = "gallery-dl"
-    # Per-user staging dir: ./downloads/{user_id}/{site}/{entry_id}
     task_staging_dir = os.path.join(str(task.user_id), _site, str(task.entry_id))
+    dest_dir = os.path.join(fallback_downloader.download_dir, task_staging_dir)
 
     try:
-        # Define throttled progress callback for Telegram status edits
         last_update_time = 0.0
-        
+
         async def progress_callback(status_text: str):
             nonlocal last_update_time
             now = time.time()
-            if now - last_update_time >= 5.0:  # Edit message at most once every 5 seconds to avoid rate limits
+            if now - last_update_time >= 5.0:
                 try:
                     await status_msg.edit(status_text)
                     last_update_time = now
                 except TelethonRPCError:
-                    pass  # Telegram rate-limit or message deleted — safe to ignore
+                    pass
 
-        async def run_twitter_fallback(dest_dir):
-            from spideybot.downloaders.site_downloaders.twitter import TwitterDownloader
-            td = TwitterDownloader()
-            loop = asyncio.get_running_loop()
-            return await loop.run_in_executor(
-                None,
-                td.download,
-                task.link,
-                dest_dir
+        async def _edit_status(text: str):
+            try:
+                await status_msg.edit(text)
+            except TelethonRPCError:
+                pass
+
+        is_reddit = "reddit.com" in task.link.lower()
+        site_label = "Reddit" if is_reddit else (
+            _platform if _platform != "unknown" else "gallery-dl"
+        )
+        use_streaming = _platform != "unknown"
+
+        try:
+            await _edit_status(
+                f"\U0001f4e5 **SpideyBot:** Downloading from {site_label}..."
             )
 
-        # Download files
-        is_twitter = any(domain in task.link.lower() for domain in ["twitter.com", "x.com"])
-        is_reddit = "reddit.com" in task.link.lower()
-        
-        ud = _ud  # reuse pre-detected
-        platform = _platform
-        downloaded_files = None
-        
-        try:
-            if is_reddit and reddit_downloader:
-                logger.info("Attempting Reddit download via custom RedditDownloader")
-                dest_dir = os.path.join(fallback_downloader.download_dir, task_staging_dir)
+            if use_streaming:
+                # Streaming path: yield files one-by-one, batch-send
                 loop = asyncio.get_running_loop()
-                downloaded_files = await loop.run_in_executor(
-                    None,
-                    reddit_downloader.download,
-                    task.link,
-                    dest_dir
-                )
-            elif platform != "unknown":
-                logger.info("Attempting download via UniversalDownloader", platform=platform)
-                dest_dir = os.path.join(fallback_downloader.download_dir, task_staging_dir)
-                loop = asyncio.get_running_loop()
-                downloaded_files = await loop.run_in_executor(
-                    None,
-                    ud.download,
-                    task.link,
-                    dest_dir
-                )
-            else:
-                downloaded_files = await fallback_downloader.download(
-                    task.link, task_staging_dir, max_size_bytes, progress_callback=progress_callback
-                )
-        except Exception as e:
-            if is_reddit and reddit_downloader:
-                logger.warning("Custom RedditDownloader failed, falling back to gallery-dl", error=str(e))
-                try:
-                    downloaded_files = await fallback_downloader.download(
-                        task.link, task_staging_dir, max_size_bytes, progress_callback=progress_callback
+                if is_reddit and reddit_downloader:
+                    logger.info("Streaming download via RedditDownloader")
+                    source_iter = await loop.run_in_executor(
+                        None,
+                        lambda: reddit_downloader.download_streaming(
+                            task.link, dest_dir
+                        ),
                     )
-                except Exception as fallback_err:
-                    raise fallback_err
-            elif platform != "unknown":
-                logger.warning("UniversalDownloader failed, falling back to gallery-dl", platform=platform, error=str(e))
-                try:
-                    downloaded_files = await fallback_downloader.download(
-                        task.link, task_staging_dir, max_size_bytes, progress_callback=progress_callback
-                    )
-                except Exception as fallback_err:
-                    if platform == "twitter":
-                        logger.warning("gallery-dl failed for Twitter, trying fallback scraper", error=str(fallback_err))
-                        dest_dir = os.path.join(fallback_downloader.download_dir, task_staging_dir)
-                        downloaded_files = await run_twitter_fallback(dest_dir)
-                    else:
-                        raise fallback_err
-            elif is_twitter:
-                logger.warning("gallery-dl failed for Twitter, trying fallback scraper", error=str(e))
-                dest_dir = os.path.join(fallback_downloader.download_dir, task_staging_dir)
-                downloaded_files = await run_twitter_fallback(dest_dir)
-            else:
-                raise e
-
-        if is_twitter and not downloaded_files:
-            logger.info("gallery-dl returned no files for Twitter, trying fallback scraper")
-            dest_dir = os.path.join(fallback_downloader.download_dir, task_staging_dir)
-            downloaded_files = await run_twitter_fallback(dest_dir)
-
-        if not downloaded_files:
-            await status_msg.edit("📥 **SpideyBot: No files downloaded from the link.**")
-            return
-
-        # Sanitize paths to comply with Windows and Linux filename rules
-        sanitized_paths = []
-        for fp in downloaded_files:
-            if os.path.exists(fp):
-                directory, filename = os.path.split(fp)
-                clean_name = sanitize_filename(filename)
-                if clean_name != filename:
-                    clean_fp = os.path.join(directory, clean_name)
-                    try:
-                        if os.path.exists(clean_fp) and clean_fp != fp:
-                            base, ext = os.path.splitext(clean_name)
-                            counter = 1
-                            while os.path.exists(os.path.join(directory, f"{base}_{counter}{ext}")):
-                                counter += 1
-                            clean_fp = os.path.join(directory, f"{base}_{counter}{ext}")
-                        os.rename(fp, clean_fp)
-                        sanitized_paths.append(clean_fp)
-                    except Exception as rename_err:
-                        logger.warning("Failed to rename file", old=fp, new=clean_fp, error=str(rename_err))
-                        sanitized_paths.append(fp)
                 else:
-                    sanitized_paths.append(fp)
-            else:
-                sanitized_paths.append(fp)
-        downloaded_files = sanitized_paths
+                    logger.info(
+                        "Streaming download via UniversalDownloader",
+                        platform=_platform,
+                    )
+                    source_iter = await loop.run_in_executor(
+                        None,
+                        lambda: _ud.download_streaming(task.link, dest_dir),
+                    )
 
-        # Separate metadata JSON files from media files
-        json_files = [fp for fp in downloaded_files if fp.lower().endswith('.json')]
-        media_files = [fp for fp in downloaded_files if not fp.lower().endswith('.json')]
-
-        if not media_files:
-            await status_msg.edit("ℹ️ **SpideyBot: No media files downloaded from the link.**")
-            return
-
-        # Extract post description/caption if present
-        post_text = extract_post_text(json_files)
-
-        # ── Unified Progress Tracker ─────────────────────────────────────
-        parsed = urlparse(task.link)
-        task_title = parsed.netloc or "Downloaded Media"
-        progress = TaskProgress(task_title, total_files=len(media_files))
-        for i, fp in enumerate(media_files):
-            file_size = os.path.getsize(fp) if os.path.exists(fp) else 0
-            progress.add_file(i, os.path.basename(fp), total_bytes=file_size)
-
-        # Cancel button to persist through all progress messages
-        _cancel_buttons = [[Button.inline("❌ Cancel", data=f"cancel:{task.entry_id}")]]
-
-        await progress.update_message(status_msg, force=True, buttons=_cancel_buttons)
-
-        # Upload files with per-file error tracking
-        uploaded_handles = []
-        failed_files = []
-        for i, fp in enumerate(media_files):
-            # Check cancellation before each upload
-            if task.is_cancelled:
-                progress.mark_skipped(i)
-                await progress.update_message(status_msg, force=True, buttons=_cancel_buttons)
-                continue
-
-            # Skip 0-byte files — Telegram rejects them with
-            # "The length of a file part is invalid"
-            fsize = os.path.getsize(fp) if os.path.exists(fp) else 0
-            if fsize == 0:
-                logger.warning("Skipping 0-byte file", file=fp)
-                progress.mark_failed(i, error="empty file (0 bytes)")
-                failed_files.append((os.path.basename(fp), "empty file (0 bytes)"))
-                await progress.update_message(status_msg, buttons=_cancel_buttons)
-                continue
-
-            try:
-                progress.mark_uploading(i)
-                await progress.update_message(status_msg, buttons=_cancel_buttons)
-
-                def _make_cb(idx):
-                    def cb(current, total):
-                        if total:
-                            progress.update_upload(idx, current)
-                            # update_message is async; schedule it without blocking
-                            try:
-                                loop = asyncio.get_running_loop()
-                                loop.call_soon(
-                                    asyncio.ensure_future,
-                                    progress.update_message(status_msg, buttons=_cancel_buttons),
-                                )
-                            except RuntimeError:
-                                pass  # no running loop — skip progress update
-                    return cb
-
-                handle = await bot.upload_file(fp, progress_callback=_make_cb(i))
-                uploaded_handles.append(handle)
-                progress.mark_sent(i)
-                await progress.update_message(status_msg, buttons=_cancel_buttons)
-            except Exception as e:
-                logger.error("Failed to upload file", file=fp, error=str(e))
-                failed_files.append((os.path.basename(fp), str(e)))
-                progress.mark_failed(i, error=str(e))
-                await progress.update_message(status_msg, buttons=_cancel_buttons)
-                await task.event.reply(f"❌ **Failed to upload file:** `{os.path.basename(fp)}`")
-
-        # Finalize progress message
-        await progress.finalize(status_msg)
-
-        if uploaded_handles:
-            await status_msg.edit("📤 **SpideyBot: Sending files to chat...**")
-
-            # Get folder name from the first downloaded file as fallback caption
-            first_file = media_files[0]
-            folder_name = os.path.basename(os.path.dirname(first_file))
-            if folder_name.startswith("dl_"):
                 parsed = urlparse(task.link)
                 folder_name = parsed.netloc or "Downloaded Media"
+                caption = (
+                    folder_name
+                    + f"\n\nDownloaded by SpideyBot from [link]({task.link})\n\n"
+                )
 
-            final_caption = post_text if post_text else folder_name
-            final_caption+='\n\nDownloaded by SpideyBot from [link]('+task.link+')\n\n'
+                total_sent = await _send_streaming(
+                    task, bot, dest_dir, source_iter, fallback_downloader,
+                    status_msg, caption, max_size_bytes, progress_callback,
+                )
+            else:
+                # Gallery-dl path: downloads all at once
+                logger.info("Downloading via gallery-dl")
+                downloaded_files = await fallback_downloader.download(
+                    task.link, task_staging_dir, max_size_bytes,
+                    progress_callback=progress_callback,
+                )
 
-            # try:
-            #     await task.event.client.send_file(task.event.sender_id, file=uploaded_handles, caption=final_caption, progress_callback=task.progress_callback)
-            
-            # Attempt to send files as album if <= 10 files
-            sent_success = False
-            try:
-                if len(uploaded_handles) == 1:
-                    await task.event.reply(file=uploaded_handles[0], message=final_caption, supports_streaming=True)
-                else:
-                    await task.event.reply(file=uploaded_handles, message=final_caption, supports_streaming=True)
-                sent_success = True
-            except Exception as album_err:
-                logger.warning("Failed to send as album, falling back to individual", error=str(album_err))
+                if not downloaded_files:
+                    await status_msg.edit(
+                        "\u274c **SpideyBot: No files downloaded from the link.**"
+                    )
+                    return
 
-            if not sent_success:
-                # If sending individually, the first file gets the full post text,
-                # subsequent ones get folder name/short caption
-                for i, (fp, handle) in enumerate(zip(media_files, uploaded_handles)):
-                    if i == 0 and post_text:
-                        caption = post_text
-                    else:
-                        f_name = os.path.basename(os.path.dirname(fp))
-                        if f_name.startswith("dl_"):
-                            parsed = urlparse(task.link)
-                            f_name = parsed.netloc or "Downloaded Media"
-                        caption = f_name
-                    try:
-                        await task.event.reply(file=handle, message=caption, supports_streaming=True)
-                    except Exception as send_err:
-                        logger.warning("Failed to send file individually", file=fp, error=str(send_err))
-                        failed_files.append((os.path.basename(fp), str(send_err)))
+                json_files = [
+                    f for f in downloaded_files if f.lower().endswith(".json")
+                ]
+                post_text = extract_post_text(json_files)
+                parsed = urlparse(task.link)
+                folder_name = parsed.netloc or "Downloaded Media"
+                caption = (post_text or folder_name) + (
+                    f"\n\nDownloaded by SpideyBot from [link]({task.link})\n\n"
+                )
 
-            await status_msg.edit(f"✅ **SpideyBot: Download completed!**\n• Sent {len(uploaded_handles)} file(s).")
+                total_sent = await _send_all_at_once(
+                    bot, task, downloaded_files, caption, status_msg
+                )
+
+                staging = os.path.join(
+                    fallback_downloader.download_dir, task_staging_dir
+                )
+                if os.path.isdir(staging):
+                    shutil.rmtree(staging, ignore_errors=True)
+
+        except Exception as e:
+            logger.exception("Download failed", link=task.link, error=str(e))
+            await status_msg.edit(
+                f"\u274c **SpideyBot: Failed to download media.**\n"
+                f"Reason: `{str(e)}`"
+            )
+            return
+
+        if total_sent > 0:
+            await status_msg.edit(
+                f"\u2705 **SpideyBot: Done!** Sent {total_sent} file(s)."
+            )
         else:
-            await status_msg.edit("❌ **SpideyBot: No files were successfully downloaded.**")
-
-        # Report per-file failures if any
-        error_summary = progress.get_error_summary()
-        if error_summary:
-            await task.event.reply(error_summary)
+            await status_msg.edit(
+                "\u274c **SpideyBot: No files were successfully sent.**"
+            )
 
     except Exception as e:
-        logger.exception("Error in gallery-dl download task", link=task.link, error=str(e))
-        await status_msg.edit(f"❌ **SpideyBot: Failed to download media.**\nReason: `{str(e)}`")
-
-    finally:
-        # Cleanup downloaded files
-        dest_dir = os.path.join(fallback_downloader.download_dir, task_staging_dir)
-        if os.path.exists(dest_dir):
-            shutil.rmtree(dest_dir)
+        logger.exception(
+            "Unhandled error in download task", link=task.link, error=str(e)
+        )
+        try:
+            await status_msg.edit(
+                f"\u274c **SpideyBot: Failed to download media.**\n"
+                f"Reason: `{str(e)}`"
+            )
+        except TelethonRPCError:
+            pass

@@ -6,6 +6,7 @@ import urllib.parse
 import json
 import requests
 import praw
+from typing import Iterator
 
 import structlog
 
@@ -279,3 +280,62 @@ class RedditDownloader:
             logger.warning("Failed to save metadata JSON", error=str(e))
 
         return downloaded_paths
+
+    def download_streaming(self, url: str, output_dir: str = "downloads") -> Iterator[str]:
+        """Yield media files one-by-one as they download.
+
+        For gallery posts this yields each image immediately after downloading.
+        For video/single-image posts the behaviour is identical to ``download()``.
+        """
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+
+        submission = self.reddit.submission(url=url)
+        title = submission.title
+        upvotes = submission.ups
+        safe_title = sanitize_filename(title)
+
+        if getattr(submission, 'is_video', False):
+            # Video — single file, delegate to sync download
+            yield from self.download(url, output_dir)
+            return
+
+        if getattr(submission, 'is_gallery', False) and hasattr(submission, 'media_metadata'):
+            for item_id, item in submission.media_metadata.items():
+                if item.get('status') == 'valid' and 's' in item:
+                    img_url = item['s'].get('u')
+                    if not img_url:
+                        continue
+                    img_url = html.unescape(img_url)
+                    ext = '.jpg'
+                    if 'm' in item:
+                        mime = item['m']
+                        if '/' in mime:
+                            ext = f".{mime.split('/')[-1]}"
+                    file_path = os.path.join(output_dir, f"{upvotes}_{safe_title}_{item_id}{ext}")
+                    resp = requests.get(img_url, stream=True)
+                    resp.raise_for_status()
+                    with open(file_path, 'wb') as f:
+                        for chunk in resp.iter_content(chunk_size=8192):
+                            f.write(chunk)
+                    yield file_path
+        else:
+            # Single image or yt-dlp — delegate to sync download
+            yield from self.download(url, output_dir)
+            return
+
+        # Metadata — yield last
+        try:
+            author_name = submission.author.name if submission.author else "reddit"
+            meta_data = {
+                "category": "reddit",
+                "author": author_name,
+                "title": title,
+                "selftext": submission.selftext if getattr(submission, 'selftext', None) else ""
+            }
+            meta_path = os.path.join(output_dir, "metadata.json")
+            with open(meta_path, "w", encoding="utf-8") as f:
+                json.dump(meta_data, f, indent=4)
+            yield meta_path
+        except Exception as e:
+            logger.warning("Failed to save metadata JSON", error=str(e))
