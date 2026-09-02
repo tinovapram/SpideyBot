@@ -22,7 +22,7 @@ from telethon.errors import RPCError as TelethonRPCError
 
 from spideybot.config import get_size_limit
 from spideybot.utils.files import sanitize_filename, extract_post_text
-from spideybot.downloaders.universal_downloader import UniversalDownloader
+from spideybot.downloaders.universal_downloader import UniversalDownloader  # noqa: F401
 
 logger = structlog.get_logger(__name__)
 
@@ -63,51 +63,54 @@ def _cleanup_batch(batch_files):
 
 
 async def _upload_and_send_batch(bot, task, batch_files, caption, status_msg):
-    """Upload *batch_files* and send as album. Returns count sent."""
-    handles = []
+    """Send *batch_files* as album via send_file. Returns count sent."""
     sent = 0
+    last_update = 0.0
+    n = len(batch_files)
 
-    for i, fp in enumerate(batch_files):
-        if task.is_cancelled:
-            break
-        fsize = os.path.getsize(fp) if os.path.exists(fp) else 0
-        if fsize == 0:
-            logger.warning("Skipping 0-byte file", file=fp)
-            continue
+    def _progress_cb(sent_f, total_f):
+        nonlocal last_update
+        now = time.time()
+        if now - last_update < 3.0:
+            return
+        last_update = now
+        # For albums: sent_f is float (e.g. 2.5 = 50% of 3rd file)
+        file_idx = int(sent_f) + 1
         try:
-            await status_msg.edit(
-                f"\U0001f4e4 **SpideyBot:** Uploading {i + 1}/{len(batch_files)}..."
+            loop = asyncio.get_running_loop()
+            loop.call_soon(
+                asyncio.ensure_future,
+                status_msg.edit(
+                    f"\U0001f4e4 **SpideyBot:** Sending {file_idx}/{n}..."
+                ),
             )
-            handle = await bot.upload_file(fp, supports_streaming=True)
-            handles.append(handle)
-        except Exception as e:
-            logger.error("Failed to upload file", file=fp, error=str(e))
-            try:
-                await task.event.reply(
-                    f"\u274c **Failed to upload:** `{os.path.basename(fp)}`"
-                )
-            except TelethonRPCError:
-                pass
+        except RuntimeError:
+            pass
 
-    if not handles:
+    # Filter out 0-byte files
+    valid = [fp for fp in batch_files if os.path.exists(fp) and os.path.getsize(fp) > 0]
+    if not valid:
         return 0
 
     try:
-        if len(handles) == 1:
-            await task.event.reply(
-                file=handles[0], message=caption, supports_streaming=True
-            )
-        else:
-            await task.event.reply(
-                file=handles, message=caption, supports_streaming=True
-            )
-        sent = len(handles)
+        await bot.send_file(
+            task.event.chat_id,
+            valid,
+            caption=caption,
+            supports_streaming=True,
+            progress_callback=_progress_cb,
+        )
+        sent = len(valid)
     except Exception as e:
         logger.warning("Album send failed, falling back to individual", error=str(e))
-        for h in handles:
+        for fp in valid:
             try:
-                await task.event.reply(
-                    file=h, message=caption, supports_streaming=True
+                await bot.send_file(
+                    task.event.chat_id,
+                    fp,
+                    caption=caption,
+                    supports_streaming=True,
+                    progress_callback=_progress_cb,
                 )
                 sent += 1
             except Exception as send_err:
@@ -119,30 +122,41 @@ async def _send_streaming(
     task, bot, dest_dir, source_iter, fallback_downloader,
     status_msg, caption, max_size_bytes, progress_callback,
 ):
-    """Consume *source_iter* yielding file paths in batches of 10.
-    Upload + send each batch immediately, then clean up. Returns total sent."""
-    batch = []
+    """Consume *source_iter* in a pipelined fashion: download next batch
+    while uploading the current batch. Returns total sent."""
     total_sent = 0
     json_files = []
+    loop = asyncio.get_running_loop()
 
-    try:
-        for file_path in source_iter:
+    def _prefetch_batch():
+        """Run in executor: consume up to _BATCH_SIZE items from source_iter."""
+        batch = []
+        for _ in range(_BATCH_SIZE):
+            try:
+                file_path = next(source_iter)
+            except StopIteration:
+                break
             clean = _sanitize_path(file_path)
             if clean.lower().endswith(".json"):
                 json_files.append(clean)
                 continue
             batch.append(clean)
-            if len(batch) >= _BATCH_SIZE:
-                total_sent += await _upload_and_send_batch(
-                    bot, task, batch, caption, status_msg
-                )
-                _cleanup_batch(batch)
-                batch = []
-        if batch:
+        return batch
+
+    try:
+        # Prefetch first batch (blocking in executor thread)
+        batch = await loop.run_in_executor(None, _prefetch_batch)
+
+        while batch:
+            # Start prefetching next batch in background thread
+            next_batch_task = loop.run_in_executor(None, _prefetch_batch)
+            # Send current batch (async, overlaps with prefetch)
             total_sent += await _upload_and_send_batch(
                 bot, task, batch, caption, status_msg
             )
             _cleanup_batch(batch)
+            # Wait for next batch to be ready
+            batch = await next_batch_task
     except Exception as e:
         logger.warning(
             "Streaming download failed, falling back to gallery-dl", error=str(e)
@@ -181,7 +195,7 @@ async def _send_streaming(
 
 
 async def _send_all_at_once(bot, task, downloaded_files, caption, status_msg):
-    """Upload + send all files at once (gallery-dl path). Returns count sent."""
+    """Send all files at once via send_file (gallery-dl path). Returns count sent."""
     media_files = []
     for fp in downloaded_files:
         if os.path.exists(fp) and not fp.lower().endswith(".json"):
@@ -190,42 +204,50 @@ async def _send_all_at_once(bot, task, downloaded_files, caption, status_msg):
     if not media_files:
         return 0
 
-    handles = []
-    for i, fp in enumerate(media_files):
-        if task.is_cancelled:
-            break
-        fsize = os.path.getsize(fp) if os.path.exists(fp) else 0
-        if fsize == 0:
-            continue
-        try:
-            await status_msg.edit(
-                f"\U0001f4e4 **SpideyBot:** Uploading {i + 1}/{len(media_files)}..."
-            )
-            handle = await bot.upload_file(fp, supports_streaming=True)
-            handles.append(handle)
-        except Exception as e:
-            logger.error("Failed to upload file", file=fp, error=str(e))
+    n = len(media_files)
+    last_update = 0.0
+    sent = 0
 
-    if not handles:
+    def _progress_cb(sent_f, total_f):
+        nonlocal last_update
+        now = time.time()
+        if now - last_update < 3.0:
+            return
+        last_update = now
+        try:
+            loop = asyncio.get_running_loop()
+            loop.call_soon(
+                asyncio.ensure_future,
+                status_msg.edit(
+                    f"\U0001f4e4 **SpideyBot:** Sending {int(sent_f) + 1}/{n}..."
+                ),
+            )
+        except RuntimeError:
+            pass
+
+    valid = [fp for fp in media_files if os.path.exists(fp) and os.path.getsize(fp) > 0]
+    if not valid:
         return 0
 
-    sent = 0
     try:
-        if len(handles) == 1:
-            await task.event.reply(
-                file=handles[0], message=caption, supports_streaming=True
-            )
-        else:
-            await task.event.reply(
-                file=handles, message=caption, supports_streaming=True
-            )
-        sent = len(handles)
+        await bot.send_file(
+            task.event.chat_id,
+            valid,
+            caption=caption,
+            supports_streaming=True,
+            progress_callback=_progress_cb,
+        )
+        sent = len(valid)
     except Exception as e:
         logger.warning("Album send failed, falling back to individual", error=str(e))
-        for h in handles:
+        for fp in valid:
             try:
-                await task.event.reply(
-                    file=h, message=caption, supports_streaming=True
+                await bot.send_file(
+                    task.event.chat_id,
+                    fp,
+                    caption=caption,
+                    supports_streaming=True,
+                    progress_callback=_progress_cb,
                 )
                 sent += 1
             except Exception as send_err:
