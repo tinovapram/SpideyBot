@@ -268,101 +268,22 @@ def register_user_handlers(bot, download_manager):
         user_id = event.sender_id
         username = user.username if user else None
         db.save_or_update_user(user_id, username)
-
-        link = event.pattern_match.group(1)
-        if not link:
-            await event.reply(
-                "\u26A0\uFE0F Please specify a Telegram message link.\n"
-                "Usage: `/dt <t.me link>` or `/dt <range>`"
-            )
-            return
-
-        # Determine single vs range
-        is_range = is_tg_range_url(link)
-
-        # Validate link format
-        if is_range:
-            from spideybot.downloaders.telegram_msg_downloader import parse_tg_range
-            try:
-                parse_tg_range(link)
-            except ValueError:
-                await event.reply(
-                    "\u274C Not a valid Telegram range link.\n"
-                    "Expected: `https://t.me/c/X/5-https://t.me/c/X/54` (same channel)"
-                )
-                return
-        else:
-            try:
-                parse_tg_link(link)
-            except ValueError:
-                await event.reply(
-                    "\u274C Not a valid Telegram message link.\n"
-                    "Expected: `https://t.me/channel/12345` or `https://t.me/c/123456/12345`"
-                )
-                return
-
-        # If user session is active, delegate to outgoing handler
+        
         client = user_sessions.get_client(user_id)
         if client is not None:
             await event.reply(
-                "\u2705 **Processing via your user account.**"
+                "\u2705 **Processing via your user account.**\n"
+                "Queueing download… Use `/cancel` to abort."
             )
             logger.info("/dt delegated to user account", user_id=user_id)
             return
-
-        # No session — try with bot client (works for public channels only)
-        range_label = " (range)" if is_range else ""
-        status_msg = await event.reply(
-            f"\u23F3 **SpideyBot:** Downloading from Telegram{range_label}..."
-        )
-
-        output_dir = f"./downloads/tg_{user_id}"
-
-        if is_range:
-            result = await download_tg_range(bot, link, output_dir=output_dir)
         else:
-            result = await download_tg_message(bot, link, output_dir=output_dir)
-
-        if not result["ok"]:
-            await status_msg.edit(f"\u274C **SpideyBot:** {result['error']}")
+            await event.reply(
+                "\u26A0\uFE0F **No user session active.**\n"
+                "Use `/login` to connect your account for telegram content."
+            )
+            logger.info("/dt blocked (no session)", user_id=user_id)
             return
-
-        files = result["files"]
-        caption_text = result["caption"] or result["chat_title"]
-
-        try:
-            import os as _os
-            for fp in files:
-                await event.reply(file=fp, message=caption_text)
-                caption_text = ""  # only first file gets caption
-
-            total = result.get("total_messages", len(files))
-            dl_count = result.get("downloaded_messages", len(files))
-            if is_range:
-                await status_msg.edit(
-                    f"\u2705 **SpideyBot:** Downloaded {dl_count} file(s) "
-                    f"from {total} messages in `{result['chat_title']}`."
-                )
-            else:
-                await status_msg.edit(
-                    f"\u2705 **SpideyBot:** Downloaded {len(files)} file(s) from `{result['chat_title']}`."
-                )
-        except Exception as e:
-            logger.error("Failed to send TG files", error=str(e))
-            await status_msg.edit(f"\u274C **SpideyBot:** Failed to send files: `{e}`")
-        finally:
-            for fp in files:
-                try:
-                    _os.remove(fp)
-                except OSError:
-                    pass
-            try:
-                _os.rmdir(output_dir)
-            except OSError:
-                pass
-
-        logger.info("/dt handled", user_id=user_id, link=link, files=len(files), is_range=is_range)
-
     # ── /cancel ────────────────────────────────────────────────────────────
 
     @bot.on(events.NewMessage(pattern=r"/cancel(?:\s+(\d+))?"))
@@ -375,6 +296,9 @@ def register_user_handlers(bot, download_manager):
         user_id = event.sender_id
         dm = download_manager
 
+        client = user_sessions.get_client(user_id)
+        if client is not None:
+            return
         # /cancel <id> — cancel single task
         target_id = event.pattern_match.group(1)
         if target_id:

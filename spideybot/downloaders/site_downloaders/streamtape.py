@@ -35,49 +35,50 @@ class StreamtapeDownloader(BaseDownloader):
         self._download_file(dl_url, fp, headers={"Referer": url})
         return [fp]
 
-    # ── URL extraction (multiple fallback patterns) ─────────────────
+    # -- URL extraction (multiple fallback patterns) -------------------------------
 
     def _extract_url(self, html, host):
-        # 1. JS-reconstructed URL (cloudstream-style: parse JS substring rebuild)
-        #    The HTML div tokens are decoys — JS replaces them at runtime.
+        # 1. norobotlink JS expression: 'prefix' + ('rest').substring(a).substring(b)
+        norobot_m = re.search(
+            r"getElementById\(['\"]norobotlink['\"]\)\.innerHTML\s*=\s*"
+            r"['\"]([^'\"]+)['\"]\s*\+\s*\(['\"]([^'\"]+)['\"]\)"
+            r"\.substring\((\d+)\)(?:\.substring\((\d+)\))?",
+            html,
+        )
+        if norobot_m:
+            prefix = norobot_m.group(1)  # '//streamtape.cc/get_vid'
+            rest = norobot_m.group(2)    # 'xcdeo?id=...'
+            off = int(norobot_m.group(3))
+            off2 = int(norobot_m.group(4)) if norobot_m.group(4) else 0
+            return f"https:{prefix}{rest[off + off2:]}"
+
+        # 2. JS-reconstructed URL (substring pattern)
         m = re.search(
             r"getElementById\(['\"]captchalink['\"]\)\s*\.innerHTML\s*=\s*['\"]([^'\"]+)['\"]\s*\+\s*\(['\"]([^'\"]+)['\"]\)\.substring\((\d+)\)",
             html,
         )
         if m:
-            prefix = m.group(1)  # e.g. '//streamtape'
-            raw_str = m.group(2)  # e.g. 'defge.cc/get_video?...'
+            prefix = m.group(1)
+            raw_str = m.group(2)
             offset = int(m.group(3))
-            path = raw_str[offset:]  # 'e.cc/get_video?...'
-            return f"https:{prefix}{path}"
+            return f"https:{prefix}{raw_str[offset:]}"
 
-        # 2. JS substring reconstruction of #ideoooolink content
-        # Pattern: document.getElementById('ideoooolink').innerHTML = ... + ('...substring chain...');
+        # 3. ideoooolink + double substring
         m = re.search(
-            r"getElementById\(['\"]ideoooolink['\"]\)\s*\.innerHTML\s*=\s*['\"]([^'\"]+)['\"]\s*\+",
+            r"getElementById\(['\"]ideoooolink['\"]\).*?=\s*['\"]([^'\"]+)['\"]\s*\+.*?\(['\"]([^'\"]+)['\"]\)\.substring\((\d+)\)\.substring\((\d+)\)",
             html,
         )
         if m:
-            prefix = m.group(1)  # e.g. "/streamtape"
-            # Find the string that gets substring'd: ('...')
-            m2 = re.search(
-                r"getElementById\(['\"]ideoooolink['\"]\).*?=\s*['\"]([^'\"]+)['\"]\s*\+.*?\(['\"]([^'\"]+)['\"]\)\.substring\((\d+)\)\.substring\((\d+)\)",
-                html,
-            )
-            if m2:
-                s_str = m2.group(2)
-                start = int(m2.group(3))
-                end = int(m2.group(4))
-                rebuilt = prefix + "" + s_str[start:][end:]
-                return f"https://{rebuilt.lstrip('/')}"
+            prefix = m.group(1)
+            s_str = m.group(2)
+            start = int(m.group(3))
+            end = int(m.group(4))
+            return f"https://{(prefix + s_str[start:][end:]).lstrip('/')}"
 
-
-
-        # 4. Direct href patterns
+        # 4. Direct href / get_video patterns
         for pat in [
             r'href="(https?://[^"]*get_video\?[^"]+)"',
             r'href="(/get_video\?[^"]+)"',
-            r"['\"](/get_video\?[^'\"]+)['\"]",
         ]:
             m = re.search(pat, html)
             if m:
@@ -86,17 +87,9 @@ class StreamtapeDownloader(BaseDownloader):
                     return val
                 return f"https://{host}{val}"
 
-        # 5. video_url variable in JS
-        m = re.search(r"video_url\s*=\s*['\"]([^'\"]+/get_video[^'\"]*)", html)
-        if m:
-            val = m.group(1)
-            if val.startswith("/"):
-                return f"https://{host}{val}"
-            return val
-
         return None
 
-    # ── title extraction ────────────────────────────────────────────
+    # -- title extraction ----------------------------------------------------------
 
     @staticmethod
     def _title(html):
