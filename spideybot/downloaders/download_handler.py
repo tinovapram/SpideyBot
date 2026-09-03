@@ -62,7 +62,7 @@ def _cleanup_batch(batch_files):
             pass
 
 
-async def _upload_and_send_batch(bot, task, batch_files, caption, status_msg):
+async def _upload_and_send_batch(client, task, batch_files, caption, status_msg):
     """Send *batch_files* as album via send_file. Returns count sent."""
     sent = 0
     last_update = 0.0
@@ -121,7 +121,7 @@ async def _upload_and_send_batch(bot, task, batch_files, caption, status_msg):
 
 
 async def _send_streaming(
-    task, bot, dest_dir, source_iter, fallback_downloader,
+    task, client, dest_dir, source_iter, fallback_downloader,
     status_msg, caption, max_size_bytes, progress_callback,
 ):
     """Consume *source_iter* in a pipelined fashion: download next batch
@@ -154,7 +154,7 @@ async def _send_streaming(
             next_batch_task = loop.run_in_executor(None, _prefetch_batch)
             # Send current batch (async, overlaps with prefetch)
             total_sent += await _upload_and_send_batch(
-                bot, task, batch, caption, status_msg
+                client, task, batch, caption, status_msg
             )
             _cleanup_batch(batch)
             # Wait for next batch to be ready
@@ -178,7 +178,7 @@ async def _send_streaming(
         )
         if downloaded:
             total_sent = await _send_all_at_once(
-                bot, task, downloaded, caption, status_msg
+                client, task, downloaded, caption, status_msg
             )
 
     # Cleanup metadata + staging dir
@@ -196,7 +196,7 @@ async def _send_streaming(
     return total_sent
 
 
-async def _send_all_at_once(bot, task, downloaded_files, caption, status_msg):
+async def _send_all_at_once(client, task, downloaded_files, caption, status_msg):
     """Send all files at once via send_file (gallery-dl path). Returns count sent."""
     media_files = []
     for fp in downloaded_files:
@@ -232,7 +232,7 @@ async def _send_all_at_once(bot, task, downloaded_files, caption, status_msg):
         return 0
 
     try:
-        await bot.send_file(
+        await client.send_file(
             task.event.chat_id,
             valid,
             caption=caption,
@@ -245,7 +245,7 @@ async def _send_all_at_once(bot, task, downloaded_files, caption, status_msg):
         logger.warning("Album send failed, falling back to individual", error=str(e))
         for fp in valid:
             try:
-                await bot.send_file(
+                await client.send_file(
                     task.event.chat_id,
                     fp,
                     caption=caption,
@@ -259,7 +259,7 @@ async def _send_all_at_once(bot, task, downloaded_files, caption, status_msg):
     return sent
 
 
-async def run_download_task(task, bot, fallback_downloader, reddit_downloader=None) -> None:
+async def run_download_task(task, client, fallback_downloader, reddit_downloader=None) -> None:
     """
     Execute a media download task end-to-end.
 
@@ -269,7 +269,7 @@ async def run_download_task(task, bot, fallback_downloader, reddit_downloader=No
 
     Args:
         task: DownloadTask instance with user info and link.
-        bot: Telethon TelegramClient instance.
+        client: Telethon TelegramClient instance.
         fallback_downloader: GalleryDLDownloader instance.
         reddit_downloader: RedditDownloader instance.
     """
@@ -349,7 +349,7 @@ async def run_download_task(task, bot, fallback_downloader, reddit_downloader=No
                 )
 
                 total_sent = await _send_streaming(
-                    task, bot, dest_dir, source_iter, fallback_downloader,
+                    task, client, dest_dir, source_iter, fallback_downloader,
                     status_msg, caption, max_size_bytes, progress_callback,
                 )
             else:
@@ -377,7 +377,7 @@ async def run_download_task(task, bot, fallback_downloader, reddit_downloader=No
                 )
 
                 total_sent = await _send_all_at_once(
-                    bot, task, downloaded_files, caption, status_msg
+                    client, task, downloaded_files, caption, status_msg
                 )
 
                 staging = os.path.join(

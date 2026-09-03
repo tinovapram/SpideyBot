@@ -33,7 +33,7 @@ def _cleanup_batch(batch_files):
             pass
 
 
-async def run_terabox(task, bot, terabox_downloader) -> None:
+async def run_terabox(task, client, terabox_downloader) -> None:
     """
     Execute a TeraBox download task end-to-end.
 
@@ -41,7 +41,7 @@ async def run_terabox(task, bot, terabox_downloader) -> None:
 
     Args:
         task: DownloadTask instance with user info and link.
-        bot: Telethon TelegramClient instance.
+        client: Telethon TelegramClient instance.
         terabox_downloader: TeraBoxDownloader instance (or None if not configured).
     """
     status_msg = task.status_msg
@@ -152,9 +152,8 @@ async def run_terabox(task, bot, terabox_downloader) -> None:
             valid = [f for f in files if os.path.exists(f) and os.path.getsize(f) > 0]
             if not valid:
                 return
-            dialogs = await bot.get_dialogs()
             try:
-                await bot.send_file(
+                await client.send_file(
                     task.event.chat_id,
                     valid,
                     caption=caption,
@@ -167,7 +166,7 @@ async def run_terabox(task, bot, terabox_downloader) -> None:
                 logger.warning("Batch send failed, falling back to individual", error=str(e))
                 for fp in valid:
                     try:
-                        await bot.send_file(
+                        await client.send_file(
                             task.event.chat_id,
                             fp,
                             caption=caption,

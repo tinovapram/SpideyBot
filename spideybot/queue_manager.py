@@ -228,7 +228,14 @@ class DownloadQueueManager:
         except Exception as e:
             logger.warning("URL parse failed", link=task.link, error=str(e))
 
+        # Prefer the user's own client (event.client) over the bot client
+        # so uploads are sent as the user, not the bot (bot can't do get_dialogs, etc.)
+        try:
+            sender_client = task.event.client or self.bot
+        except AttributeError:
+            sender_client = self.bot
+
         if is_terabox:
-            await run_terabox(task, self.bot, self.terabox_downloader)
+            await run_terabox(task, sender_client, self.terabox_downloader)
         else:
-            await run_download_task(task, self.bot, self.fallback_downloader, self.reddit_downloader)
+            await run_download_task(task, sender_client, self.fallback_downloader, self.reddit_downloader)

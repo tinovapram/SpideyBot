@@ -98,13 +98,12 @@ def register_user_handlers(bot, download_manager):
 
         first_name = user.first_name if user else "there"
         tier = _tier_label(user_id)
-        session_info = _session_badge(user_id)
 
         # Try to start the user's session client
         session_started = False
         if user_sessions.get_or_none(user_id):
             session_started = await user_sessions.start_client(user_id)
-
+        session_info = _session_badge(user_id)
         if session_started:
             session_line = "\U0001F534 **User account connected!**"
         elif user_sessions.get_or_none(user_id):
