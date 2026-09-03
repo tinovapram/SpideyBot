@@ -5,8 +5,10 @@ Initialization, service setup, handler registration, and bot lifecycle.
 This is the single entry point that wires everything together.
 """
 
+import os
 import signal
 import asyncio
+import shutil
 import sys
 
 import structlog
@@ -17,7 +19,7 @@ from spideybot import db
 from spideybot.logging_config import setup_logging
 from spideybot.queue_manager import DownloadQueueManager
 from spideybot.downloaders.terabox_downloader import TeraBoxDownloader
-from spideybot.downloaders.reddit_downloader import RedditDownloader
+from spideybot.downloaders.site_downloaders.reddit import RedditDownloader
 from spideybot.core.handlers.user import register_user_handlers
 from spideybot.core.handlers.admin import register_admin_handlers
 from spideybot.core.handlers.login import register_login_handlers
@@ -149,6 +151,8 @@ def main():
 
     async def _run():
         db.init_db()
+        # Clear leftover downloads from previous runs
+        shutil.rmtree("./downloads", ignore_errors=True)
         download_queue_manager.start_workers()
 
         await bot.start(bot_token=config.TG_BOT_TOKEN)  # type: ignore[union-attr]  # Telethon stubs incomplete

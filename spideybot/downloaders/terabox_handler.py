@@ -16,7 +16,7 @@ from telethon.errors import RPCError as TelethonRPCError
 from telethon.errors import MessageNotModifiedError
 
 from spideybot.config import get_size_limit
-from spideybot.utils.files import download_file_async
+from spideybot.utils.files import download_file_async, prepare_media_batch
 
 logger = structlog.get_logger(__name__)
 
@@ -152,27 +152,27 @@ async def run_terabox(task, client, terabox_downloader) -> None:
             valid = [f for f in files if os.path.exists(f) and os.path.getsize(f) > 0]
             if not valid:
                 return
+            # Upload files (with thumbs for >10MB videos)
+            media = await prepare_media_batch(client, valid, progress_callback=_progress_cb)
+            if not media:
+                return
             try:
                 await client.send_file(
                     task.event.chat_id,
-                    valid,
+                    media,
                     caption=caption,
                     reply_to=task.event.message.id,
-                    supports_streaming=True,
-                    progress_callback=_progress_cb,
                 )
-                total_sent += len(valid)
+                total_sent += len(media)
             except Exception as e:
                 logger.warning("Batch send failed, falling back to individual", error=str(e))
-                for fp in valid:
+                for m in media:
                     try:
                         await client.send_file(
                             task.event.chat_id,
-                            fp,
+                            m,
                             caption=caption,
                             reply_to=task.event.message.id,
-                            supports_streaming=True,
-                            progress_callback=_progress_cb,
                         )
                         total_sent += 1
                     except Exception as send_err:

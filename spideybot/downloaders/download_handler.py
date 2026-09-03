@@ -21,7 +21,7 @@ import structlog
 from telethon.errors import RPCError as TelethonRPCError
 
 from spideybot.config import get_size_limit
-from spideybot.utils.files import sanitize_filename, extract_post_text
+from spideybot.utils.files import sanitize_filename, extract_post_text, prepare_media
 from spideybot.downloaders.universal_downloader import UniversalDownloader  # noqa: F401
 
 logger = structlog.get_logger(__name__)
@@ -52,113 +52,120 @@ def _sanitize_path(fp):
         return fp
 
 
-def _cleanup_batch(batch_files):
-    """Remove downloaded files to free disk space."""
-    for fp in batch_files:
-        try:
-            if os.path.isfile(fp):
-                os.remove(fp)
-        except OSError:
-            pass
+async def _stream_upload_pipeline(client, source_iter, status_msg, caption, task, progress_callback=None):
+    """Concurrent download-upload pipeline with immediate cleanup.
 
-
-async def _upload_and_send_batch(client, task, batch_files, caption, status_msg):
-    """Send *batch_files* as album via send_file. Returns count sent."""
+    Producer pulls from *source_iter* (blocking, runs in executor).
+    Consumer uploads via prepare_media and deletes local file.
+    Returns (sent_count, media_list).
+    """
+    queue = asyncio.Queue(maxsize=2)  # cap memory: at most 2 files buffered
+    media = []
     sent = 0
-    last_update = 0.0
-    n = len(batch_files)
+    uploaded = 0
+    loop = asyncio.get_running_loop()
+    json_files = []
 
-    def _progress_cb(sent_f, total_f):
-        nonlocal last_update
-        now = time.time()
-        if now - last_update < 3.0:
-            return
-        last_update = now
-        # For albums: sent_f is float (e.g. 2.5 = 50% of 3rd file)
-        file_idx = int(sent_f) + 1
-        try:
-            loop = asyncio.get_running_loop()
-            loop.call_soon(
-                asyncio.ensure_future,
-                status_msg.edit(
-                    f"\U0001f4e4 **SpideyBot:** Sending {file_idx}/{n}..."
-                ),
-            )
-        except RuntimeError:
-            pass
+    async def producer():
+        """Pull files from iterator into queue."""
+        nonlocal json_files
+        def _pull():
+            batch = []
+            for _ in range(_BATCH_SIZE):
+                try:
+                    fp = next(source_iter)
+                except StopIteration:
+                    break
+                clean = _sanitize_path(fp)
+                if clean.lower().endswith(".json"):
+                    json_files.append(clean)
+                    continue
+                batch.append(clean)
+            return batch
+        while True:
+            batch = await loop.run_in_executor(None, _pull)
+            if not batch:
+                break
+            for fp in batch:
+                await queue.put(fp)
+        await queue.put(None)  # sentinel
 
-    # Filter out 0-byte files
-    valid = [fp for fp in batch_files if os.path.exists(fp) and os.path.getsize(fp) > 0]
-    if not valid:
-        return 0
-
-    try:
-        await bot.send_file(
-            task.event.chat_id,
-            valid,
-            caption=caption,
-            reply_to=task.event.message.id,
-            supports_streaming=True,
-            progress_callback=_progress_cb,
-        )
-        sent = len(valid)
-    except Exception as e:
-        logger.warning("Album send failed, falling back to individual", error=str(e))
-        for fp in valid:
+    async def consumer():
+        """Upload files from queue and clean up local files."""
+        nonlocal uploaded
+        while True:
+            fp = await queue.get()
+            if fp is None:
+                break
             try:
-                await bot.send_file(
-                    task.event.chat_id,
-                    fp,
-                    caption=caption,
-                    reply_to=task.event.message.id,
-                    supports_streaming=True,
-                    progress_callback=_progress_cb,
-                )
-                sent += 1
-            except Exception as send_err:
-                logger.warning("Individual send failed", error=str(send_err))
-    return sent
+                m = await prepare_media(client, fp, progress_callback=progress_callback)
+                media.append(m)
+                uploaded += 1
+                if status_msg and uploaded % 2 == 0:
+                    try:
+                        await status_msg.edit(
+                            f"\U0001f4e4 **SpideyBot:** Uploaded {uploaded} file(s)..."
+                        )
+                    except TelethonRPCError:
+                        pass
+            except Exception as e:
+                logger.warning("Upload failed", file=fp, error=str(e))
+            finally:
+                # delete local file after upload (success or fail)
+                try:
+                    if os.path.isfile(fp):
+                        os.remove(fp)
+                except OSError:
+                    pass
+
+    # Run producer + consumer concurrently
+    await asyncio.gather(producer(), consumer())
+
+    # Send all uploaded media as album
+    if media:
+        try:
+            await client.send_file(
+                task.event.chat_id,
+                media,
+                caption=caption,
+                reply_to=task.event.message.id,
+            )
+            sent = len(media)
+        except Exception as e:
+            logger.warning("Album send failed, falling back to individual", error=str(e))
+            for m in media:
+                try:
+                    await client.send_file(
+                        task.event.chat_id,
+                        m,
+                        caption=caption,
+                        reply_to=task.event.message.id,
+                    )
+                    sent += 1
+                except Exception as send_err:
+                    logger.warning("Individual send failed", error=str(send_err))
+
+    return sent, json_files
 
 
 async def _send_streaming(
     task, client, dest_dir, source_iter, fallback_downloader,
     status_msg, caption, max_size_bytes, progress_callback,
 ):
-    """Consume *source_iter* in a pipelined fashion: download next batch
-    while uploading the current batch. Returns total sent."""
+    """Concurrent download-upload pipeline. Returns total sent."""
     total_sent = 0
-    json_files = []
-    loop = asyncio.get_running_loop()
-
-    def _prefetch_batch():
-        """Run in executor: consume up to _BATCH_SIZE items from source_iter."""
-        batch = []
-        for _ in range(_BATCH_SIZE):
-            try:
-                file_path = next(source_iter)
-            except StopIteration:
-                break
-            clean = _sanitize_path(file_path)
-            if clean.lower().endswith(".json"):
-                json_files.append(clean)
-                continue
-            batch.append(clean)
-        return batch
-
     try:
-        # Prefetch first batch (blocking in executor thread)
-        batch = await loop.run_in_executor(None, _prefetch_batch)
-
-        while batch:
-            # Start prefetching next batch in background thread
-            next_batch_task = loop.run_in_executor(None, _prefetch_batch)
-            # Send current batch (async, overlaps with prefetch)
-            total_sent += await _upload_and_send_batch(
-                client, task, batch, caption, status_msg
-            )
-            _cleanup_batch(batch)
-            # Wait for next batch to be ready
-            batch = await next_batch_task
+        total_sent, json_files = await _stream_upload_pipeline(
+            client, source_iter, status_msg, caption, task,
+            progress_callback=progress_callback,
+        )
+        # Cleanup metadata files
+        for fp in json_files:
+            try:
+                if os.path.isfile(fp):
+                    os.remove(fp)
+            except OSError:
+                pass
     except Exception as e:
         logger.warning(
             "Streaming download failed, falling back to gallery-dl", error=str(e)
@@ -178,16 +185,11 @@ async def _send_streaming(
         )
         if downloaded:
             total_sent = await _send_all_at_once(
-                client, task, downloaded, caption, status_msg
+                client, task, downloaded, caption, status_msg,
+                progress_callback=progress_callback,
             )
 
-    # Cleanup metadata + staging dir
-    for fp in json_files:
-        try:
-            if os.path.isfile(fp):
-                os.remove(fp)
-        except OSError:
-            pass
+    # Cleanup staging dir
     try:
         if os.path.isdir(dest_dir):
             shutil.rmtree(dest_dir, ignore_errors=True)
@@ -196,8 +198,8 @@ async def _send_streaming(
     return total_sent
 
 
-async def _send_all_at_once(client, task, downloaded_files, caption, status_msg):
-    """Send all files at once via send_file (gallery-dl path). Returns count sent."""
+async def _send_all_at_once(client, task, downloaded_files, caption, status_msg, progress_callback=None):
+    """Upload one-by-one via prepare_media, then send_file as album."""
     media_files = []
     for fp in downloaded_files:
         if os.path.exists(fp) and not fp.lower().endswith(".json"):
@@ -206,57 +208,57 @@ async def _send_all_at_once(client, task, downloaded_files, caption, status_msg)
     if not media_files:
         return 0
 
-    n = len(media_files)
-    last_update = 0.0
-    sent = 0
-
-    def _progress_cb(sent_f, total_f):
-        nonlocal last_update
-        now = time.time()
-        if now - last_update < 3.0:
-            return
-        last_update = now
+    media = []
+    for i, fp in enumerate(media_files):
+        if not (os.path.exists(fp) and os.path.getsize(fp) > 0):
+            continue
         try:
-            loop = asyncio.get_running_loop()
-            loop.call_soon(
-                asyncio.ensure_future,
-                status_msg.edit(
-                    f"\U0001f4e4 **SpideyBot:** Sending {int(sent_f) + 1}/{n}..."
-                ),
-            )
-        except RuntimeError:
-            pass
+            m = await prepare_media(client, fp, progress_callback=progress_callback)
+            media.append(m)
+            # Update progress every 2 files
+            if status_msg and (i + 1) % 2 == 0:
+                try:
+                    await status_msg.edit(
+                        f"\U0001f4e4 **SpideyBot:** Uploaded {i + 1}/{len(media_files)}..."
+                    )
+                except TelethonRPCError:
+                    pass
+        except Exception as e:
+            logger.warning("Upload failed", file=fp, error=str(e))
+        finally:
+            # delete local file after upload
+            try:
+                if os.path.isfile(fp):
+                    os.remove(fp)
+            except OSError:
+                pass
 
-    valid = [fp for fp in media_files if os.path.exists(fp) and os.path.getsize(fp) > 0]
-    if not valid:
+    if not media:
         return 0
 
     try:
         await client.send_file(
             task.event.chat_id,
-            valid,
+            media,
             caption=caption,
             reply_to=task.event.message.id,
-            supports_streaming=True,
-            progress_callback=_progress_cb,
         )
-        sent = len(valid)
+        return len(media)
     except Exception as e:
         logger.warning("Album send failed, falling back to individual", error=str(e))
-        for fp in valid:
+        sent = 0
+        for m in media:
             try:
                 await client.send_file(
                     task.event.chat_id,
-                    fp,
+                    m,
                     caption=caption,
                     reply_to=task.event.message.id,
-                    supports_streaming=True,
-                    progress_callback=_progress_cb,
                 )
                 sent += 1
             except Exception as send_err:
                 logger.warning("Individual send failed", error=str(send_err))
-    return sent
+        return sent
 
 
 async def run_download_task(task, client, fallback_downloader, reddit_downloader=None) -> None:
@@ -377,7 +379,8 @@ async def run_download_task(task, client, fallback_downloader, reddit_downloader
                 )
 
                 total_sent = await _send_all_at_once(
-                    client, task, downloaded_files, caption, status_msg
+                    client, task, downloaded_files, caption, status_msg,
+                    progress_callback=progress_callback,
                 )
 
                 staging = os.path.join(

@@ -12,6 +12,7 @@ Currently handled:
 
 from __future__ import annotations
 
+import os
 import re
 import time
 from typing import TYPE_CHECKING, Any
@@ -28,11 +29,36 @@ from spideybot.downloaders.telegram_msg_downloader import (
     is_tg_range_url,
     parse_tg_link,
 )
+from spideybot.utils.files import prepare_media
 
 if TYPE_CHECKING:
     from spideybot.queue_manager import DownloadQueueManager
 
 logger = structlog.get_logger(__name__)
+
+
+def _determine_tg_flags(meta: dict | None) -> dict:
+    """Return ``prepare_media`` kwargs that preserve the original Telegram type.
+
+    meta keys (from telegram_msg_downloader):
+        photo (bool)  — MessageMediaPhoto
+        animated (bool) — DocumentAttributeAnimated (GIF)
+        video (bool) — DocumentAttributeVideo (video clip)
+        force_document (bool) — fallback: send as-is document
+    """
+    if not meta:
+        return {}
+    if meta.get("photo"):
+        return {"as_image": True}
+    if meta.get("animated"):
+        # GIF — send as animated document
+        return {"supports_streaming": True, "nosound_video": True}
+    if meta.get("video"):
+        return {"supports_streaming": True}
+    if meta.get("force_document"):
+        return {"force_document": True}
+    return {}
+
 
 # Set once during bot startup (see bot.py)
 _download_manager: DownloadQueueManager | None = None
@@ -147,8 +173,6 @@ def register_outgoing_handlers(client, user_id: int) -> None:
             f"\u23F3 **SpideyBot:** Downloading from Telegram{range_label}...",
             reply_to=event.message,
         )
-
-        import os
         output_dir = f"./downloads/tg_{user_id}"
 
         if is_range:
@@ -165,10 +189,28 @@ def register_outgoing_handlers(client, user_id: int) -> None:
 
         # Send files to the current chat
         files = result["files"]
-        caption_text = result["caption"] or result["chat_title"]
+        file_metadata = result.get("file_metadata") or [None] * len(files)
 
         try:
-            await client.send_message(event.chat_id, f"\u2705 **SpideyBot:** Downloaded {len(files)} file(s) from Telegram{range_label}.", reply_to=event.message, file=files)
+            media = []
+            for fp, meta in zip(files, file_metadata):
+                if not os.path.isfile(fp):
+                    continue
+                flags = _determine_tg_flags(meta)
+                try:
+                    m = await prepare_media(client, fp, **flags)
+                    media.append(m)
+                except Exception:
+                    logger.warning("Failed to prepare TG file", file=fp)
+
+            if media:
+                await client.send_file(event.chat_id, media,
+                    caption=f"\u2705 **SpideyBot:** Downloaded {len(media)} file(s) from Telegram{range_label}.",
+                    reply_to=event.message)
+            else:
+                await client.send_message(event.chat_id,
+                    "\u2705 **SpideyBot:** Downloaded files but nothing to send.",
+                    reply_to=event.message)
 
             total = result.get("total_messages", len(files))
             dl_count = result.get("downloaded_messages", len(files))

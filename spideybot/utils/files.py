@@ -2,13 +2,14 @@
 SpideyBot — File Utilities.
 
 Filename sanitization, post text/caption extraction from metadata JSON,
-and async file download helper.
+async file download helper, and media preparation with thumbnail generation.
 """
 
 import os
 import re
 import json
 import asyncio
+import subprocess
 import aiohttp
 from typing import Optional, List
 
@@ -204,3 +205,152 @@ async def download_file_async(terabox_downloader, tb_file, output_dir: str) -> s
     finally:
         await r.release()
     return filepath
+
+
+# ── Thumbnail + media preparation for uploads ────────────────────
+
+_VIDEO_EXTS = frozenset({'.mp4', '.mkv', '.avi', '.mov', '.webm', '.flv', '.wmv', '.m4v'})
+_BIG_FILE_BYTES = 10 * 1024 * 1024  # 10 MB
+
+
+def make_video_thumb(video_path: str) -> Optional[str]:
+    """Extract first frame as JPEG thumbnail for videos >10 MB.
+
+    Returns the thumb file path, or None if no thumb is needed/possible.
+    Caller cleans up the returned file after uploading.
+    """
+    ext = os.path.splitext(video_path)[1].lower()
+    if ext not in _VIDEO_EXTS:
+        return None
+    try:
+        if os.path.getsize(video_path) <= _BIG_FILE_BYTES:
+            return None
+    except OSError:
+        return None
+
+    thumb_path = video_path + ".thumb.jpg"
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", video_path,
+                "-ss", "00:00:01", "-vframes", "1",
+                "-vf", "scale='min(320,iw)':'min(320,ih)':force_original_aspect_ratio=decrease",
+                "-q:v", "5", thumb_path,
+            ],
+            capture_output=True, timeout=30, check=True,
+        )
+        if os.path.exists(thumb_path):
+            return thumb_path
+    except Exception:
+        pass
+    # cleanup failed thumb
+    try:
+        os.remove(thumb_path)
+    except OSError:
+        pass
+    return None
+
+
+async def prepare_media(
+    client, file_path: str, *,
+    thumb: Optional[str] = None,
+    as_image: Optional[bool] = None,
+    force_document: bool = False,
+    supports_streaming: Optional[bool] = None,
+    nosound_video: Optional[bool] = None,
+    progress_callback=None
+):
+    """Upload a file and return an InputMedia object with auto-thumbnail.
+
+    Our own ``_file_to_media``: uploads the file, generates + uploads a
+    JPEG thumbnail for videos exceeding 10 MB, and returns an
+    ``InputMediaUploadedDocument`` (or ``InputMediaUploadedPhoto`` for
+    images).  The result is safe to pass directly to ``send_file`` or
+    build into an album list — Telethon treats pre-built InputMedia as
+    pass-through via ``get_input_media``.
+
+    Keyword-only params:
+        thumb:             Custom thumb path (skips auto-generation).
+        as_image:          Force photo treatment (None = auto-detect).
+        force_document:    Force document even for images.
+        supports_streaming: Override streaming flag (None = video-only).
+        nosound_video:     True prevents silent videos being sent as GIF.
+    """
+    from telethon import types
+    from telethon.utils import get_attributes, is_image
+
+    file_handle = await client.upload_file(file_path, progress_callback=progress_callback)
+
+    _is_image = is_image(file_path)
+    if as_image is None:
+        as_image = _is_image and not force_document
+
+    if as_image:
+        return types.InputMediaUploadedPhoto(file=file_handle)
+
+    is_video = os.path.splitext(file_path)[1].lower() in _VIDEO_EXTS
+    if supports_streaming is None:
+        supports_streaming = is_video
+    
+    attrs, mime = get_attributes(file_path, force_document=force_document, supports_streaming=supports_streaming)
+
+    # Thumbnail: caller-supplied > auto-generated > none
+    thumb_handle = None
+    if thumb:
+        if not os.path.isfile(thumb):
+            logger.warning("Thumb path not found, skipping", thumb=thumb)
+        else:
+            try:
+                thumb_handle = await client.upload_file(thumb)
+            except Exception:
+                thumb_handle = None
+    else:
+        auto_thumb = make_video_thumb(file_path)
+        if auto_thumb:
+            try:
+                thumb_handle = await client.upload_file(auto_thumb)
+            except Exception:
+                thumb_handle = None
+            finally:
+                try:
+                    os.remove(auto_thumb)
+                except OSError:
+                    pass
+
+  
+    # nosound_video: only relevant for video mime, else None
+    ns_video = nosound_video if mime.startswith('video') else None
+
+    return types.InputMediaUploadedDocument(
+        file=file_handle,
+        mime_type=mime,
+        attributes=attrs,
+        thumb=thumb_handle,
+        force_file=force_document and not _is_image,
+        nosound_video=ns_video,
+    )
+
+
+async def prepare_media_batch(client, file_paths, progress_callback=None, **kwargs):
+    """Upload a list of files and return InputMedia objects for ``send_file``.
+
+    Filters out 0-byte / missing files.  If *progress_callback* is
+    provided it receives ``(completed, total)`` after each file upload.
+    Extra *kwargs* are forwarded to :func:`prepare_media`.
+
+    Returns a list of ``InputMediaUploadedDocument`` / ``InputMediaUploadedPhoto``.
+    """
+    valid = [fp for fp in file_paths if os.path.exists(fp) and os.path.getsize(fp) > 0]
+    media = []
+    for i, fp in enumerate(valid):
+        try:
+            m = await prepare_media(client, fp, **kwargs)
+            media.append(m)
+        except Exception as e:
+            logger.warning("Failed to prepare media", file=fp, error=str(e))
+        if progress_callback:
+            try:
+                progress_callback(i + 1, len(valid))
+            except Exception:
+                pass
+    return media

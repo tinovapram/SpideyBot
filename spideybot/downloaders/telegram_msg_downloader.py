@@ -14,8 +14,32 @@ from dataclasses import dataclass
 from typing import Optional
 
 import structlog
+from telethon import types as tg_types
 
 logger = structlog.get_logger(__name__)
+
+
+def _tg_media_meta(msg) -> dict | None:
+    """Detect the media type of a Telegram message for re-upload.
+
+    Returns a dict with keys suitable for ``_determine_tg_flags``:
+        photo, animated, video, force_document
+    """
+    media = msg.media
+    if media is None:
+        return None
+    if isinstance(media, tg_types.MessageMediaPhoto):
+        return {"photo": True}
+    doc = getattr(media, "document", None)
+    if doc is None:
+        return None
+    for attr in getattr(doc, "attributes", []):
+        if isinstance(attr, tg_types.DocumentAttributeAnimated):
+            return {"animated": True}
+        if isinstance(attr, tg_types.DocumentAttributeVideo):
+            return {"video": True}
+    return {"force_document": True}
+
 
 # Patterns for Telegram message links
 # Public:  https://t.me/username/12345
@@ -172,6 +196,7 @@ async def download_tg_message(client, url: str, output_dir: str = "./downloads/t
     os.makedirs(output_dir, exist_ok=True)
 
     downloaded_files = []
+    file_metadata = []
 
     # Handle grouped media (albums)
     if hasattr(message, "grouped_id") and message.grouped_id:
@@ -188,10 +213,12 @@ async def download_tg_message(client, url: str, output_dir: str = "./downloads/t
     for msg in group_messages:
         if msg.media is None:
             continue
+        meta = _tg_media_meta(msg)
         try:
             path = await client.download_media(msg, file=output_dir)
             if path:
                 downloaded_files.append(path)
+                file_metadata.append(meta)
                 logger.info("Downloaded TG media", chat=chat_title, msg_id=msg.id, file=path)
         except Exception as e:
             logger.error("Failed to download TG media", msg_id=msg.id, error=str(e))
@@ -201,6 +228,7 @@ async def download_tg_message(client, url: str, output_dir: str = "./downloads/t
             "ok": False,
             "error": "No downloadable media found in this message.",
             "files": [],
+            "file_metadata": [],
             "caption": caption,
             "chat_title": chat_title,
         }
@@ -209,6 +237,8 @@ async def download_tg_message(client, url: str, output_dir: str = "./downloads/t
         "ok": True,
         "error": "",
         "files": downloaded_files,
+        "file_metadata": file_metadata,
+        "captions": [caption] if caption else [],
         "caption": caption,
         "chat_title": chat_title,
     }
@@ -292,14 +322,11 @@ async def download_tg_range(client, url: str, output_dir: str = "./downloads/tg"
 
     os.makedirs(output_dir, exist_ok=True)
     downloaded_files = []
+    file_metadata = []
     captions = []
 
     for msg in valid_messages:
         # Track caption text (non-empty messages)
-        text = msg.text or ""
-        if text:
-            captions.append(f"[#{msg.id}] {text}")
-
         if msg.media is None:
             continue
 
@@ -325,18 +352,27 @@ async def download_tg_range(client, url: str, output_dir: str = "./downloads/tg"
             for gmsg in group_msgs:
                 if gmsg.media is None:
                     continue
+                meta = _tg_media_meta(gmsg)
                 try:
+                    text = gmsg.text or ""
+                    captions.append(text)
                     path = await client.download_media(gmsg, file=output_dir)
                     if path:
                         downloaded_files.append(path)
+                        file_metadata.append(meta)
                         logger.info("Downloaded TG range media", msg_id=gmsg.id, file=path)
                 except Exception as e:
                     logger.error("Failed to download TG range media", msg_id=gmsg.id, error=str(e))
         else:
+            meta = _tg_media_meta(msg)
+            text = msg.text or ""
+            if text:
+                captions.append(text)
             try:
                 path = await client.download_media(msg, file=output_dir)
                 if path:
                     downloaded_files.append(path)
+                    file_metadata.append(meta)
                     logger.info("Downloaded TG range media", msg_id=msg.id, file=path)
             except Exception as e:
                 logger.error("Failed to download TG range media", msg_id=msg.id, error=str(e))
@@ -347,7 +383,7 @@ async def download_tg_range(client, url: str, output_dir: str = "./downloads/tg"
         return {
             "ok": False,
             "error": f"No downloadable media found in range {start_id}-{end_id}.",
-            "files": [], "caption": caption_text, "chat_title": chat_title,
+            "files": [], "file_metadata": [], "caption": caption_text, "chat_title": chat_title,
             "total_messages": len(valid_messages), "downloaded_messages": 0,
         }
 
@@ -355,6 +391,8 @@ async def download_tg_range(client, url: str, output_dir: str = "./downloads/tg"
         "ok": True,
         "error": "",
         "files": downloaded_files,
+        "file_metadata": file_metadata,
+        "captions": captions,
         "caption": caption_text,
         "chat_title": chat_title,
         "total_messages": len(valid_messages),
