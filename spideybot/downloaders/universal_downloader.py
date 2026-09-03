@@ -17,6 +17,9 @@ from spideybot.downloaders.site_downloaders.tumblr import TumblrDownloader
 from spideybot.downloaders.site_downloaders.dailymotion import DailymotionDownloader
 from spideybot.downloaders.site_downloaders.douyin import DouyinDownloader
 from spideybot.downloaders.site_downloaders.kuaishou import KuaishouDownloader
+from spideybot.downloaders.site_downloaders.doodstream import DoodstreamDownloader
+from spideybot.downloaders.site_downloaders.streamtape import StreamtapeDownloader
+from spideybot.downloaders.site_downloaders.vidara import VidaraDownloader
 
 logger = structlog.get_logger(__name__)
 
@@ -37,7 +40,10 @@ class UniversalDownloader:
             "tumblr": TumblrDownloader(),
             "dailymotion": DailymotionDownloader(),
             "douyin": DouyinDownloader(),
-            "kuaishou": KuaishouDownloader()
+            "kuaishou": KuaishouDownloader(),
+            "doodstream": DoodstreamDownloader(),
+            "streamtape": StreamtapeDownloader(),
+            "vidara": VidaraDownloader()
         }
 
     def detect_platform(self, url: str) -> str:
@@ -72,6 +78,12 @@ class UniversalDownloader:
             return "douyin"
         elif "kuaishou.com" in url_lower:
             return "kuaishou"
+        elif DoodstreamDownloader.matches(url):
+            return "doodstream"
+        elif StreamtapeDownloader.matches(url):
+            return "streamtape"
+        elif VidaraDownloader.matches(url):
+            return "vidara"
         return "unknown"
 
     def download(self, url: str, output_dir: str = "downloads") -> list:

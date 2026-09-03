@@ -100,6 +100,7 @@ async def run_terabox(task, bot, terabox_downloader) -> None:
         failed_files = []
         dl_done = 0          # files downloaded so far
         ul_done = 0          # files uploaded so far
+        ul_pct = 0.0         # upload percentage from callback
         last_status_ts = 0.0 # throttle for status edits
 
         async def _update_status():
@@ -111,9 +112,10 @@ async def run_terabox(task, bot, terabox_downloader) -> None:
             last_status_ts = now
             parts = []
             if dl_done < length_of_files:
-                parts.append(f"\U0001f4e5 Downloading {dl_done}/{length_of_files}")
+                dl_pct = int(dl_done / length_of_files * 100) if length_of_files else 0
+                parts.append(f"\U0001f4e5 Downloading {dl_done}/{length_of_files} ({dl_pct}%)")
             if ul_done > 0:
-                parts.append(f"\U0001f4e4 Uploaded {ul_done}/{length_of_files}")
+                parts.append(f"\U0001f4e4 Uploading #{ul_done}/{length_of_files} ({int(ul_pct)}%)")
             if not parts:
                 return
             text = " \u2502 ".join(parts)
@@ -123,11 +125,15 @@ async def run_terabox(task, bot, terabox_downloader) -> None:
                 pass
 
         def _progress_cb(sent_f, total_f):
-            """send_file progress callback: update upload count."""
-            nonlocal ul_done
-            new_ul = int(sent_f) + 1
-            if new_ul > ul_done:
-                ul_done = new_ul
+            """send_file progress callback: update upload count and per-file percentage."""
+            nonlocal ul_done, ul_pct
+            if isinstance(sent_f, float):
+                # Album mode: float = file_index + fraction (e.g. 2.5 = 50% of 3rd file)
+                ul_done = int(sent_f) + 1
+                ul_pct = (sent_f % 1) * 100  # current file progress
+            else:
+                # Single file mode: sent_f = bytes, total_f = total bytes
+                ul_pct = (sent_f / total_f) * 100 if total_f else 0
             try:
                 loop = asyncio.get_running_loop()
                 loop.call_soon(asyncio.ensure_future, _update_status())
