@@ -273,7 +273,6 @@ async def run_download_task(task, client, fallback_downloader, reddit_downloader
         task: DownloadTask instance with user info and link.
         client: Telethon TelegramClient instance.
         fallback_downloader: GalleryDLDownloader instance.
-        reddit_downloader: RedditDownloader instance.
     """
     status_msg = task.status_msg
     if not status_msg:
@@ -283,9 +282,7 @@ async def run_download_task(task, client, fallback_downloader, reddit_downloader
 
     _ud = UniversalDownloader()
     _platform = _ud.detect_platform(task.link)
-    if "reddit.com" in task.link.lower():
-        _site = "reddit"
-    elif _platform != "unknown":
+    if _platform != "unknown":
         _site = _platform
     else:
         _site = "gallery-dl"
@@ -295,12 +292,13 @@ async def run_download_task(task, client, fallback_downloader, reddit_downloader
     try:
         last_update_time = 0.0
 
-        async def progress_callback(status_text: str):
+        async def progress_callback(current, total=0):
             nonlocal last_update_time
             now = time.time()
             if now - last_update_time >= 5.0:
+                pct = f"{current * 100 // total}%" if total else ""
                 try:
-                    await status_msg.edit(status_text)
+                    await status_msg.edit(f"⬆️ Uploading {pct}…")
                     last_update_time = now
                 except TelethonRPCError:
                     pass
@@ -311,10 +309,8 @@ async def run_download_task(task, client, fallback_downloader, reddit_downloader
             except TelethonRPCError:
                 pass
 
-        is_reddit = "reddit.com" in task.link.lower()
-        site_label = "Reddit" if is_reddit else (
-            _platform if _platform != "unknown" else "gallery-dl"
-        )
+        site_label = _platform if _platform != "unknown" else "gallery-dl"
+
         use_streaming = _platform != "unknown"
 
         try:
@@ -325,23 +321,14 @@ async def run_download_task(task, client, fallback_downloader, reddit_downloader
             if use_streaming:
                 # Streaming path: yield files one-by-one, batch-send
                 loop = asyncio.get_running_loop()
-                if is_reddit and reddit_downloader:
-                    logger.info("Streaming download via RedditDownloader")
-                    source_iter = await loop.run_in_executor(
-                        None,
-                        lambda: reddit_downloader.download_streaming(
-                            task.link, dest_dir
-                        ),
-                    )
-                else:
-                    logger.info(
-                        "Streaming download via UniversalDownloader",
-                        platform=_platform,
-                    )
-                    source_iter = await loop.run_in_executor(
-                        None,
-                        lambda: _ud.download_streaming(task.link, dest_dir),
-                    )
+                logger.info(
+                    "Streaming download via UniversalDownloader",
+                    platform=_platform,
+                )
+                source_iter = await loop.run_in_executor(
+                    None,
+                    lambda: _ud.download_streaming(task.link, dest_dir),
+                )
 
                 parsed = urlparse(task.link)
                 folder_name = parsed.netloc or "Downloaded Media"
