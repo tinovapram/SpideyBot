@@ -240,6 +240,7 @@ def make_video_thumb(video_path: str) -> Optional[str]:
             capture_output=True, timeout=30, check=True,
         )
         if os.path.exists(thumb_path):
+            logger.debug("Thumbnail generated", video=video_path, thumb=thumb_path)
             return thumb_path
     except Exception:
         pass
