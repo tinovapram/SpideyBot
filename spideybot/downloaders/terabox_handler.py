@@ -97,11 +97,8 @@ async def run_terabox(task, client, terabox_downloader) -> None:
 
         # --- Shared progress state ---
         total_sent = 0
-        _batch_base = 0  # cumulative file count before current batch
         failed_files = []
         dl_done = 0          # files downloaded so far
-        ul_done = 0          # files uploaded so far
-        ul_pct = 0.0         # upload percentage from callback
         last_status_ts = 0.0 # throttle for status edits
 
         async def _update_status():
@@ -115,8 +112,9 @@ async def run_terabox(task, client, terabox_downloader) -> None:
             if dl_done < length_of_files:
                 dl_pct = int(dl_done / length_of_files * 100) if length_of_files else 0
                 parts.append(f"\U0001f4e5 Downloading {dl_done}/{length_of_files} ({dl_pct}%)")
-            if ul_done > 0:
-                parts.append(f"\U0001f4e4 Uploading #{ul_done}/{length_of_files} ({int(ul_pct)}%)")
+            if total_sent > 0:
+                ul_pct = int(total_sent / length_of_files * 100) if length_of_files else 0
+                parts.append(f"\U0001f4e4 Uploaded {total_sent}/{length_of_files} ({ul_pct}%)")
             if not parts:
                 return
             text = " \u2502 ".join(parts)
@@ -125,99 +123,71 @@ async def run_terabox(task, client, terabox_downloader) -> None:
             except (MessageNotModifiedError, TelethonRPCError):
                 pass
 
-        def _progress_cb(sent_f, total_f):
-            """send_file progress callback: update upload count and per-file percentage."""
-            nonlocal ul_done, ul_pct
-            if isinstance(sent_f, float):
-                # Album mode: float = file_index + fraction (e.g. 2.5 = 50% of 3rd file)
-                # Add batch_base so the count is cumulative across batches (1-10, 11-20, …)
-                ul_done = _batch_base + int(sent_f) + 1
-                ul_pct = (sent_f % 1) * 100  # current file progress
-            else:
-                # Single file mode: sent_f = bytes, total_f = total bytes
-                ul_done = _batch_base + 1
-                ul_pct = (sent_f / total_f) * 100 if total_f else 0
+        def _progress_cb(sent, total):
+            """upload_file progress callback — just triggers status refresh."""
             try:
                 loop = asyncio.get_running_loop()
                 loop.call_soon(asyncio.ensure_future, _update_status())
             except RuntimeError:
                 pass
 
-        async def _send_batch(files):
-            """Upload+send a batch via send_file."""
-            nonlocal total_sent, _batch_base
-            if not files:
-                return
-            _batch_base = total_sent
-            valid = [f for f in files if os.path.exists(f) and os.path.getsize(f) > 0]
-            if not valid:
-                return
-            # Upload files (with thumbs for >10MB videos)
-            media = await prepare_media_batch(client, valid, progress_callback=_progress_cb)
-            if not media:
-                return
+        # --- Pipelined download + upload (one at a time) ---
+        files_iter = iter(files_to_send)
+
+        async def _prefetch_one():
+            """Download next file, return path or None."""
+            nonlocal dl_done
+            if task.is_cancelled:
+                return None
             try:
+                tb_file = next(files_iter)
+            except StopIteration:
+                return None
+            try:
+                dl_done += 1
+                await _update_status()
+                filepath = await download_file_async(
+                    terabox_downloader, tb_file, output_dir
+                )
+            except Exception as e:
+                err = str(e) or f"{type(e).__name__}: {e}"
+                logger.exception("Error downloading file", filename=tb_file.filename, error=err)
+                failed_files.append((tb_file.filename, err))
+                return None
+
+            if not filepath or not os.path.exists(filepath) or os.path.getsize(filepath) == 0:
+                logger.warning("Skipping 0-byte file", file=filepath)
+                failed_files.append((tb_file.filename, "empty file (0 bytes)"))
+                return None
+            return filepath
+
+        # Pipeline: prefetch N+1 while uploading N
+        next_path = await _prefetch_one()
+        while next_path:
+            current_path = next_path
+            next_task = asyncio.create_task(_prefetch_one())
+
+            try:
+                media = await prepare_media(
+                    client, current_path, progress_callback=_progress_cb,
+                )
                 await client.send_file(
                     task.event.chat_id,
                     media,
                     caption=caption,
                     reply_to=task.event.message.id,
                 )
-                total_sent += len(media)
+                total_sent += 1
             except Exception as e:
-                logger.warning("Batch send failed, falling back to individual", error=str(e))
-                for m in media:
-                    try:
-                        await client.send_file(
-                            task.event.chat_id,
-                            m,
-                            caption=caption,
-                            reply_to=task.event.message.id,
-                        )
-                        total_sent += 1
-                    except Exception as send_err:
-                        logger.warning("Individual send failed", error=str(send_err))
+                logger.warning("File send failed", file=current_path, error=str(e))
 
-        # --- Pipelined download + upload ---
-        files_iter = iter(files_to_send)
+            # Cleanup uploaded file
+            try:
+                os.remove(current_path)
+            except OSError:
+                pass
 
-        async def _prefetch_batch(count):
-            """Download up to *count* files, updating dl_done."""
-            nonlocal dl_done
-            batch = []
-            for _ in range(count):
-                if task.is_cancelled:
-                    break
-                try:
-                    tb_file = next(files_iter)
-                except StopIteration:
-                    break
-                try:
-                    dl_done += 1
-                    await _update_status()
-                    filepath = await download_file_async(
-                        terabox_downloader, tb_file, output_dir
-                    )
-                except Exception as e:
-                    err = str(e) or f"{type(e).__name__}: {e}"
-                    logger.exception("Error downloading file", filename=tb_file.filename, error=err)
-                    failed_files.append((tb_file.filename, err))
-                    continue
-
-                if not filepath or not os.path.exists(filepath) or os.path.getsize(filepath) == 0:
-                    logger.warning("Skipping 0-byte file", file=filepath)
-                    failed_files.append((tb_file.filename, "empty file (0 bytes)"))
-                    continue
-                batch.append(filepath)
-            return batch
-
-        # Prefetch first batch, then pipeline: upload N || download N+1
-        batch = await _prefetch_batch(_BATCH_SIZE)
-        while batch:
-            next_batch_task = asyncio.create_task(_prefetch_batch(_BATCH_SIZE))
-            await _send_batch(batch)
-            _cleanup_batch(batch)
-            batch = await next_batch_task
+            next_path = await next_task
 
         if os.path.isdir(output_dir):
             shutil.rmtree(output_dir, ignore_errors=True)
