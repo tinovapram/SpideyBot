@@ -48,7 +48,7 @@ async def run_terabox(task, client, terabox_downloader) -> None:
         await status_msg.edit("\U0001f50d **SpideyBot:** Resolving TeraBox link...")
 
         saved_root = terabox_downloader.root_path
-        terabox_downloader.root_path = f"/downloads/{task.user_id}/terabox"
+        terabox_downloader.root_path = f"/downloads/{task.user_id}/terabox/{task.entry_id}/{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
         try:
             result = await terabox_downloader.resolve(task.link, mode="download")
         finally:
