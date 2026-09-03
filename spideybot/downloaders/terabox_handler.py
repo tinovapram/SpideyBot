@@ -152,6 +152,7 @@ async def run_terabox(task, bot, terabox_downloader) -> None:
             valid = [f for f in files if os.path.exists(f) and os.path.getsize(f) > 0]
             if not valid:
                 return
+            dialogs = await bot.get_dialogs()
             try:
                 await bot.send_file(
                     task.event.chat_id,

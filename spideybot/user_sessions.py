@@ -145,7 +145,7 @@ async def start_client(user_id: int) -> bool:
         # ── Register outgoing command handlers on user's client ───
         from spideybot.core.handlers.outgoing import register_outgoing_handlers
         register_outgoing_handlers(client, user_id)
-        _ = await client.get_dialogs()
+        dialogs = await client.get_dialogs()
         return True
     except Exception as e:
         logger.error("Failed to start user client", user_id=user_id, error=str(e))
