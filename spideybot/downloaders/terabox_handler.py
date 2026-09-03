@@ -16,11 +16,9 @@ from telethon.errors import RPCError as TelethonRPCError
 from telethon.errors import MessageNotModifiedError
 
 from spideybot.config import get_size_limit
-from spideybot.utils.files import download_file_async, prepare_media_batch
+from spideybot.utils.files import download_file_async, prepare_media
 
 logger = structlog.get_logger(__name__)
-
-_BATCH_SIZE = 10  # Telegram album limit
 
 
 def _cleanup_batch(batch_files):
