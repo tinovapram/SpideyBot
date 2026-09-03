@@ -19,6 +19,7 @@ from urllib.parse import urlparse
 
 import structlog
 from telethon.errors import RPCError as TelethonRPCError
+from telethon.errors import MessageNotModifiedError
 
 from spideybot.config import get_size_limit
 from spideybot.utils.files import sanitize_filename, extract_post_text, prepare_media
@@ -318,6 +319,30 @@ async def run_download_task(task, client, fallback_downloader, reddit_downloader
             await _edit_status(
                 f"\U0001f4e5 **SpideyBot:** Downloading from {site_label}..."
             )
+
+            # Wire download progress into site downloader
+            if _platform != "unknown":
+                _site_dl = _ud.downloaders.get(_platform)
+                if _site_dl and hasattr(_site_dl, "_progress_callback"):
+                    _loop = asyncio.get_running_loop()
+
+                    def _dl_progress(downloaded, total):
+                        pct = downloaded * 100 // total if total else 0
+                        mb_done = downloaded / (1024 * 1024)
+                        mb_total = total / (1024 * 1024) if total else 0
+
+                        async def _update():
+                            try:
+                                await status_msg.edit(
+                                    f"\U0001f4e5 **SpideyBot:** Downloading… {pct}% "
+                                    f"({mb_done:.1f}/{mb_total:.1f} MB)"
+                                )
+                            except (TelethonRPCError, MessageNotModifiedError):
+                                pass
+
+                        _loop.call_soon_threadsafe(asyncio.ensure_future, _update())
+
+                    _site_dl._progress_callback = _dl_progress
 
             if use_streaming:
                 # Streaming path: yield files one-by-one, batch-send

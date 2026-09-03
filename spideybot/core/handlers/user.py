@@ -118,10 +118,15 @@ def register_user_handlers(bot, download_manager):
             f"**Tier:** {tier}\n"
             f"**Session:** {session_info}\n\n"
             f"{session_line}\n\n"
-            "I can download media from **TeraBox**, **YouTube**, **Twitter**, "
-            "**Reddit**, **Imgur**, and [many more](https://github.com/mikf/gallery-dl-supported-sites).\n\n"
+            "**Supported sites:**\n"
+            "TeraBox \u2022 YouTube \u2022 Twitter/X \u2022 TikTok \u2022 Reddit"
+            " \u2022 Doodstream \u2022 Vidara \u2022 Pinterest \u2022 Instagram"
+            " \u2022 Spotify \u2022 SoundCloud \u2022 Bluesky \u2022 Threads"
+            " \u2022 LinkedIn \u2022 Tumblr \u2022 Snapchat"
+            " \u2022 Dailymotion \u2022 Streamtape"
+            " \u2022 [and 100+ more](https://github.com/mikf/gallery-dl-supported-sites)\n\n"
             "**Quick start:**\n"
-            "  \u2022 Paste a link and I\u2019ll detect it automatically\n"
+            "  \u2022 Paste a link and I\u2019ll auto-detect it\n"
             "  \u2022 Or use `/dl <link>` for explicit control\n\n"
             "Type `/help` for the full command list."
         )
@@ -137,20 +142,20 @@ def register_user_handlers(bot, download_manager):
         stopped = await user_sessions.stop_client(user_id)
         if stopped:
             await event.respond(
-                "\U0001F534 **User account disconnected.**\n\n"
-                "Your session file is still saved. Use `/start` to reconnect anytime."
+                "\U0001F534 **Session disconnected.**\n\n"
+                "Your session data is still saved."
+                " Use `/start` to reconnect or `/logout` to remove it."
+            )
+        elif user_sessions.get_or_none(user_id):
+            await event.respond(
+                "\u26A0\uFE0F Session is saved but not running."
+                " Use `/start` to reconnect."
             )
         else:
-            if user_sessions.get_or_none(user_id):
-                await event.respond(
-                    "\u26A0\uFE0F Your session is saved but not currently running.\n"
-                    "Use `/start` to connect it."
-                )
-            else:
-                await event.respond(
-                    "\U0001F7E2 You don\u2019t have a saved session.\n"
-                    "Use `/login` to set one up."
-                )
+            await event.respond(
+                "\U0001F7E2 No saved session found."
+                " Use `/login` to connect your Telegram account."
+            )
         logger.info("User triggered /stop", user_id=user_id, was_active=stopped)
 
     # ── /help ──────────────────────────────────────────────────────────────
@@ -176,23 +181,33 @@ def register_user_handlers(bot, download_manager):
 
         help_text = (
             f"**\U0001F680 SpideyBot Help**\n\n"
-            f"**Tier:** {tier}\n"
-            f"**Limits:** {limits}\n"
+            f"**Tier:** {tier}  \u2022  **Limits:** {limits}\n"
             f"**Session:** {session_info}\n\n"
-            "**\U0001F4E5 Download**\n"
-            "  \u2022 `/dl <link>` \u2014 Download from TeraBox, YouTube, Twitter, Reddit, etc.\n"
-            "  \u2022 `/dt <t.me link>` \u2014 Download media from a Telegram message\n"
-            "  \u2022 `/dt <range>` \u2014 Download a range: `t.me/c/X/5-t.me/c/X/54`\n"
-            "  \u2022 Paste any supported link and I\u2019ll auto-detect it\n"
-            "  \u2022 `/cancel` \u2014 Cancel downloads (shows list if multiple)\n"
+
+            "**\U0001F4E5 Downloading**\n"
+            "  \u2022 `/dl <link>` \u2014 Download from any supported site\n"
+            "  \u2022 Paste a link \u2014 auto-detected\n"
+            "  \u2022 `/dt <t.me>` \u2014 Download from a Telegram message\n"
+            "  \u2022 `/dt <range>` \u2014 Range: `t.me/c/X/5-t.me/c/X/54`\n"
+            "  \u2022 `/cancel` \u2014 Cancel downloads (or `/cancel <id>` a specific task)\n\n"
+
             "**\U0001F513 Account Session**\n"
-            "  \u2022 `/login` \u2014 Login your Telegram account for private content\n"
-            "  \u2022 `/logout` \u2014 Revoke your saved session\n"
-            "  \u2022 `/start` \u2014 Start the bot (also connects your session if saved)\n"
-            "  \u2022 `/stop` \u2014 Disconnect your session without deleting it\n\n"
+            "  \u2022 `/start` \u2014 Connect / welcome\n"
+            "  \u2022 `/stop` \u2014 Disconnect session (saved)\n"
+            "  \u2022 `/login` \u2014 Connect your Telegram account\n"
+            "  \u2022 `/logout` \u2014 Remove saved session\n\n"
+
+            "**\U0001F4F1 Supported Sites**\n"
+            "  TeraBox \u2022 YouTube \u2022 Twitter/X \u2022 TikTok \u2022 Reddit"
+            " \u2022 Doodstream \u2022 Vidara \u2022 Pinterest \u2022 Instagram"
+            " \u2022 Spotify \u2022 SoundCloud \u2022 Bluesky \u2022 Threads"
+            " \u2022 LinkedIn \u2022 Tumblr \u2022 Snapchat \u2022 Dailymotion"
+            " \u2022 Streamtape \u2022 [100+ more](https://github.com/mikf/gallery-dl-supported-sites)\n\n"
+
             "**\U0001F4A1 Other**\n"
-            "  \u2022 `/ping` \u2014 Test session anywhere (even in groups)\n"
-            "  \u2022 `/help` \u2014 Show this message\n"
+            "  \u2022 `/ping` \u2014 Check bot status\n"
+            "  \u2022 `/site_list` \u2014 Show all supported sites\n"
+            "  \u2022 `/help` \u2014 This message\n"
         )
 
         if user_id in config.ADMIN_IDS:
@@ -205,6 +220,46 @@ def register_user_handlers(bot, download_manager):
 
         logger.info("User triggered /help", user_id=user_id)
         await event.respond(help_text)
+
+    # ── /site_list ────────────────────────────────────────────────────────
+
+    _SITE_LIST = [
+        ("YouTube",       "youtube.com, youtu.be"),
+        ("Twitter / X",   "twitter.com, x.com"),
+        ("TikTok",        "tiktok.com"),
+        ("Reddit",        "reddit.com, redd.it"),
+        ("Doodstream",    "dood.stream, playmogo.com, ds2play.com"),
+        ("Vidara",        "vidara.me, vidaram.com"),
+        ("Pinterest",     "pinterest.com, pin.it"),
+        ("Instagram",     "instagram.com (gallery-dl)"),
+        ("Spotify",       "open.spotify.com"),
+        ("SoundCloud",    "soundcloud.com"),
+        ("Bluesky",       "bsky.app, bsky.social"),
+        ("Threads",       "threads.net"),
+        ("LinkedIn",      "linkedin.com, linkedin.cn"),
+        ("Tumblr",        "tumblr.com"),
+        ("Snapchat",      "snapchat.com"),
+        ("Dailymotion",   "dailymotion.com"),
+        ("Streamtape",    "streamtape.com"),
+        ("CapCut",        "capcut.com"),
+        ("Douyin",        "douyin.com"),
+        ("Kuaishou",      "kuaishou.com, ksplay.com"),
+        ("TeraBox",       "terabox.com, 1024tera.com, 4funbox.com"),
+    ]
+
+    @bot.on(events.NewMessage(pattern="/site_list"))
+    async def site_list_handler(event):
+        """Show all supported download sites."""
+        user_id = event.sender_id
+        lines = [f"**\U0001F4F1 Supported Sites ({len(_SITE_LIST)})**\n"]
+        for name, domains in _SITE_LIST:
+            lines.append("  \u2022 **" + name + "** \u2014 `" + domains + "`")
+        lines.append(
+            "\nPlus [100+ sites](https://github.com/mikf/gallery-dl-supported-sites) "
+            "via gallery-dl (Instagram, Flickr, DeviantArt, etc.)"
+        )
+        logger.info("User triggered /site_list", user_id=user_id)
+        await event.respond("\n".join(lines))
 
     # ── /dl ────────────────────────────────────────────────────────────────
 

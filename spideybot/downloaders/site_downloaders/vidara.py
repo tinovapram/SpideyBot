@@ -2,7 +2,7 @@
 
 import os
 import re
-import subprocess
+import time
 from urllib.parse import urlparse
 
 from .base import BaseDownloader
@@ -42,9 +42,27 @@ class VidaraDownloader(BaseDownloader):
         os.makedirs(output_dir, exist_ok=True)
 
         if ".m3u8" in dl_url:
-            # HLS stream — use yt-dlp (handles non-standard segment extensions)
-            cmd = ["yt-dlp", "-o", fp, dl_url]
-            subprocess.run(cmd, check=True, timeout=600)
+            # HLS stream — use yt-dlp Python API (handles non-standard segment extensions)
+            import yt_dlp
+
+            def _progress_hook(d):
+                if d.get("status") == "downloading" and self._progress_callback:
+                    downloaded = d.get("downloaded_bytes") or 0
+                    total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+                    now = time.monotonic()
+                    if downloaded and total and now - _last_call[0] >= 5.0:
+                        _last_call[0] = now
+                        self._progress_callback(downloaded, total)
+
+            _last_call = [0.0]
+
+            ydl_opts = {
+                "outtmpl": fp,
+                "progress_hooks": [_progress_hook],
+                "quiet": True,
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([dl_url])
         else:
             self._download_file(dl_url, fp, headers={"Referer": url})
         return [fp]

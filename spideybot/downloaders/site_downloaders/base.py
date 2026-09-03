@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import urllib.parse
 import requests
 from typing import Iterator
@@ -19,6 +20,7 @@ class BaseDownloader:
         # single-threaded usage inside run_in_executor.
         self._session = requests.Session()
         self._session.headers.update(self.DEFAULT_HEADERS)
+        self._progress_callback = None  # set externally for download progress
 
     def _sanitize_filename(self, filename: str) -> str:
         """Delegate to the canonical utility function."""
@@ -42,7 +44,14 @@ class BaseDownloader:
         response.raise_for_status()
         return response
 
-    def _download_file(self, url: str, file_path: str, headers: dict = None) -> str:
+    def _download_file(self, url: str, file_path: str, headers: dict = None, progress_callback=None) -> str:
+        """Download a file with optional progress callback.
+
+        Args:
+            progress_callback: Callable ``(downloaded_bytes, total_bytes)``
+                called periodically during the download.  *total_bytes* may
+                be 0 if the server does not send Content-Length.
+        """
         req_headers = self.DEFAULT_HEADERS.copy()
         if headers:
             req_headers.update(headers)
@@ -52,10 +61,18 @@ class BaseDownloader:
         response = self._session.get(url, headers=req_headers, stream=True, timeout=3600)
         response.raise_for_status()
 
+        total = int(response.headers.get("Content-Length", 0))
+        downloaded = 0
+        last_cb = 0.0
+
         with open(file_path, "wb") as f:
             for chunk in response.iter_content(chunk_size=8192):
                 if chunk:
                     f.write(chunk)
+                    downloaded += len(chunk)
+                    if progress_callback and (time.time() - last_cb) >= 5.0:
+                        last_cb = time.time()
+                        progress_callback(downloaded, total)
 
         return file_path
 

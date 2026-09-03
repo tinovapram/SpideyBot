@@ -28,6 +28,7 @@ praw                             # Reddit API (PRAW-based downloader)
 
 # ── TeraBox ────────────────────────────────────────────────────
 pycryptodomex                    # AES decryption for TeraBox streams (yt-dlp dep)
+curl_cffi>=0.16.0               # Chrome TLS impersonation (TeraBox Method A direct-share)
 
 # ── Testing ────────────────────────────────────────────────────
 pytest                           # Test framework

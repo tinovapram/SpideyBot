@@ -61,6 +61,16 @@ from typing import Optional, List, Dict, Any, Tuple, Callable
 
 import structlog
 
+# curl_cffi (Chrome TLS impersonation) — used by Method A (XDOWNDER-style
+# direct-share resolution). Optional at import time; features degrade
+# gracefully when it is missing.
+try:
+    from curl_cffi import requests as _cffi_requests
+    HAS_CURL_CFFI = True
+except Exception:  # pragma: no cover - import not always available
+    _cffi_requests = None
+    HAS_CURL_CFFI = False
+
 # Auto-load .env file if python-dotenv is installed
 try:
     from dotenv import load_dotenv
@@ -90,6 +100,9 @@ class TeraBoxFile:
     thumbs: Optional[Dict[str, str]] = None
     path: Optional[str] = None
     server_mtime: Optional[int] = None
+    # Which backend produced the dlink: "account" (Method B, after transfer)
+    # or "direct" (Method A, XDOWNDER route=share — needs curl_cffi download).
+    backend: str = "account"
 
     def __repr__(self):
         status = f"[{self.transfer_status}]"
@@ -107,6 +120,8 @@ class TeraBoxResult:
     files: List[TeraBoxFile] = field(default_factory=list)
     error: Optional[str] = None
     raw_response: Optional[Dict[str, Any]] = None
+    # Resolution method used: "direct" (Method A) or "account" (Method B).
+    method: str = "account"
 
     @property
     def ok(self) -> bool:
@@ -224,6 +239,34 @@ class TeraBoxDownloader:
         r'timestamp["\']?\s*[:=]\s*["\']?(\d{10})["\']?', re.IGNORECASE
     )
 
+    # ── Method A (XDOWNDER direct-share) ────────────────────────────
+    # TeraBox's web API/CDN rejects plain aiohttp/requests TLS
+    # fingerprints (errno 4000020 "need verify", HTTP 403 on dlinks).
+    # Method A impersonates desktop Chrome via curl_cffi and downloads
+    # straight from the share — no account storage/transfer needed.
+    _DIRECT_BASE_HOSTS = (
+        "dm.terabox.app",
+        "www.terabox.app",
+        "www.1024tera.com",
+        "www.terabox.com",
+        "www.1024terabox.com",
+    )
+    _DIRECT_API_HOST = "dm.terabox.app"
+    _DIRECT_UA = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
+    )
+    _DIRECT_IMPERSONATE_TARGETS = (
+        "chrome110", "chrome120", "chrome124", "chrome131", "chrome",
+    )
+    _SHARE_JSTOKEN_PATTERNS = [
+        re.compile(r'fn%28%22(.*?)%22%29'),
+        re.compile(r'fn\"([^\"]+)\"\)'),
+        re.compile(r'jsToken\s*=\s*["\']([^"\']+)["\']'),
+        re.compile(r'jsToken["\']?\s*:\s*["\']([^"\']+)["\']'),
+        re.compile(r'window\.jsToken\s*=\s*["\']([^"\']+)["\']'),
+    ]
+
     def __init__(
         self,
         cookie: str = None,
@@ -284,6 +327,10 @@ class TeraBoxDownloader:
         self._auto_resolve_tokens = auto_resolve_tokens
         self._session_lock = asyncio.Lock() if hasattr(asyncio, '_get_running_loop') else None
 
+        # ── Method A (XDOWNDER) lazy curl_cffi session ──────────────
+        self._direct_session = None
+        self._direct_lock = asyncio.Lock()
+
     # ─── Session Lifecycle ──────────────────────────────────────────
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
@@ -317,6 +364,13 @@ class TeraBoxDownloader:
         if self.session and not self.session.closed:
             await self.session.close()
             self.session = None
+        # Close the Method A curl_cffi session if one was created.
+        if self._direct_session is not None:
+            try:
+                await self._direct_session.close()
+            except Exception:
+                pass
+            self._direct_session = None
 
     async def __aenter__(self):
         await self._ensure_session()
@@ -441,6 +495,13 @@ class TeraBoxDownloader:
                 # aiohttp cookies are immutable after creation; recreate is simplest
                 self.logger.info("Cookie updated, session will be recreated")
                 self.session = None
+            # Method A curl session must also be rebuilt with the new cookie.
+            if self._direct_session is not None:
+                try:
+                    self.logger.info("Cookie updated, direct session will be recreated")
+                except Exception:
+                    pass
+                self._direct_session = None
         if js_token:
             self.js_token = js_token
         if bds_token:
@@ -963,6 +1024,82 @@ class TeraBoxDownloader:
 
         return result
 
+    # ─── Method A helpers (XDOWNDER direct-share) ───────────────────
+
+    @staticmethod
+    def _extract_share_jstoken(html_text: str) -> Optional[str]:
+        """Extract jsToken from a /sharing/link page (XDOWNDER patterns)."""
+        if not html_text:
+            return None
+        for pat in TeraBoxDownloader._SHARE_JSTOKEN_PATTERNS:
+            m = pat.search(html_text)
+            if m and m.group(1):
+                return m.group(1)
+        return None
+
+    async def _ensure_direct_session(self):
+        """Lazily build a curl_cffi AsyncSession impersonating Chrome (Method A)."""
+        if self._direct_session is not None:
+            return self._direct_session
+        async with self._direct_lock:
+            if self._direct_session is not None:
+                return self._direct_session
+            if not HAS_CURL_CFFI:
+                raise TeraBoxAuthError(
+                    "curl_cffi is required for direct (XDOWNDER) resolution"
+                )
+            last_err = None
+            for target in self._DIRECT_IMPERSONATE_TARGETS:
+                try:
+                    self._direct_session = _cffi_requests.AsyncSession(
+                        impersonate=target,
+                        cookies=dict(self._cookies_dict),
+                    )
+                    self.logger.info(
+                        "Method A curl session ready", impersonate=target
+                    )
+                    return self._direct_session
+                except Exception as e:
+                    last_err = e
+                    self._direct_session = None
+            raise TeraBoxAuthError(
+                f"Could not create curl_cffi impersonation session: {last_err}"
+            )
+
+    async def _download_direct_async(self, tb_file: TeraBoxFile, filepath: str) -> str:
+        """Download a Method-A (route=share) dlink via curl_cffi impersonation.
+
+        Plain aiohttp gets HTTP 403 from the share CDN; the impersonated
+        session (carrying the ndus cookie) is required.
+        """
+        session = await self._ensure_direct_session()
+        headers = {
+            "User-Agent": self._DIRECT_UA,
+            "Referer": "https://www.terabox.app/",
+            "Accept": "*/*",
+        }
+        try:
+            async with session.stream(
+                "GET", tb_file.dlink, headers=headers, timeout=3600
+            ) as resp:
+                if resp.status_code != 200:
+                    raise TeraBoxError(
+                        f"Direct download HTTP {resp.status_code} for "
+                        f"{tb_file.filename}"
+                    )
+                with open(filepath, "wb") as f:
+                    async for chunk in resp.aiter_content():
+                        if chunk:
+                            f.write(chunk)
+        except Exception:
+            try:
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+            except OSError:
+                pass
+            raise
+        return filepath
+
     # ─── Public API ──────────────────────────────────────────────────
 
     async def resolve(
@@ -974,12 +1111,10 @@ class TeraBoxDownloader:
         """
         Resolve a TeraBox share link into download/stream URLs.
 
-        This is the main entry point. The flow is:
-          1. Parse the share URL to extract the surl
-          2. GET /share/list — fetch file metadata (shareid, uk, file list)
-          3. POST /share/transfer — copy files to account storage
-          4. GET /rest/2.0/pcs/file — resolve direct download links
-          5. (Optional) GET /api/streaming — resolve HLS stream URLs
+        ``download`` mode tries **Method A** first (XDOWNDER-style direct
+        share — no account storage) and automatically falls back to
+        **Method B** (account transfer) when A is unavailable or fails.
+        ``stream``/``list`` always use Method B (they need account storage).
 
         Args:
             url: TeraBox share link (any recognized format)
@@ -989,11 +1124,216 @@ class TeraBoxDownloader:
                                   retries when transcoding is in progress
 
         Returns:
-            TeraBoxResult with file info and download links
+            TeraBoxResult with file info and download links.  ``method``
+            is "direct" when Method A succeeded, otherwise "account".
+        """
+        if mode == "download":
+            result = await self.resolve_method_a(url)
+            if result is not None and result.ok:
+                self.logger.info(
+                    "Method A (direct share) resolved",
+                    files=len(result.files),
+                )
+                return result
+            self.logger.info(
+                "Falling back to Method B (account transfer)", mode=mode
+            )
+        return await self.resolve_method_b(
+            url, mode=mode, wait_for_transcoding=wait_for_transcoding
+        )
 
-        Raises:
-            TeraBoxURLError: If the URL is invalid
-            TeraBoxAPIError: If the TeraBox API returns an error
+    # ── Method A — XDOWNDER direct-share (no account transfer) ───────
+
+    async def resolve_method_a(self, url: str) -> Optional[TeraBoxResult]:
+        """
+        Method A: resolve a share link WITHOUT transferring to an account.
+
+        Mirrors XDOWNDER: impersonate desktop Chrome (curl_cffi), scrape a
+        fresh jsToken from the /sharing/link page, then call /share/list
+        recursively.  Every file arrives with its own signed ``dlink``
+        (route=share) that is downloaded straight from the share CDN.
+
+        Returns:
+            TeraBoxResult(method="direct") on success, else None so the
+            caller can fall back to Method B.
+        """
+        if not HAS_CURL_CFFI:
+            self.logger.warning("Method A skipped: curl_cffi not installed")
+            return None
+
+        try:
+            short_url = self.parse_surl(url)
+        except Exception as e:
+            self.logger.warning("Method A: surl parse failed", error=str(e))
+            return None
+        # /s/1XXX… path form carries a leading "1"; the sharing page wants
+        # that form while /share/list accepts the stripped form (try both).
+        surl_param = short_url if short_url.startswith("1") else "1" + short_url
+
+        try:
+            session = await self._ensure_direct_session()
+
+            # 1. Scrape a fresh jsToken from a sharing page.
+            token = None
+            page_headers = {
+                "User-Agent": self._DIRECT_UA,
+                "Accept": (
+                    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+                ),
+                "Accept-Language": "en-US,en;q=0.9",
+            }
+            for host in self._DIRECT_BASE_HOSTS:
+                try:
+                    page_url = f"https://{host}/sharing/link?surl={surl_param}"
+                    resp = await session.get(
+                        page_url, headers=page_headers, timeout=15
+                    )
+                    if resp.status_code == 200:
+                        token = self._extract_share_jstoken(resp.text)
+                        if token:
+                            self.logger.debug("Method A jsToken source", host=host)
+                            break
+                except Exception as e:
+                    self.logger.debug(
+                        "Method A sharing page failed", host=host, error=str(e)
+                    )
+            if not token:
+                self.logger.warning("Method A: no jsToken on any sharing page")
+                return None
+
+            # 2. /share/list recursively — files carry their own dlink.
+            api_headers = {
+                "Host": self._DIRECT_API_HOST,
+                "User-Agent": self._DIRECT_UA,
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "en-US,en;q=0.9",
+                "X-Requested-With": "XMLHttpRequest",
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Origin": f"https://{self._DIRECT_API_HOST}",
+                "Referer": (
+                    f"https://{self._DIRECT_API_HOST}/sharing/link"
+                    f"?surl={short_url}&clearCache=1"
+                ),
+            }
+            api_url = f"https://{self._DIRECT_API_HOST}/share/list"
+
+            def _params(surl, root, dir_path=None):
+                p = {
+                    "app_id": "250528",
+                    "jsToken": token,
+                    "site_referer": "https://www.terabox.app/",
+                    "shorturl": surl,
+                    "root": str(root),
+                }
+                if dir_path is not None:
+                    p["dir"] = dir_path
+                return p
+
+            async def _list(params):
+                r = await session.get(
+                    api_url, params=params, headers=api_headers, timeout=20
+                )
+                try:
+                    return r.json()
+                except Exception:
+                    return None
+
+            payload = None
+            for cand in (short_url, surl_param):
+                payload = await _list(_params(cand, 1))
+                if payload and payload.get("errno") == 0:
+                    break
+            if not payload or payload.get("errno") != 0:
+                self.logger.warning(
+                    "Method A: share/list failed",
+                    errno=(payload or {}).get("errno"),
+                )
+                return None
+
+            share_id = payload.get("share_id")
+            uk = payload.get("uk")
+            title = payload.get("title", "")
+
+            items, folder_queue = [], []
+            for it in payload.get("list") or []:
+                if str(it.get("isdir", "0")) == "1":
+                    folder_queue.append(it.get("path"))
+                else:
+                    items.append(it)
+            visited = set()
+            while folder_queue:
+                dir_path = folder_queue.pop(0)
+                if dir_path in visited:
+                    continue
+                visited.add(dir_path)
+                sub = await _list(_params(short_url, 0, dir_path))
+                if sub and sub.get("errno") == 0:
+                    for it in sub.get("list") or []:
+                        if str(it.get("isdir", "0")) == "1":
+                            folder_queue.append(it.get("path"))
+                        else:
+                            items.append(it)
+
+            files, incomplete = [], False
+            for it in items:
+                size_bytes = int(it.get("size", 0))
+                tb = TeraBoxFile(
+                    filename=it.get("server_filename", "unknown"),
+                    size_bytes=size_bytes,
+                    size_mb=round(size_bytes / (1024 * 1024), 2),
+                    fs_id=str(it.get("fs_id", "")),
+                    dlink=it.get("dlink"),
+                    category=int(it.get("category", 0)),
+                    md5=it.get("md5"),
+                    thumbs=it.get("thumbs"),
+                    path=it.get("path", ""),
+                    server_mtime=it.get("server_mtime"),
+                    backend="direct",
+                )
+                if tb.dlink:
+                    files.append(tb)
+                else:
+                    incomplete = True  # needs transfer -> fall back to Method B
+
+            if not files:
+                self.logger.warning("Method A: no downloadable files found")
+                return None
+            if incomplete:
+                # Some files lack a direct dlink; Method B transfers them to
+                # account storage, guaranteeing a complete download.
+                self.logger.warning(
+                    "Method A incomplete: some files lack dlink -> fallback to B"
+                )
+                return None
+
+            return TeraBoxResult(
+                status="success",
+                title=title,
+                share_id=share_id,
+                uk=uk,
+                files=files,
+                method="direct",
+            )
+        except Exception as e:
+            self.logger.warning("Method A failed", error=str(e), exc_info=True)
+            return None
+
+    async def resolve_method_b(
+        self,
+        url: str,
+        mode: str = "download",
+        wait_for_transcoding: bool = False,
+    ) -> TeraBoxResult:
+        """
+        Method B: resolve via the bot's own TeraBox account (legacy flow).
+
+          1. GET /share/list — fetch file metadata (shareid, uk, file list)
+          2. POST /share/transfer — copy files to account storage
+          3. GET /api/filemetas — resolve direct download links
+          4. (Optional) GET /api/streaming — resolve HLS stream URLs
+
+        Returns:
+            TeraBoxResult(method="account") with file info and download links
         """
         # Parse surl from URL
         try:
@@ -1156,6 +1496,14 @@ class TeraBoxDownloader:
             self.logger.info(
                 "Downloading file", filename=tb_file.filename, size_mb=tb_file.size_mb
             )
+
+            # Method A (direct share) dlinks need the impersonated curl_cffi
+            # session — plain aiohttp is rejected (HTTP 403) by the CDN.
+            if getattr(tb_file, "backend", "account") == "direct":
+                await self._download_direct_async(tb_file, filepath)
+                downloaded_paths.append(filepath)
+                self.logger.info("File saved (direct)", path=filepath)
+                continue
 
             try:
                 # Download with proper User-Agent (required by TeraBox CDN)

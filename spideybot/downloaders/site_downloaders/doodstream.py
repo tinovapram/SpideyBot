@@ -16,6 +16,10 @@ class DoodstreamDownloader(BaseDownloader):
     Supports ``/d/`` (single video), ``/f/`` (folder/gallery), and
     ``/e/`` (embed) URL paths.  Handles frequently-changing domains
     (dood.me, playmogo.com, ds2play.com, etc.) via regex matching.
+
+    Set ``self._progress_callback`` to a callable
+    ``(downloaded_bytes, total_bytes)`` before calling ``download()``
+    to receive download progress updates.
     """
 
     _DOMAIN_RE = re.compile(
@@ -115,7 +119,7 @@ class DoodstreamDownloader(BaseDownloader):
 
         fname = self._filename_from_cd(resp) or f"{token[:8]}.mp4"
         fp = os.path.join(output_dir, self._sanitize_filename(fname))
-        self._download_file(dl_url, fp, headers={"Referer": embed_url})
+        self._download_file(dl_url, fp, headers={"Referer": embed_url}, progress_callback=self._progress_callback)
         return [fp]
 
     # ── helpers ──────────────────────────────────────────────────────

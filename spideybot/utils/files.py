@@ -160,6 +160,12 @@ async def download_file_async(terabox_downloader, tb_file, output_dir: str) -> s
     safe_filename = sanitize_filename(tb_file.filename)
     filepath = os.path.join(output_dir, safe_filename)
 
+    # Method A (XDOWNDER direct-share) files must go through the
+    # impersonated curl_cffi session — plain aiohttp is rejected (HTTP 403)
+    # by the TeraBox share CDN.
+    if getattr(tb_file, "backend", "account") == "direct":
+        return await terabox_downloader._download_direct_async(tb_file, filepath)
+
     # ── Adaptive timeout based on file size ────────────────────────
     # sock_read is per-chunk read.  TeraBox throttles large files,
     # so small fixed values fail on slow connections.  Scale up.
