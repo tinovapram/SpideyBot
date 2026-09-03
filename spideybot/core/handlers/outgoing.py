@@ -85,7 +85,7 @@ def register_outgoing_handlers(client, user_id: int) -> None:
         lines.append(f"{client_icon} **Client** — {client_status}")
 
         try:
-            await event.respond(f"**/ping**\n" + "\n".join(lines))
+            await client.send_message(event.chat_id, "**/ping**\n" + "\n".join(lines), reply_to=event.message)
             logger.info("Outgoing /ping handled", user_id=user_id)
         except Exception as e:
             logger.error("Failed to send /ping reply", user_id=user_id, error=str(e))
@@ -102,7 +102,7 @@ def register_outgoing_handlers(client, user_id: int) -> None:
         link = m.group(1)
         if not link:
             try:
-                await event.respond("\u26A0\uFE0F Please specify a Telegram message link.\nUsage: `/dt <t.me link>`")
+                await client.send_message(event.chat_id, "\u26A0\uFE0F Please specify a Telegram message link.\nUsage: `/dt <t.me link>`", reply_to=event.message)
             except TelethonRPCError:
                 pass
             return
@@ -117,9 +117,11 @@ def register_outgoing_handlers(client, user_id: int) -> None:
                 parse_tg_range(link)
             except ValueError:
                 try:
-                    await event.respond(
+                    await client.send_message(
+                        event.chat_id,
                         "\u274C Not a valid Telegram range link.\n"
-                        "Expected: `https://t.me/c/X/5-https://t.me/c/X/54` (same channel)"
+                        "Expected: `https://t.me/c/X/5-https://t.me/c/X/54` (same channel)",
+                        reply_to=event.message,
                     )
                 except TelethonRPCError:
                     pass
@@ -129,17 +131,21 @@ def register_outgoing_handlers(client, user_id: int) -> None:
                 parse_tg_link(link)
             except ValueError:
                 try:
-                    await event.respond(
+                    await client.send_message(
+                        event.chat_id,
                         "\u274C Not a valid Telegram message link.\n"
-                        "Expected: `https://t.me/channel/12345` or `https://t.me/c/123456/12345`"
+                        "Expected: `https://t.me/channel/12345` or `https://t.me/c/123456/12345`",
+                        reply_to=event.message,
                     )
                 except TelethonRPCError:
                     pass
                 return
 
         range_label = " (range)" if is_range else ""
-        status_msg = await event.respond(
-            f"\u23F3 **SpideyBot:** Downloading from Telegram{range_label}..."
+        status_msg = await client.send_message(
+            event.chat_id,
+            f"\u23F3 **SpideyBot:** Downloading from Telegram{range_label}...",
+            reply_to=event.message,
         )
 
         import os
@@ -162,9 +168,7 @@ def register_outgoing_handlers(client, user_id: int) -> None:
         caption_text = result["caption"] or result["chat_title"]
 
         try:
-            for fp in files:
-                await event.respond(file=fp, message=caption_text)
-                caption_text = ""  # only first file gets caption
+            await client.send_message(event.chat_id, f"\u2705 **SpideyBot:** Downloaded {len(files)} file(s) from Telegram{range_label}.", reply_to=event.message, file=files)
 
             total = result.get("total_messages", len(files))
             dl_count = result.get("downloaded_messages", len(files))
@@ -209,7 +213,7 @@ def register_outgoing_handlers(client, user_id: int) -> None:
         link = m.group(1)
         if not link:
             try:
-                await event.respond("\u26A0\uFE0F Please specify a URL.\nUsage: `/dl <link>`")
+                await client.send_message(event.chat_id, "\u26A0\uFE0F Please specify a URL.\nUsage: `/dl <link>`", reply_to=event.message)
             except TelethonRPCError:
                 pass
             return
@@ -217,7 +221,7 @@ def register_outgoing_handlers(client, user_id: int) -> None:
         dm = _download_manager
         if dm is None:
             try:
-                await event.respond("\u274C Bot is not ready yet.")
+                await client.send_message(event.chat_id, "\u274C Bot is not ready yet.", reply_to=event.message)
             except TelethonRPCError:
                 pass
             return
@@ -276,12 +280,12 @@ def register_outgoing_handlers(client, user_id: int) -> None:
             if task and task.user_id == user_id and not task.is_cancelled:
                 task.cancel()
                 try:
-                    await event.respond(f"\u274C Task #{entry_id} cancelled.")
+                    await client.send_message(event.chat_id, f"\u274C Task #{entry_id} cancelled.", reply_to=event.message)
                 except TelethonRPCError:
                     pass
             else:
                 try:
-                    await event.respond("\u274C Task not found or already completed.")
+                    await client.send_message(event.chat_id, "\u274C Task not found or already completed.", reply_to=event.message)
                 except TelethonRPCError:
                     pass
             return
@@ -294,8 +298,10 @@ def register_outgoing_handlers(client, user_id: int) -> None:
 
         if not user_tasks:
             try:
-                await event.respond(
-                    "\u2139\uFE0F You have no active or queued tasks to cancel."
+                await client.send_message(
+                    event.chat_id,
+                    "\u2139\uFE0F You have no active or queued tasks to cancel.",
+                    reply_to=event.message,
                 )
             except TelethonRPCError:
                 pass
@@ -312,7 +318,7 @@ def register_outgoing_handlers(client, user_id: int) -> None:
                 "or send `/cancel` again to cancel all."
             )
             try:
-                await event.respond("\n".join(lines))
+                await client.send_message(event.chat_id, "\n".join(lines), reply_to=event.message)
             except TelethonRPCError:
                 pass
             return
@@ -321,7 +327,7 @@ def register_outgoing_handlers(client, user_id: int) -> None:
         task = user_tasks[0]
         task.cancel()
         try:
-            await event.respond(f"\u274C Task #{task.entry_id} cancelled.")
+            await client.send_message(event.chat_id, f"\u274C Task #{task.entry_id} cancelled.", reply_to=event.message)
         except TelethonRPCError:
             pass
 
