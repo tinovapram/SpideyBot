@@ -207,8 +207,9 @@ def register_outgoing_handlers(client, user_id: int) -> None:
         is_admin = user_id in config.ADMIN_IDS
         is_premium = has_premium_access(user_id)
 
-        status_msg = await event.respond(
-            "\u23F3 **SpideyBot:** Queueing your download request..."
+        status_msg = await event.client.send_message(
+            event.chat_id,
+            "\u23F3 **SpideyBot:** Queueing your download request...",reply_to=event.message
         )
 
         status, task = await dm.add_task(

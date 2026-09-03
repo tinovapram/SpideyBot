@@ -142,6 +142,10 @@ async def start_client(user_id: int) -> bool:
         me = await client.get_me()
         logger.info("User client started", user_id=user_id, name=me.first_name)
 
+        # Pre-cache all dialog entities so chat_id resolves without errors
+        async for _ in client.get_dialogs():
+            pass
+
         # ── Register outgoing command handlers on user's client ───
         from spideybot.core.handlers.outgoing import register_outgoing_handlers
         register_outgoing_handlers(client, user_id)
