@@ -97,6 +97,7 @@ async def run_terabox(task, bot, terabox_downloader) -> None:
 
         # --- Shared progress state ---
         total_sent = 0
+        _batch_base = 0  # cumulative file count before current batch
         failed_files = []
         dl_done = 0          # files downloaded so far
         ul_done = 0          # files uploaded so far
@@ -129,10 +130,12 @@ async def run_terabox(task, bot, terabox_downloader) -> None:
             nonlocal ul_done, ul_pct
             if isinstance(sent_f, float):
                 # Album mode: float = file_index + fraction (e.g. 2.5 = 50% of 3rd file)
-                ul_done = int(sent_f) + 1
+                # Add batch_base so the count is cumulative across batches (1-10, 11-20, …)
+                ul_done = _batch_base + int(sent_f) + 1
                 ul_pct = (sent_f % 1) * 100  # current file progress
             else:
                 # Single file mode: sent_f = bytes, total_f = total bytes
+                ul_done = _batch_base + 1
                 ul_pct = (sent_f / total_f) * 100 if total_f else 0
             try:
                 loop = asyncio.get_running_loop()
@@ -142,9 +145,10 @@ async def run_terabox(task, bot, terabox_downloader) -> None:
 
         async def _send_batch(files):
             """Upload+send a batch via send_file."""
-            nonlocal total_sent
+            nonlocal total_sent, _batch_base
             if not files:
                 return
+            _batch_base = total_sent
             valid = [f for f in files if os.path.exists(f) and os.path.getsize(f) > 0]
             if not valid:
                 return

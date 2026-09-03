@@ -1,4 +1,7 @@
-"""Streamtape downloader."""
+"""One-shot script to rewrite streamtape.py _extract_url with norobotlink pattern."""
+import pathlib
+
+CONTENT = r'''"""Streamtape downloader."""
 
 import os
 import re
@@ -38,46 +41,55 @@ class StreamtapeDownloader(BaseDownloader):
     # ── URL extraction (multiple fallback patterns) ─────────────────
 
     def _extract_url(self, html, host):
-        # 1. JS-reconstructed URL (cloudstream-style: parse JS substring rebuild)
-        #    The HTML div tokens are decoys — JS replaces them at runtime.
+        # 1. norobotlink + ideoooolink + token (standard Streamtape pattern)
+        token_m = re.search(
+            r"getElementById\(['\"]norobotlink['\"]\)\.innerHTML\s*=\s*(.+?);",
+            html,
+        )
+        if token_m:
+            token_val = re.search(r"token=([^&'\"]+)", token_m.group(1))
+            if token_val:
+                token = token_val.group(1)
+                io_m = re.search(
+                    r"getElementById\(['\"]ideoooolink['\"]\)\.innerHTML\s*=\s*['\"]([^'\"]+)['\"]",
+                    html,
+                )
+                if io_m:
+                    return f"https:{io_m.group(1)}&token={token}"
+                div_text_m = re.search(
+                    r"<div[^>]*id=['\"]ideoooolink['\"][^>]*>([^<]+)</div>",
+                    html,
+                )
+                if div_text_m:
+                    return f"https:{div_text_m.group(1)}&token={token}"
+
+        # 2. JS-reconstructed URL (substring pattern)
         m = re.search(
             r"getElementById\(['\"]captchalink['\"]\)\s*\.innerHTML\s*=\s*['\"]([^'\"]+)['\"]\s*\+\s*\(['\"]([^'\"]+)['\"]\)\.substring\((\d+)\)",
             html,
         )
         if m:
-            prefix = m.group(1)  # e.g. '//streamtape'
-            raw_str = m.group(2)  # e.g. 'defge.cc/get_video?...'
+            prefix = m.group(1)
+            raw_str = m.group(2)
             offset = int(m.group(3))
-            path = raw_str[offset:]  # 'e.cc/get_video?...'
-            return f"https:{prefix}{path}"
+            return f"https:{prefix}{raw_str[offset:]}"
 
-        # 2. JS substring reconstruction of #ideoooolink content
-        # Pattern: document.getElementById('ideoooolink').innerHTML = ... + ('...substring chain...');
+        # 3. ideoooolink + double substring
         m = re.search(
-            r"getElementById\(['\"]ideoooolink['\"]\)\s*\.innerHTML\s*=\s*['\"]([^'\"]+)['\"]\s*\+",
+            r"getElementById\(['\"]ideoooolink['\"]\).*?=\s*['\"]([^'\"]+)['\"]\s*\+.*?\(['\"]([^'\"]+)['\"]\)\.substring\((\d+)\)\.substring\((\d+)\)",
             html,
         )
         if m:
-            prefix = m.group(1)  # e.g. "/streamtape"
-            # Find the string that gets substring'd: ('...')
-            m2 = re.search(
-                r"getElementById\(['\"]ideoooolink['\"]\).*?=\s*['\"]([^'\"]+)['\"]\s*\+.*?\(['\"]([^'\"]+)['\"]\)\.substring\((\d+)\)\.substring\((\d+)\)",
-                html,
-            )
-            if m2:
-                s_str = m2.group(2)
-                start = int(m2.group(3))
-                end = int(m2.group(4))
-                rebuilt = prefix + "" + s_str[start:][end:]
-                return f"https://{rebuilt.lstrip('/')}"
+            prefix = m.group(1)
+            s_str = m.group(2)
+            start = int(m.group(3))
+            end = int(m.group(4))
+            return f"https://{(prefix + s_str[start:][end:]).lstrip('/')}"
 
-
-
-        # 4. Direct href patterns
+        # 4. Direct href / get_video patterns
         for pat in [
             r'href="(https?://[^"]*get_video\?[^"]+)"',
             r'href="(/get_video\?[^"]+)"',
-            r"['\"](/get_video\?[^'\"]+)['\"]",
         ]:
             m = re.search(pat, html)
             if m:
@@ -85,14 +97,6 @@ class StreamtapeDownloader(BaseDownloader):
                 if val.startswith("http"):
                     return val
                 return f"https://{host}{val}"
-
-        # 5. video_url variable in JS
-        m = re.search(r"video_url\s*=\s*['\"]([^'\"]+/get_video[^'\"]*)", html)
-        if m:
-            val = m.group(1)
-            if val.startswith("/"):
-                return f"https://{host}{val}"
-            return val
 
         return None
 
@@ -109,3 +113,8 @@ class StreamtapeDownloader(BaseDownloader):
                 title += ".mp4"
             return title
         return None
+'''
+
+p = pathlib.Path("spideybot/downloaders/site_downloaders/streamtape.py")
+p.write_text(CONTENT, encoding="utf-8")
+print(f"Written {p} ({p.stat().st_size} bytes)")
