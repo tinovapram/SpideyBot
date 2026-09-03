@@ -187,7 +187,7 @@ def register_outgoing_handlers(client, user_id: int) -> None:
         m = re.match(r"/dl(?:\s+(https?://\S+))?", event.raw_text or "", re.IGNORECASE)
         if not m:
             return
-
+        logger.info("Outgoing /dl via user", user_id=user_id)
         link = m.group(1)
         if not link:
             try:
