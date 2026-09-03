@@ -3,7 +3,8 @@ SpideyBot - TeraBox Download Handler.
 
 Orchestrates the full TeraBox download flow: resolve -> download -> send -> cleanup.
 Uses send_file (not upload_file) for single-call upload+send with progress.
-Pipelined: while uploading batch N, downloading batch N+1 concurrently.
+Pipelined: while uploading file N, downloading file N+1 concurrently.
+Uploads one-by-one via prepare_media, sends as album in batches of 10.
 """
 
 import os
@@ -19,16 +20,6 @@ from spideybot.config import get_size_limit
 from spideybot.utils.files import download_file_async, prepare_media
 
 logger = structlog.get_logger(__name__)
-
-
-def _cleanup_batch(batch_files):
-    """Remove downloaded files to free disk space."""
-    for fp in batch_files:
-        try:
-            if os.path.isfile(fp):
-                os.remove(fp)
-        except OSError:
-            pass
 
 
 async def run_terabox(task, client, terabox_downloader) -> None:
@@ -117,7 +108,8 @@ async def run_terabox(task, client, terabox_downloader) -> None:
                 return
             text = " \u2502 ".join(parts)
             try:
-                await status_msg.edit(f"**SpideyBot:** {text}...")
+                await status_msg.edit(f"**SpideyBot:** {text}...\n\n"
+                                      f"Send `/cancel {task.entry_id}`  to abort.")
             except (MessageNotModifiedError, TelethonRPCError):
                 pass
 
@@ -159,7 +151,39 @@ async def run_terabox(task, client, terabox_downloader) -> None:
                 return None
             return filepath
 
-        # Pipeline: prefetch N+1 while uploading N
+        # Pipeline: prefetch N+1 while uploading N, send in batches of 10
+        _ALBUM_LIMIT = 10
+        pending_media = []  # InputMedia objects ready to send
+
+        async def _flush_album():
+            """Send pending media as album, clear buffer."""
+            nonlocal total_sent, pending_media
+            if not pending_media:
+                return
+            batch = pending_media
+            pending_media = []
+            try:
+                await client.send_file(
+                    task.event.chat_id,
+                    batch,
+                    caption=caption,
+                    reply_to=task.event.message.id,support_streaming=True,
+                )
+                total_sent += len(batch)
+            except Exception as e:
+                logger.warning("Album send failed, sending individually", error=str(e))
+                for m in batch:
+                    try:
+                        await client.send_file(
+                            task.event.chat_id,
+                            m,
+                            caption=caption,
+                            reply_to=task.event.message.id,
+                        )
+                        total_sent += 1
+                    except Exception as send_err:
+                        logger.warning("Individual send also failed", error=str(send_err))
+
         next_path = await _prefetch_one()
         while next_path:
             current_path = next_path
@@ -169,13 +193,9 @@ async def run_terabox(task, client, terabox_downloader) -> None:
                 media = await prepare_media(
                     client, current_path, progress_callback=_progress_cb,
                 )
-                await client.send_file(
-                    task.event.chat_id,
-                    media,
-                    caption=caption,
-                    reply_to=task.event.message.id,
-                )
-                total_sent += 1
+                pending_media.append(media)
+                if len(pending_media) >= _ALBUM_LIMIT:
+                    await _flush_album()
             except Exception as e:
                 logger.warning("File send failed", file=current_path, error=str(e))
 
@@ -186,6 +206,9 @@ async def run_terabox(task, client, terabox_downloader) -> None:
                 pass
 
             next_path = await next_task
+
+        # Flush remaining media
+        await _flush_album()
 
         if os.path.isdir(output_dir):
             shutil.rmtree(output_dir, ignore_errors=True)

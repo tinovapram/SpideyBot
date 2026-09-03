@@ -286,7 +286,7 @@ def register_outgoing_handlers(client, user_id: int) -> None:
                 try:
                     await status_msg.edit(
                         f"\u23F3 **SpideyBot:** Task queued (position #{pos} in queue)\n"
-                        f"Send `/cancel {task.entry_id}` to abort."
+                        f"Send `/cancel {task.entry_id}`  to abort."
                     )
                 except TelethonRPCError:
                     pass
