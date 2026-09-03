@@ -280,7 +280,7 @@ async def prepare_media(
     from telethon import types
     from telethon.utils import get_attributes, is_image
 
-    file_handle = await client.upload_file(file_path, progress_callback=progress_callback)
+    file_handle = await client.upload_file(file_path, progress_callback=progress_callback,)
 
     _is_image = is_image(file_path)
     if as_image is None:
@@ -320,7 +320,7 @@ async def prepare_media(
 
   
     # nosound_video: only relevant for video mime, else None
-    ns_video = nosound_video if mime.startswith('video') else None
+    ns_video = ns_video = (nosound_video if nosound_video is not None else True) if mime.startswith('video') else None
 
     return types.InputMediaUploadedDocument(
         file=file_handle,
