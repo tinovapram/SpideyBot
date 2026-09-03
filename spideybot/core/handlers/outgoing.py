@@ -54,20 +54,35 @@ def register_outgoing_handlers(client, user_id: int) -> None:
 
     @client.on(events.NewMessage(outgoing=True, pattern=r"/ping"))
     async def ping_handler(event):
-        """Ping google.com and reply with latency via the user's account."""
+        """Ping google.com and verify session health via the user's account."""
+        from spideybot.user_sessions import is_client_active
+
         url = "https://www.google.com/generate_204"
+        lines = []
+
+        # 1. Session health check
+        try:
+            me = await client.get_me()
+            lines.append(f"\u2705 **Session** — logged in as **{me.first_name}** (id: {me.id})")
+        except Exception as e:
+            lines.append(f"\u274C **Session** — not authorized: {e}")
+
+        # 2. Internet latency
         try:
             start = time.monotonic()
             async with aiohttp.ClientSession() as http:
                 async with http.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                     latency_ms = (time.monotonic() - start) * 1000
                     status = resp.status
-            result = f"\u2705 **pong** \u2014 {latency_ms:.0f} ms (HTTP {status})"
+            lines.append(f"\u2705 **Internet** — {latency_ms:.0f} ms (HTTP {status})")
         except Exception as e:
-            result = f"\u274C **ping failed** \u2014 {type(e).__name__}: {e}"
+            lines.append(f"\u274C **Internet** — {type(e).__name__}: {e}")
+
+        # 3. Client connection status
+        lines.append(f"{'\u2705' if is_client_active(user_id) else '\u274C'} **Client** — {'connected' if is_client_active(user_id) else 'disconnected'}")
 
         try:
-            await event.respond(f"**/ping**\n{result}")
+            await event.respond(f"**/ping**\n" + "\n".join(lines))
             logger.info("Outgoing /ping handled", user_id=user_id)
         except Exception as e:
             logger.error("Failed to send /ping reply", user_id=user_id, error=str(e))
@@ -207,26 +222,33 @@ def register_outgoing_handlers(client, user_id: int) -> None:
         is_admin = user_id in config.ADMIN_IDS
         is_premium = has_premium_access(user_id)
 
-        status_msg = await event.client.send_message(
-            event.chat_id,
-            "\u23F3 **SpideyBot:** Queueing your download request...",reply_to=event.message
-        )
+        try:
+            status_msg = await event.client.send_message(
+                event.chat_id,
+                "\u23F3 **SpideyBot:** Queueing your download request...",reply_to=event.message
+            )
 
-        status, task = await dm.add_task(
-            user_id, event, link, is_premium, is_admin, status_msg
-        )
+            status, task = await dm.add_task(
+                user_id, event, link, is_premium, is_admin, status_msg
+            )
 
-        if status == "ok":
-            pos = dm.get_queue_position(task.entry_id)
+            if status == "ok":
+                pos = dm.get_queue_position(task.entry_id)
+                try:
+                    await status_msg.edit(
+                        f"\u23F3 **SpideyBot:** Task queued (position #{pos} in queue)\n"
+                        f"Send `/cancel {task.entry_id}` to abort."
+                    )
+                except TelethonRPCError:
+                    pass
+
+            logger.info("Outgoing /dl handled", user_id=user_id, link=link)
+        except Exception as e:
+            logger.error("Failed to queue /dl task", user_id=user_id, link=link, error=str(e))
             try:
-                await status_msg.edit(
-                    f"\u23F3 **SpideyBot:** Task queued (position #{pos} in queue)\n"
-                    f"Send `/cancel {task.entry_id}` to abort."
-                )
+                await status_msg.edit(f"\u274C **SpideyBot:** Failed to queue download: `{e}`")
             except TelethonRPCError:
                 pass
-
-        logger.info("Outgoing /dl handled", user_id=user_id, link=link)
 
     # ── /cancel ────────────────────────────────────────────────────
 
