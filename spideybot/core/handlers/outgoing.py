@@ -79,7 +79,10 @@ def register_outgoing_handlers(client, user_id: int) -> None:
             lines.append(f"\u274C **Internet** — {type(e).__name__}: {e}")
 
         # 3. Client connection status
-        lines.append(f"{'\u2705' if is_client_active(user_id) else '\u274C'} **Client** — {'connected' if is_client_active(user_id) else 'disconnected'}")
+        connected = is_client_active(user_id)
+        client_icon = "\u2705" if connected else "\u274C"
+        client_status = "connected" if connected else "disconnected"
+        lines.append(f"{client_icon} **Client** — {client_status}")
 
         try:
             await event.respond(f"**/ping**\n" + "\n".join(lines))
