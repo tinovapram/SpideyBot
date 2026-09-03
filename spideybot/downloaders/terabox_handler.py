@@ -85,6 +85,8 @@ async def run_terabox(task, client, terabox_downloader) -> None:
         os.makedirs(output_dir, exist_ok=True)
 
         # --- Shared progress state ---
+        _sent=0
+        _total=0
         total_sent = 0
         failed_files = []
         dl_done = 0          # files downloaded so far
@@ -101,8 +103,8 @@ async def run_terabox(task, client, terabox_downloader) -> None:
             if dl_done < length_of_files:
                 dl_pct = int(dl_done / length_of_files * 100) if length_of_files else 0
                 parts.append(f"\U0001f4e5 Downloading {dl_done}/{length_of_files} ({dl_pct}%)")
-            if total_sent > 0:
-                ul_pct = int(total_sent / length_of_files * 100) if length_of_files else 0
+            if _total > 0:
+                ul_pct = int(_sent / _total * 100) if length_of_files else 0
                 parts.append(f"\U0001f4e4 Uploaded {total_sent}/{length_of_files} ({ul_pct}%)")
             if not parts:
                 return
@@ -113,7 +115,7 @@ async def run_terabox(task, client, terabox_downloader) -> None:
             except (MessageNotModifiedError, TelethonRPCError):
                 pass
 
-        def _progress_cb(sent, total):
+        def _progress_cb(_sent, _total):
             """upload_file progress callback — just triggers status refresh."""
             try:
                 loop = asyncio.get_running_loop()
@@ -169,7 +171,7 @@ async def run_terabox(task, client, terabox_downloader) -> None:
                     caption=caption,
                     reply_to=task.event.message.id,support_streaming=True,
                 )
-                total_sent += len(batch)
+                
             except Exception as e:
                 logger.warning("Album send failed, sending individually", error=str(e))
                 for m in batch:
@@ -194,6 +196,7 @@ async def run_terabox(task, client, terabox_downloader) -> None:
                     client, current_path, progress_callback=_progress_cb,
                 )
                 pending_media.append(media)
+                total_sent += 1
                 if len(pending_media) >= _ALBUM_LIMIT:
                     await _flush_album()
             except Exception as e:
