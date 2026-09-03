@@ -286,7 +286,8 @@ async def run_download_task(task, client, fallback_downloader, reddit_downloader
         _site = _platform
     else:
         _site = "gallery-dl"
-    task_staging_dir = os.path.join(str(task.user_id), _site, str(task.entry_id))
+    current_time_str = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+    task_staging_dir = os.path.join(str(task.user_id), _site, str(task.entry_id), current_time_str)
     dest_dir = os.path.join(fallback_downloader.download_dir, task_staging_dir)
 
     try:

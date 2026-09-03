@@ -49,7 +49,7 @@ async def run_terabox(task, client, terabox_downloader) -> None:
 
         saved_root = terabox_downloader.root_path
         current_time_str = time.strftime("%Y%m%d_%H%M%S", time.localtime())
-        terabox_downloader.root_path = f"/downloads/{task.user_id}/terabox/{task.entry_id}/{current_time_str}"
+        terabox_downloader.root_path = f"/downloads/{task.user_id}/{current_time_str}"
         try:
             result = await terabox_downloader.resolve(task.link, mode="download")
         finally:
@@ -81,7 +81,7 @@ async def run_terabox(task, client, terabox_downloader) -> None:
         length_of_files = len(files_to_send)
         title = result.title or "TeraBox Share"
 
-        output_dir = f"./downloads/tb_{task.user_id}_{task.entry_id}"
+        output_dir = f"./downloads/tb_{task.user_id}_{task.entry_id}/{current_time_str}"
         caption = f"{title}\n\nDownloaded by SpideyBot from [link]({task.link})\n\n"
         os.makedirs(output_dir, exist_ok=True)
 
