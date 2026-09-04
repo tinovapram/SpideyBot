@@ -1033,10 +1033,11 @@ class TeraBoxDownloader:
         """Download a single file using the configured transfer backend.
 
         Backend selection is driven by :func:`pick_transfer_backend`
-        (``TERABOX_TRANSFER``): ``aria2c`` when available, else native
-        segmented download (account links), else single-stream. A failed
-        fast backend falls back to the original single-stream behaviour so a
-        throttled transfer never hard-fails a large file.
+        (``TERABOX_TRANSFER``). ``auto`` (the default) uses native aiohttp
+        segmented download for large files, with ``aria2c`` as a second
+        fallback and single-stream as the final safety net. Direct (Method A)
+        links always download single-stream via curl_cffi. A failed fast
+        backend never hard-fails a large file - it drops to the next backend.
         """
         os.makedirs(output_dir, exist_ok=True)
         filepath = os.path.join(output_dir, sanitize_filename(tb_file.filename))
@@ -1047,6 +1048,7 @@ class TeraBoxDownloader:
         log = self.logger
 
         try:
+            # Explicit aria2 mode: always start with aria2c.
             if mode == "aria2" and aria2_available():
                 try:
                     return await aria2_download(
@@ -1067,6 +1069,7 @@ class TeraBoxDownloader:
                     )
                     wipe_partial(filepath)
 
+            # Segmented mode (auto default for large account links).
             if mode == "segmented" and tb_file.backend == "account":
                 session = await self.account._ensure_session()
                 try:
@@ -1083,13 +1086,33 @@ class TeraBoxDownloader:
                     )
                 except Exception as exc:
                     log.warning(
-                        "segmented backend failed; falling back",
+                        "segmented backend failed; trying aria2",
                         file=tb_file.filename,
                         error=str(exc),
                     )
                     wipe_partial(filepath)
+                    # aria2 as second fallback before the single-stream net.
+                    if aria2_available():
+                        try:
+                            return await aria2_download(
+                                tb_file.dlink,
+                                filepath,
+                                headers=headers,
+                                expected_size=size_bytes,
+                                progress_callback=progress_callback,
+                                connections=config.TERABOX_ARIA2_CONNECTIONS,
+                                stall_timeout=stall,
+                                logger=log,
+                            )
+                        except Exception as exc2:
+                            log.warning(
+                                "aria2 fallback failed; using single-stream",
+                                file=tb_file.filename,
+                                error=str(exc2),
+                            )
+                            wipe_partial(filepath)
 
-            # Fallback: original single-stream behaviour.
+            # Final fallback: original single-stream behaviour.
             wipe_partial(filepath)
             if tb_file.backend == "direct":
                 return await self.direct.download(

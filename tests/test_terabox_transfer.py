@@ -77,10 +77,11 @@ class TestPickBackend:
             monkeypatch.setattr(config, "TERABOX_TRANSFER", mode)
             assert tt.pick_transfer_backend(1024**3) == mode
 
-    def test_auto_aria2_preferred_when_available(self, monkeypatch):
+    def test_auto_large_segmented_when_available(self, monkeypatch):
         monkeypatch.setattr(config, "TERABOX_TRANSFER", "auto")
         monkeypatch.setattr(tt, "aria2_available", lambda: True)
-        assert tt.pick_transfer_backend(1024**3) == "aria2"
+        # auto now prefers native aiohttp segmented over aria2.
+        assert tt.pick_transfer_backend(1024**3) == "segmented"
 
     def test_auto_small_file_single(self, monkeypatch):
         monkeypatch.setattr(config, "TERABOX_TRANSFER", "auto")

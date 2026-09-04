@@ -88,8 +88,8 @@ def terabox_account_cookies() -> list[str]:
 
 # ── TeraBox transfer engine ──────────────────────────────────────
 # TERABOX_TRANSFER: auto | aria2 | segmented | single
-#   auto       -> aria2 for files >= TERABOX_TRANSFER_MIN_MB when the binary
-#                 exists, else native segmented, else single-stream.
+#   auto       -> native aiohttp segmented for files >= TERABOX_TRANSFER_MIN_MB
+#                 (aria2 used only as a fallback), else single-stream.
 #   aria2      -> always delegate to the aria2c binary (needs aria2 installed).
 #   segmented  -> native parallel Range download (multi-connection).
 #   single     -> original single-stream behaviour.

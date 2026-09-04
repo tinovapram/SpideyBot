@@ -11,14 +11,14 @@ there was no way to recover when the server throttled that connection.
 This module provides two throttling-resistant strategies plus the original
 single-stream path as a safe fallback:
 
-* ``aria2_download``
-    Delegates to the ``aria2c`` binary: parallel Range connections
-    (``-x``/``-s``), automatic retry and on-disk resume (``-c``). Best option
-    for large files and works for both account and direct share links.
 * ``segmented_download``
     Native asyncio download split into ``connections`` parallel Range
     requests, with per-segment stall detection that reconnects from the
-    current byte offset. Used for account links when aria2 is unavailable.
+    current byte offset. Default for large account links.
+* ``aria2_download``
+    Delegates to the ``aria2c`` binary: parallel Range connections
+    (``-x``/``-s``), automatic retry and on-disk resume (``-c``). Used for
+    account links only when segmented fails, or when explicitly configured.
 * ``single_stream_download``
     Original behaviour (one connection), kept as the fallback and extended
     with stall detection + reconnect/resume so it no longer dies silently.
@@ -71,16 +71,14 @@ def aria2_available() -> bool:
 def pick_transfer_backend(size_bytes: int) -> str:
     """Choose ``aria2``, ``segmented`` or ``single`` for a file of *size_bytes*.
 
-    Honours ``TERABOX_TRANSFER``; ``auto`` uses aria2 when present and the
-    file is big enough, otherwise native segmented, otherwise single-stream.
+    Honours ``TERABOX_TRANSFER``; ``auto`` uses native aiohttp segmented for
+    files big enough (aria2 is only a fallback), otherwise single-stream.
     """
     mode = (config.TERABOX_TRANSFER or "auto").strip().lower()
     if mode in ("aria2", "segmented", "single"):
         return mode
 
     if size_bytes >= config.TERABOX_TRANSFER_MIN_BYTES:
-        if aria2_available():
-            return "aria2"
         return "segmented"
     return "single"
 
