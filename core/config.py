@@ -57,6 +57,19 @@ TERABOX_COOKIE = os.getenv("TERABOX_COOKIE")
 TERABOX_JSTOKEN = os.getenv("TERABOX_JSTOKEN")
 TERABOX_BDSTOKEN = os.getenv("TERABOX_BDSTOKEN")
 
+# ── TeraBox transfer engine ──────────────────────────────────────
+# TERABOX_TRANSFER: auto | aria2 | segmented | single
+#   auto       -> aria2 for files >= TERABOX_TRANSFER_MIN_MB when the binary
+#                 exists, else native segmented, else single-stream.
+#   aria2      -> always delegate to the aria2c binary (needs aria2 installed).
+#   segmented  -> native parallel Range download (multi-connection).
+#   single     -> original single-stream behaviour.
+TERABOX_TRANSFER = os.getenv("TERABOX_TRANSFER", "auto").strip().lower()
+TERABOX_TRANSFER_MIN_MB = _int_env("TERABOX_TRANSFER_MIN_MB", 32)
+TERABOX_TRANSFER_MIN_BYTES = TERABOX_TRANSFER_MIN_MB * 1024 * 1024
+TERABOX_SEGMENT_CONNECTIONS = _int_env("TERABOX_SEGMENT_CONNECTIONS", 8)
+TERABOX_ARIA2_CONNECTIONS = _int_env("TERABOX_ARIA2_CONNECTIONS", 16)
+
 # ── Reddit (fallback chain) ───────────────────────────────────────
 
 REDDIT_FALLBACK_CLIENT_ID = os.getenv(

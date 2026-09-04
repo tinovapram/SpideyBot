@@ -27,6 +27,15 @@ from typing import Callable, Optional
 import aiohttp
 import structlog
 
+from core import config
+from downloader.terabox_transfer import (
+    aria2_available,
+    aria2_download,
+    pick_transfer_backend,
+    segmented_download,
+    single_stream_download,
+    wipe_partial,
+)
 from utils.files import sanitize_filename
 
 try:
@@ -912,6 +921,35 @@ class DirectShareResolver:
             return None
 
 
+# ── Transfer helpers ───────────────────────────────────────────────
+
+def _stall_timeout_for(size_bytes: int) -> int:
+    """Pick an idle/stall timeout (seconds) proportional to file size."""
+    size_mb = (size_bytes or 0) / (1024 * 1024)
+    if size_mb < 50:
+        return 120
+    if size_mb < 500:
+        return 300
+    if size_mb < 2048:
+        return 600
+    return 900
+
+
+def _transfer_headers(account: AccountTransferResolver, tb_file: TeraBoxFile) -> dict:
+    """Build HTTP headers used when downloading *tb_file*'s dlink."""
+    if tb_file.backend == "direct":
+        ua = DirectShareResolver._DIRECT_UA
+        referer = "https://www.terabox.app/"
+    else:
+        ua = account.USER_AGENT
+        referer = f"{account.BASE_API}/main?category=all&path=%2F"
+    headers = {"User-Agent": ua, "Referer": referer, "Accept": "*/*"}
+    cookies = account._cookies_dict
+    if cookies:
+        headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
+    return headers
+
+
 # ── Facade ─────────────────────────────────────────────────────────
 
 class TeraBoxDownloader:
@@ -992,47 +1030,85 @@ class TeraBoxDownloader:
     async def download_file(
         self, tb_file: TeraBoxFile, output_dir: str, progress_callback=None
     ) -> str:
-        """Download a single file with idle-timeout protection (pipeline path)."""
+        """Download a single file using the configured transfer backend.
+
+        Backend selection is driven by :func:`pick_transfer_backend`
+        (``TERABOX_TRANSFER``): ``aria2c`` when available, else native
+        segmented download (account links), else single-stream. A failed
+        fast backend falls back to the original single-stream behaviour so a
+        throttled transfer never hard-fails a large file.
+        """
         os.makedirs(output_dir, exist_ok=True)
         filepath = os.path.join(output_dir, sanitize_filename(tb_file.filename))
+        size_bytes = tb_file.size_bytes or 0
+        headers = _transfer_headers(self.account, tb_file)
+        stall = _stall_timeout_for(size_bytes)
+        mode = pick_transfer_backend(size_bytes)
+        log = self.logger
 
-        if tb_file.backend == "direct":
-            return await self.direct.download(tb_file, filepath, progress_callback=progress_callback)
-
-        size_mb = (tb_file.size_bytes or 0) / (1024 * 1024)
-        if size_mb < 50:
-            sock_read = 120
-        elif size_mb < 500:
-            sock_read = 300
-        elif size_mb < 2048:
-            sock_read = 600
-        else:
-            sock_read = 900
-
-        timeout = aiohttp.ClientTimeout(total=0, connect=30, sock_read=sock_read)
-
-        response = await self.account._request_with_retry(
-            "GET", tb_file.dlink, headers={"User-Agent": self.account.USER_AGENT}, timeout=timeout
-        )
         try:
-            total = int(response.headers.get("Content-Length", 0) or 0)
-            done = 0
-            with open(filepath, "wb") as handle:
-                async for chunk in response.content.iter_chunked(8192):
-                    handle.write(chunk)
-                    done += len(chunk)
-                    if progress_callback:
-                        progress_callback(tb_file.filename, done, total)
-        except Exception:
-            if os.path.exists(filepath):
+            if mode == "aria2" and aria2_available():
                 try:
-                    os.remove(filepath)
-                except OSError:
-                    pass
+                    return await aria2_download(
+                        tb_file.dlink,
+                        filepath,
+                        headers=headers,
+                        expected_size=size_bytes,
+                        progress_callback=progress_callback,
+                        connections=config.TERABOX_ARIA2_CONNECTIONS,
+                        stall_timeout=stall,
+                        logger=log,
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "aria2 backend failed; falling back",
+                        file=tb_file.filename,
+                        error=str(exc),
+                    )
+                    wipe_partial(filepath)
+
+            if mode == "segmented" and tb_file.backend == "account":
+                session = await self.account._ensure_session()
+                try:
+                    return await segmented_download(
+                        tb_file.dlink,
+                        filepath,
+                        session=session,
+                        headers=headers,
+                        expected_size=size_bytes,
+                        progress_callback=progress_callback,
+                        connections=config.TERABOX_SEGMENT_CONNECTIONS,
+                        stall_timeout=stall,
+                        logger=log,
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "segmented backend failed; falling back",
+                        file=tb_file.filename,
+                        error=str(exc),
+                    )
+                    wipe_partial(filepath)
+
+            # Fallback: original single-stream behaviour.
+            wipe_partial(filepath)
+            if tb_file.backend == "direct":
+                return await self.direct.download(
+                    tb_file, filepath, progress_callback=progress_callback
+                )
+            session = await self.account._ensure_session()
+            return await single_stream_download(
+                tb_file.dlink,
+                filepath,
+                session=session,
+                headers=headers,
+                expected_size=size_bytes,
+                stall_timeout=stall,
+                progress_callback=progress_callback,
+                logger=log,
+            )
+        except Exception:
+            wipe_partial(filepath)
             raise
-        finally:
-            await response.release()
-        return filepath
 
     async def list_files(self, url: str) -> TeraBoxResult:
         return await self.resolve(url, mode="list")
