@@ -165,7 +165,7 @@ async def run_terabox(task, client, terabox_downloader) -> None:
 
         async def _flush_album():
             """Send pending media as album, clear buffer."""
-            nonlocal total_sent, pending_media
+            nonlocal total_sent, pending_media, pending_filenames
             if not pending_media:
                 return
             batch = pending_media
