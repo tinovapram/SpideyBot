@@ -96,6 +96,7 @@ class BaseDownloader:
         file_path: str,
         headers: dict | None = None,
         progress_callback=None,
+        proxies: dict | None = None,
     ) -> str:
         """Download *url* to *file_path* with optional progress callback."""
         req_headers = dict(self.DEFAULT_HEADERS)
@@ -104,7 +105,7 @@ class BaseDownloader:
 
         os.makedirs(os.path.dirname(file_path), exist_ok=True)
 
-        response = self._session.get(url, headers=req_headers, stream=True, timeout=3600)
+        response = self._session.get(url, headers=req_headers, stream=True, timeout=3600, proxies=proxies)
         response.raise_for_status()
 
         total = int(response.headers.get("Content-Length", 0))
@@ -132,6 +133,53 @@ class BaseDownloader:
     def download_streaming(self, url: str, output_dir: str = "downloads") -> Iterator[str]:
         """Yield file paths one by one. Defaults to ``download()``."""
         yield from self.download(url, output_dir=output_dir)
+
+
+def unpack(p: str, a: int | None = None, c: int | None = None, k: list | None = None) -> str:
+    """Deobfuscator for packed JavaScript (``eval(function(p,a,c,k,e,d){...}``).
+
+    Used by MixDrop, StreamWish, Luluvdoo, and other sites that ship
+    player code through Dean Edwards-style packers.
+    """
+    import ast as _ast
+    import re as _re
+
+    if a is None and c is None and k is None:
+        pattern = r"\}\('(.*)',\s*(\d+),\s*(\d+),\s*'(.*)'\.split\('\|'\)"
+        m = _re.search(pattern, p, _re.DOTALL)
+        if not m:
+            pattern2 = r'eval\(function\((.*?)\)\{.*?\}\((.*?)\)\)'
+            m2 = _re.search(pattern2, p, _re.DOTALL)
+            if not m2:
+                return p
+            raw = m2.group(2).replace(".split('|')", "")
+            try:
+                data = _ast.literal_eval(raw)
+                p, a, c, k = data[0], int(data[1]), int(data[2]), data[3].split('|')
+            except Exception:
+                return p
+        else:
+            p, a, c, k = m.group(1), int(m.group(2)), int(m.group(3)), m.group(4).split("|")
+
+    digits = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+    def base_encode(n):
+        rem = n % a
+        digit = digits[rem] if rem < len(digits) else str(rem)
+        if n < a:
+            return digit
+        return base_encode(n // a) + digit
+
+    d: dict[str, str] = {}
+    for i in range(c - 1, -1, -1):
+        key = base_encode(i)
+        d[key] = k[i] if i < len(k) and k[i] else key
+
+    def replace(match):
+        w = match.group(0)
+        return d.get(w, w)
+
+    return _re.sub(r"\b\w+\b", replace, p)
 
 
 def find_url(obj, *, patterns=(".mp4",)) -> str | None:

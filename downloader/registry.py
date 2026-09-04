@@ -23,7 +23,11 @@ from downloader.site.reddit import RedditDownloader
 from downloader.site.snapchat import SnapchatDownloader
 from downloader.site.soundcloud import SoundCloudDownloader
 from downloader.site.spotify import SpotifyDownloader
+from downloader.site.mixdrop import MixDropDownloader
 from downloader.site.streamtape import StreamtapeDownloader
+from downloader.site.streamwish import StreamWishDownloader
+from downloader.site.luluvdoo import LuluvdooDownloader
+from downloader.site.bysejikuar import BysejikuarDownloader
 from downloader.site.threads import ThreadsDownloader
 from downloader.site.tiktok import TikTokDownloader
 from downloader.site.tumblr import TumblrDownloader
@@ -64,6 +68,10 @@ def _build_entries():
         ("doodstream", DoodstreamDownloader(), DoodstreamDownloader.matches),
         ("streamtape", StreamtapeDownloader(), StreamtapeDownloader.matches),
         ("vidara", VidaraDownloader(), VidaraDownloader.matches),
+        ("mixdrop", MixDropDownloader(), MixDropDownloader.matches),
+        ("streamwish", StreamWishDownloader(), StreamWishDownloader.matches),
+        ("luluvdoo", LuluvdooDownloader(), LuluvdooDownloader.matches),
+        ("bysejikuar", BysejikuarDownloader(), BysejikuarDownloader.matches),
         (
             "reddit",
             RedditDownloader(

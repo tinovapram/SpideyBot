@@ -23,6 +23,7 @@ from urllib.parse import urlparse
 import requests
 
 from ..base import BaseDownloader
+from ..proxy import get_proxy
 
 _ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 
@@ -80,7 +81,7 @@ class DoodstreamDownloader(BaseDownloader):
     # ── Folder ───────────────────────────────────────────────────
 
     def _download_folder(self, url, base, output_dir):
-        resp = self._request("GET", url)
+        resp = self._request("GET", url, proxies=self._proxy())
         links = re.findall(r'href="((?:https?://[^"/]+)?/d/[^"]+)"', resp.text)
         if not links:
             links = re.findall(r'data-href="((?:https?://[^"/]+)?/d/[^"]+)"', resp.text)
@@ -155,7 +156,7 @@ class DoodstreamDownloader(BaseDownloader):
 
     def _attempt_file(self, embed_url, base, output_dir):
         """One embed→pass_md5→direct-URL→file cycle (each token is one-shot)."""
-        html = self._request("GET", embed_url).text
+        html = self._request("GET", embed_url, proxies=self._proxy()).text
 
         match = re.search(r"/pass_md5/[^\s\"'<>]+", html)
         if not match:
@@ -169,7 +170,15 @@ class DoodstreamDownloader(BaseDownloader):
         pass_md5_path = match.group(0)
         token = pass_md5_path.rsplit("/", 1)[-1]
 
-        resp = self._request("GET", base + pass_md5_path, headers={"Referer": embed_url})
+        resp = self._request(
+            "GET",
+            base + pass_md5_path,
+            headers={
+                "Referer": embed_url,
+                "X-Requested-With": "XMLHttpRequest",
+            },
+            proxies=self._proxy(),
+        )
         url_prefix = resp.text.strip()
         if not url_prefix:
             raise ValueError("Empty pass_md5 response from Doodstream")
@@ -179,7 +188,8 @@ class DoodstreamDownloader(BaseDownloader):
             raise ValueError(f"pass_md5 not ready (server replied {url_prefix[:24]!r})")
 
         hash_suffix = "".join(random.choices(_ALPHABET, k=10))
-        dl_url = f"{url_prefix}{hash_suffix}?token={token}"
+        expiry = int(time.time() * 1000)
+        dl_url = f"{url_prefix}{hash_suffix}?token={token}&expiry={expiry}"
 
         fname = self._filename_from_cd(resp) or f"{token[:8]}.mp4"
         path = os.path.join(output_dir, self._sanitize_filename(fname))
@@ -190,8 +200,17 @@ class DoodstreamDownloader(BaseDownloader):
             # connection that doodstream may have silently closed.
             headers={"Referer": embed_url, "Connection": "close"},
             progress_callback=self._progress_callback,
+            proxies=self._proxy(),
         )
         return [path]
+
+    # ── Proxy helpers ───────────────────────────────────────────────
+
+    @classmethod
+    def _proxy(cls) -> str | None:
+        """Return a proxy dict for requests, or None if no pool configured."""
+        p = get_proxy("doodstream")
+        return {"http": p, "https": p} if p else None
 
     @staticmethod
     def _filename_from_cd(resp):
