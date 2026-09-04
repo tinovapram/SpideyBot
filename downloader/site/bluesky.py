@@ -44,22 +44,28 @@ class BlueskyDownloader(BaseDownloader):
         info = self.fetch_media(url)
         safe_title = self._sanitize_filename(info["title"])
 
+        # Native post caption first so flow.py attaches it to the first file.
+        results: list = []
+        meta_path = self._write_metadata(
+            output_dir, {"category": "bluesky", "title": info["title"]}
+        )
+        if meta_path:
+            results.append(meta_path)
+
         if info["videos"]:
-            paths = []
             multiple = len(info["videos"]) > 1
             for index, video in enumerate(info["videos"], 1):
                 name = f"{safe_title}_{index}.mp4" if multiple else f"{safe_title}.mp4"
                 path = os.path.join(output_dir, name)
                 self._download_file(video["url"], path)
-                paths.append(path)
-            return paths
+                results.append(path)
+            return results
 
         if info["photos"]:
-            paths = []
             for index, photo in enumerate(info["photos"], 1):
                 path = os.path.join(output_dir, f"{safe_title}_{index}.jpg")
                 self._download_file(photo["url"], path)
-                paths.append(path)
-            return paths
+                results.append(path)
+            return results
 
         raise ValueError("No media files resolved for Bluesky post")

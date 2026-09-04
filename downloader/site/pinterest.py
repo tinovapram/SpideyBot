@@ -44,15 +44,25 @@ class PinterestDownloader(BaseDownloader):
         info = self.fetch_media(url)
         safe_title = self._sanitize_filename(info["title"])
 
+        # Native pin caption/title first so flow.py attaches it to the file.
+        results: list = []
+        meta_path = self._write_metadata(
+            output_dir, {"category": "pinterest", "title": info["title"]}
+        )
+        if meta_path:
+            results.append(meta_path)
+
         if not info["downloads"]:
             if info["thumbnail"]:
                 path = os.path.join(output_dir, f"{safe_title}.jpg")
                 self._download_file(info["thumbnail"], path)
-                return [path]
+                results.append(path)
+                return results
             raise ValueError("No download links found for Pinterest")
 
         best = info["downloads"][0]
         ext = ".mp4" if "video" in best["format"].lower() else ".jpg"
         path = os.path.join(output_dir, f"{safe_title}{ext}")
         self._download_file(best["url"], path)
-        return [path]
+        results.append(path)
+        return results

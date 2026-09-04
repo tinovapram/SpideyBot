@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from typing import Iterator
 
 import requests
+import structlog
 
 from utils.files import sanitize_filename
+
+logger = structlog.get_logger(__name__)
 
 
 class BaseDownloader:
@@ -39,6 +43,24 @@ class BaseDownloader:
 
     def _sanitize_filename(self, filename: str) -> str:
         return sanitize_filename(filename)
+
+    def _write_metadata(self, output_dir: str, meta: dict) -> str | None:
+        """Write ``metadata.json`` into *output_dir* and return its path.
+
+        The sidecar carries a native post caption/description that the upload
+        pipeline reads to prepend to the first file's caption. Kept in the
+        per-task staging directory so registry singletons never share state.
+        Returns ``None`` when the write fails (caption silently skipped).
+        """
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+            path = os.path.join(output_dir, "metadata.json")
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(meta, handle, ensure_ascii=False, indent=4)
+            return path
+        except OSError as exc:
+            logger.warning("Failed to write metadata.json", error=str(exc))
+            return None
 
     def _request(
         self,

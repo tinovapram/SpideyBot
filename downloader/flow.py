@@ -22,7 +22,7 @@ import structlog
 from core import config
 from downloader.registry import get_registry
 from utils import paths
-from utils.files import build_caption, prepare_media, sanitize_filename
+from utils.files import build_caption, extract_native_text, prepare_media, sanitize_filename
 from utils.progress import StatusMessage, count_line
 from utils.telethon import send_album
 
@@ -150,6 +150,10 @@ async def _stream_upload(task, client, source, status) -> int:
         nonlocal sent, uploaded
         pending_media: list = []
         pending_captions: list[str] = []
+        # Native post caption captured from a metadata sidecar; applied to the
+        # first media of this download so ``filename + Downloaded by`` stays intact.
+        native_text: str | None = None
+        native_used = False
 
         async def flush() -> None:
             nonlocal sent
@@ -171,13 +175,20 @@ async def _stream_upload(task, client, source, status) -> int:
 
             clean = _sanitize_path(file_path)
             if clean.lower().endswith(".json"):
+                if native_text is None:
+                    native_text = extract_native_text([clean])
                 _remove(clean)
                 continue
 
             try:
                 media = await prepare_media(client, clean, progress_callback=upload_cb)
                 pending_media.append(media)
-                pending_captions.append(build_caption(os.path.basename(clean), task.link))
+                native = native_text if (native_text and not native_used) else None
+                if native:
+                    native_used = True
+                pending_captions.append(
+                    build_caption(os.path.basename(clean), task.link, native=native)
+                )
                 uploaded += 1
                 status.row("up", count_line("📤", "Uploaded", uploaded))
                 if len(pending_media) >= _ALBUM_LIMIT:
@@ -194,6 +205,12 @@ async def _stream_upload(task, client, source, status) -> int:
 
 
 async def _send_all_at_once(task, client, downloaded_files, status) -> int:
+    json_paths = [
+        fp for fp in downloaded_files
+        if os.path.exists(fp) and fp.lower().endswith(".json")
+    ]
+    native_text = extract_native_text(json_paths)
+
     media_files = [
         _sanitize_path(fp)
         for fp in downloaded_files
@@ -205,10 +222,14 @@ async def _send_all_at_once(task, client, downloaded_files, status) -> int:
     media, captions = [], []
     upload_cb = status.bytes_cb("ul", "📤", "Uploading")
     uploaded = 0
+    native_used = False
     for fp in media_files:
         try:
             media.append(await prepare_media(client, fp, progress_callback=upload_cb))
-            captions.append(build_caption(os.path.basename(fp), task.link))
+            native = native_text if (native_text and not native_used) else None
+            if native:
+                native_used = True
+            captions.append(build_caption(os.path.basename(fp), task.link, native=native))
             uploaded += 1
             status.row("up", count_line("📤", "Uploaded", uploaded))
         except Exception as exc:

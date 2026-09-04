@@ -122,6 +122,10 @@ class RedditDownloader(BaseDownloader):
         upvotes = submission.ups
         safe_title = self._sanitize_filename(title)
 
+        # Native caption first (before media) so flow.py can attach it to the
+        # first uploaded file. The path is unique to this staging dir.
+        yield from self._save_metadata(submission, output_dir, title)
+
         if getattr(submission, "is_video", False):
             yield from self._download_video(submission, url, output_dir, upvotes, safe_title)
         elif getattr(submission, "is_gallery", False) and hasattr(submission, "media_metadata"):
@@ -138,8 +142,6 @@ class RedditDownloader(BaseDownloader):
                 yield path
         else:
             yield from self._download_link(submission, output_dir, upvotes, safe_title)
-
-        yield from self._save_metadata(submission, output_dir, title)
 
     # ── Internal helpers ───────────────────────────────────────────
 

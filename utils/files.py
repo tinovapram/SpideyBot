@@ -43,13 +43,18 @@ def sanitize_filename(filename: str, max_len: int = 120) -> str:
     return f"{clean_name}.{clean_ext}" if clean_ext else clean_name
 
 
-def build_caption(filename: str, link: str) -> str:
-    """Build a per-file caption with the filename and a download footer."""
-    return f"{filename}\n\nDownloaded by SpideyBot from [link]({link})\n\n"
+def build_caption(filename: str, link: str, native: Optional[str] = None) -> str:
+    """Build a per-file caption.
+
+    When *native* (the post's own caption/description) is provided it is shown
+    first, then the filename and the ``Downloaded by SpideyBot`` footer.
+    """
+    head = f"{native.strip()}\n\n" if native and native.strip() else ""
+    return f"{head}{filename}\n\nDownloaded by SpideyBot from [link]({link})\n\n"
 
 
-def extract_post_text(json_paths: list[str]) -> Optional[str]:
-    """Extract a caption from gallery-dl metadata JSON files, or None."""
+def _collect_meta(json_paths: list[str]) -> dict:
+    """Recursively collect ``category``/``author``/caption keys from JSON files."""
     found: dict[str, str] = {}
 
     def _search(obj) -> None:
@@ -82,6 +87,34 @@ def extract_post_text(json_paths: list[str]) -> Optional[str]:
                 _search(json.load(handle))
         except (json.JSONDecodeError, OSError):
             logger.debug("Failed to read metadata JSON", path=path)
+
+    return found
+
+
+def extract_native_text(json_paths: list[str]) -> Optional[str]:
+    """Return the post's native caption/description text (no author prefix)."""
+    found = _collect_meta(json_paths)
+    if not found:
+        return None
+
+    if found.get("category") == "reddit":
+        caption = found.get("title") or found.get("selftext") or ""
+    else:
+        caption = ""
+        for key in _CAPTION_PRIORITY:
+            if found.get(key):
+                caption = found[key]
+                break
+
+    caption = caption.strip()
+    return caption[:1024] if caption else None
+
+
+def extract_post_text(json_paths: list[str]) -> Optional[str]:
+    """Extract ``author on category:\n\ncaption`` from metadata JSON files."""
+    found = _collect_meta(json_paths)
+    if not found:
+        return None
 
     category = found.get("category", "")
     author = found.get("author", "unknown")

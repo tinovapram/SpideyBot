@@ -1,8 +1,61 @@
 """Tests for utils.files — filename sanitization."""
 
-from utils.files import sanitize_filename
+import json
+
+from utils.files import build_caption, extract_native_text, extract_post_text, sanitize_filename
 
 
+class TestBuildCaption:
+    def test_no_native(self):
+        caption = build_caption("photo.jpg", "https://example.com/x")
+        assert caption.startswith("photo.jpg")
+        assert "Downloaded by SpideyBot" in caption
+        assert "https://example.com/x" in caption
+
+    def test_native_prepended(self):
+        caption = build_caption("photo.jpg", "https://x.com", native="A great photo")
+        assert caption.startswith("A great photo")
+        # native is followed by the filename line
+        assert "\n\nphoto.jpg\n\n" in caption
+        assert "Downloaded by SpideyBot" in caption
+
+    def test_blank_native_ignored(self):
+        caption = build_caption("v.mp4", "https://x.com", native="   ")
+        assert caption.startswith("v.mp4")
+
+
+class TestExtractNativeText:
+    def test_twitter_metadata(self, tmp_path):
+        path = tmp_path / "metadata.json"
+        path.write_text(json.dumps({
+            "category": "twitter", "author": "user", "text": "Hello world",
+        }), encoding="utf-8")
+        assert extract_native_text([str(path)]) == "Hello world"
+
+    def test_reddit_metadata(self, tmp_path):
+        path = tmp_path / "metadata.json"
+        path.write_text(json.dumps({
+            "category": "reddit", "author": "u/a", "title": "Cool title",
+            "selftext": "long body",
+        }), encoding="utf-8")
+        assert extract_native_text([str(path)]) == "Cool title"
+
+    def test_youtube_title(self, tmp_path):
+        path = tmp_path / "metadata.json"
+        path.write_text(json.dumps({"category": "youtube", "title": "My Video"}), encoding="utf-8")
+        assert extract_native_text([str(path)]) == "My Video"
+
+    def test_missing_file(self):
+        assert extract_native_text(["/nonexistent/x.json"]) is None
+
+
+class TestExtractPostText:
+    def test_author_category_prefix(self, tmp_path):
+        path = tmp_path / "metadata.json"
+        path.write_text(json.dumps({
+            "category": "twitter", "author": "bob", "text": "hi",
+        }), encoding="utf-8")
+        assert extract_post_text([str(path)]) == "bob on twitter:\n\nhi\n"
 class TestSanitizeFilename:
     def test_normal(self):
         assert sanitize_filename("photo.jpg") == "photo.jpg"

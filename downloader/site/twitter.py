@@ -95,14 +95,8 @@ class TwitterDownloader(BaseDownloader):
         safe_title = self._sanitize_filename(info["title"])
         os.makedirs(output_dir, exist_ok=True)
 
-        multiple = len(info["media_urls"]) > 1
-        for index, media_url in enumerate(info["media_urls"], 1):
-            ext = self._extension(media_url)
-            name = f"{safe_title}_{index}{ext}" if multiple else f"{safe_title}{ext}"
-            path = os.path.join(output_dir, name)
-            self._download_file(media_url, path)
-            yield path
-
+        # Native caption first (before media) so flow.py can attach it to the
+        # first uploaded file. The path is unique to this staging dir.
         if info.get("text"):
             meta_path = os.path.join(output_dir, "metadata.json")
             try:
@@ -115,3 +109,11 @@ class TwitterDownloader(BaseDownloader):
                 yield meta_path
             except Exception as exc:
                 logger.warning("Failed to write metadata.json", error=str(exc))
+
+        multiple = len(info["media_urls"]) > 1
+        for index, media_url in enumerate(info["media_urls"], 1):
+            ext = self._extension(media_url)
+            name = f"{safe_title}_{index}{ext}" if multiple else f"{safe_title}{ext}"
+            path = os.path.join(output_dir, name)
+            self._download_file(media_url, path)
+            yield path

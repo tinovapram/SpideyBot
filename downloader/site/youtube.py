@@ -98,4 +98,10 @@ class YouTubeDownloader(BaseDownloader):
         else:
             self._download_file(video_url, file_path)
 
-        return [file_path]
+        # Native caption (video title) first so flow.py attaches it to the file.
+        results: list = []
+        meta_path = self._write_metadata(output_dir, {"category": "youtube", "title": info["title"]})
+        if meta_path:
+            results.append(meta_path)
+        results.append(file_path)
+        return results
