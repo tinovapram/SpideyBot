@@ -53,7 +53,12 @@ def _sanitize_path(fp):
         return fp
 
 
-async def _stream_upload_pipeline(client, source_iter, status_msg, caption, task, progress_callback=None):
+def _build_file_caption(filename, link):
+    """Build per-file caption with filename and download footer."""
+    return f"{filename}\n\nDownloaded by SpideyBot from [link]({link})\n\n"
+
+
+async def _stream_upload_pipeline(client, source_iter, status_msg, link, task, progress_callback=None):
     """Concurrent download-upload pipeline with immediate cleanup.
 
     Producer pulls from *source_iter* (blocking, runs in executor).
@@ -62,6 +67,7 @@ async def _stream_upload_pipeline(client, source_iter, status_msg, caption, task
     """
     queue = asyncio.Queue(maxsize=2)  # cap memory: at most 2 files buffered
     media = []
+    filenames = []
     sent = 0
     uploaded = 0
     loop = asyncio.get_running_loop()
@@ -101,6 +107,7 @@ async def _stream_upload_pipeline(client, source_iter, status_msg, caption, task
             try:
                 m = await prepare_media(client, fp, progress_callback=progress_callback)
                 media.append(m)
+                filenames.append(os.path.basename(fp))
                 uploaded += 1
                 if status_msg and uploaded % 2 == 0:
                     try:
@@ -122,24 +129,25 @@ async def _stream_upload_pipeline(client, source_iter, status_msg, caption, task
     # Run producer + consumer concurrently
     await asyncio.gather(producer(), consumer())
 
-    # Send all uploaded media as album
+    # Send all uploaded media as album with per-file captions
     if media:
+        captions = [_build_file_caption(fn, link) for fn in filenames]
         try:
             await client.send_file(
                 task.event.chat_id,
                 media,
-                caption=caption,
+                caption=captions,
                 reply_to=task.event.message.id,
             )
             sent = len(media)
         except Exception as e:
             logger.warning("Album send failed, falling back to individual", error=str(e))
-            for m in media:
+            for m, fn in zip(media, filenames):
                 try:
                     await client.send_file(
                         task.event.chat_id,
                         m,
-                        caption=caption,
+                        caption=_build_file_caption(fn, link),
                         reply_to=task.event.message.id,
                     )
                     sent += 1
@@ -151,13 +159,13 @@ async def _stream_upload_pipeline(client, source_iter, status_msg, caption, task
 
 async def _send_streaming(
     task, client, dest_dir, source_iter, fallback_downloader,
-    status_msg, caption, max_size_bytes, progress_callback,
+    status_msg, link, max_size_bytes, progress_callback,
 ):
     """Concurrent download-upload pipeline. Returns total sent."""
     total_sent = 0
     try:
         total_sent, json_files = await _stream_upload_pipeline(
-            client, source_iter, status_msg, caption, task,
+            client, source_iter, status_msg, link, task,
             progress_callback=progress_callback,
         )
         # Cleanup metadata files
@@ -186,7 +194,7 @@ async def _send_streaming(
         )
         if downloaded:
             total_sent = await _send_all_at_once(
-                client, task, downloaded, caption, status_msg,
+                client, task, downloaded, link, status_msg,
                 progress_callback=progress_callback,
             )
 
@@ -199,7 +207,7 @@ async def _send_streaming(
     return total_sent
 
 
-async def _send_all_at_once(client, task, downloaded_files, caption, status_msg, progress_callback=None):
+async def _send_all_at_once(client, task, downloaded_files, link, status_msg, progress_callback=None):
     """Upload one-by-one via prepare_media, then send_file as album."""
     media_files = []
     for fp in downloaded_files:
@@ -210,12 +218,14 @@ async def _send_all_at_once(client, task, downloaded_files, caption, status_msg,
         return 0
 
     media = []
+    filenames = []
     for i, fp in enumerate(media_files):
         if not (os.path.exists(fp) and os.path.getsize(fp) > 0):
             continue
         try:
             m = await prepare_media(client, fp, progress_callback=progress_callback)
             media.append(m)
+            filenames.append(os.path.basename(fp))
             # Update progress every 2 files
             if status_msg and (i + 1) % 2 == 0:
                 try:
@@ -237,23 +247,24 @@ async def _send_all_at_once(client, task, downloaded_files, caption, status_msg,
     if not media:
         return 0
 
+    captions = [_build_file_caption(fn, link) for fn in filenames]
     try:
         await client.send_file(
             task.event.chat_id,
             media,
-            caption=caption,
+            caption=captions,
             reply_to=task.event.message.id,
         )
         return len(media)
     except Exception as e:
         logger.warning("Album send failed, falling back to individual", error=str(e))
         sent = 0
-        for m in media:
+        for m, fn in zip(media, filenames):
             try:
                 await client.send_file(
                     task.event.chat_id,
                     m,
-                    caption=caption,
+                    caption=_build_file_caption(fn, link),
                     reply_to=task.event.message.id,
                 )
                 sent += 1
@@ -356,16 +367,9 @@ async def run_download_task(task, client, fallback_downloader, reddit_downloader
                     lambda: _ud.download_streaming(task.link, dest_dir),
                 )
 
-                parsed = urlparse(task.link)
-                folder_name = parsed.netloc or "Downloaded Media"
-                caption = (
-                    folder_name
-                    + f"\n\nDownloaded by SpideyBot from [link]({task.link})\n\n"
-                )
-
                 total_sent = await _send_streaming(
                     task, client, dest_dir, source_iter, fallback_downloader,
-                    status_msg, caption, max_size_bytes, progress_callback,
+                    status_msg, task.link, max_size_bytes, progress_callback,
                 )
             else:
                 # Gallery-dl path: downloads all at once
@@ -381,18 +385,8 @@ async def run_download_task(task, client, fallback_downloader, reddit_downloader
                     )
                     return
 
-                json_files = [
-                    f for f in downloaded_files if f.lower().endswith(".json")
-                ]
-                post_text = extract_post_text(json_files)
-                parsed = urlparse(task.link)
-                folder_name = parsed.netloc or "Downloaded Media"
-                caption = (post_text or folder_name) + (
-                    f"\n\nDownloaded by SpideyBot from [link]({task.link})\n\n"
-                )
-
                 total_sent = await _send_all_at_once(
-                    client, task, downloaded_files, caption, status_msg,
+                    client, task, downloaded_files, task.link, status_msg,
                     progress_callback=progress_callback,
                 )
 

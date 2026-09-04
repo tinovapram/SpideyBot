@@ -22,6 +22,11 @@ from spideybot.utils.files import download_file_async, prepare_media
 logger = structlog.get_logger(__name__)
 
 
+def _build_file_caption(filename, link):
+    """Build per-file caption with filename and download footer."""
+    return f"{filename}\n\nDownloaded by SpideyBot from [link]({link})\n\n"
+
+
 async def run_terabox(task, client, terabox_downloader) -> None:
     """
     Execute a TeraBox download task end-to-end.
@@ -82,7 +87,6 @@ async def run_terabox(task, client, terabox_downloader) -> None:
         title = result.title or "TeraBox Share"
 
         output_dir = f"./downloads/tb_{task.user_id}_{task.entry_id}/{current_time_str}"
-        caption = f"{title}\n\nDownloaded by SpideyBot from [link]({task.link})\n\n"
         os.makedirs(output_dir, exist_ok=True)
 
         # --- Shared progress state ---
@@ -152,11 +156,12 @@ async def run_terabox(task, client, terabox_downloader) -> None:
                 logger.warning("Skipping 0-byte file", file=filepath)
                 failed_files.append((tb_file.filename, "empty file (0 bytes)"))
                 return None
-            return filepath
+            return filepath, tb_file.filename
 
         # Pipeline: prefetch N+1 while uploading N, send in batches of 10
         _ALBUM_LIMIT = 10
         pending_media = []  # InputMedia objects ready to send
+        pending_filenames = []  # parallel list of original filenames
 
         async def _flush_album():
             """Send pending media as album, clear buffer."""
@@ -164,32 +169,34 @@ async def run_terabox(task, client, terabox_downloader) -> None:
             if not pending_media:
                 return
             batch = pending_media
+            batch_names = pending_filenames
             pending_media = []
+            pending_filenames = []
+            captions = [_build_file_caption(fn, task.link) for fn in batch_names]
             try:
                 await client.send_file(
                     task.event.chat_id,
                     batch,
-                    caption=caption,
-                    reply_to=task.event.message.id,support_streaming=True,
+                    caption=captions,
+                    reply_to=task.event.message.id, support_streaming=True,
                 )
-                
             except Exception as e:
                 logger.warning("Album send failed, sending individually", error=str(e))
-                for m in batch:
+                for m, fn in zip(batch, batch_names):
                     try:
                         await client.send_file(
                             task.event.chat_id,
                             m,
-                            caption=caption,
+                            caption=_build_file_caption(fn, task.link),
                             reply_to=task.event.message.id,
                         )
                         total_sent += 1
                     except Exception as send_err:
                         logger.warning("Individual send also failed", error=str(send_err))
 
-        next_path = await _prefetch_one()
-        while next_path:
-            current_path = next_path
+        next_result = await _prefetch_one()
+        while next_result:
+            current_path, current_filename = next_result
             next_task = asyncio.create_task(_prefetch_one())
 
             try:
@@ -197,6 +204,7 @@ async def run_terabox(task, client, terabox_downloader) -> None:
                     client, current_path, progress_callback=_progress_cb,
                 )
                 pending_media.append(media)
+                pending_filenames.append(current_filename)
                 total_sent += 1
                 if len(pending_media) >= _ALBUM_LIMIT:
                     await _flush_album()
@@ -209,7 +217,7 @@ async def run_terabox(task, client, terabox_downloader) -> None:
             except OSError:
                 pass
 
-            next_path = await next_task
+            next_result = await next_task
 
         # Flush remaining media
         await _flush_album()

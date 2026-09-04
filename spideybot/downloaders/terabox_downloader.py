@@ -1071,6 +1071,10 @@ class TeraBoxDownloader:
 
         Plain aiohttp gets HTTP 403 from the share CDN; the impersonated
         session (carrying the ndus cookie) is required.
+
+        Uses per-chunk stall detection to abort when the CDN throttles or
+        stalls large file transfers.  Also enforces a maximum total
+        download time based on file size.
         """
         session = await self._ensure_direct_session()
         headers = {
@@ -1078,6 +1082,21 @@ class TeraBoxDownloader:
             "Referer": "https://www.terabox.app/",
             "Accept": "*/*",
         }
+
+        # ── Adaptive stall / total-time limits ────────────────────
+        size_mb = (tb_file.size_bytes or 0) / (1024 * 1024)
+        if size_mb < 50:
+            stall_timeout = 120       # small: 2 min per chunk
+        elif size_mb < 500:
+            stall_timeout = 300       # medium: 5 min
+        elif size_mb < 2048:
+            stall_timeout = 600       # large: 10 min
+        else:
+            stall_timeout = 900       # huge: 15 min
+
+        # Minimum ~100 KB/s effective throughput; floor of 10 min.
+        max_total = max(600, (tb_file.size_bytes or 0) // (100 * 1024))
+
         try:
             async with session.stream(
                 "GET", tb_file.dlink, headers=headers, timeout=3600
@@ -1088,9 +1107,27 @@ class TeraBoxDownloader:
                         f"{tb_file.filename}"
                     )
                 with open(filepath, "wb") as f:
-                    async for chunk in resp.aiter_content():
+                    aiter = resp.aiter_content()
+                    start = time.time()
+                    while True:
+                        try:
+                            chunk = await asyncio.wait_for(
+                                aiter.__anext__(), timeout=stall_timeout,
+                            )
+                        except StopAsyncIteration:
+                            break
+                        except asyncio.TimeoutError:
+                            raise TeraBoxError(
+                                f"Download stalled for {tb_file.filename}: "
+                                f"no data received in {stall_timeout}s"
+                            )
                         if chunk:
                             f.write(chunk)
+                        if time.time() - start > max_total:
+                            raise TeraBoxError(
+                                f"Download too slow for {tb_file.filename}: "
+                                f"exceeded {max_total}s time limit"
+                            )
         except Exception:
             try:
                 if os.path.exists(filepath):

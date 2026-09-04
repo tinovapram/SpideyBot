@@ -67,7 +67,7 @@ except Exception as e:
 # ─── Queue Manager ──────────────────────────────────────────────────
 
 download_queue_manager = DownloadQueueManager(
-    bot, terabox_downloader, reddit_downloader,
+    bot, terabox_downloader,
     max_concurrent=config.MAX_CONCURRENT_DOWNLOADS
 )
 

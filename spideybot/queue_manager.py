@@ -61,10 +61,9 @@ class DownloadQueueManager:
         max_concurrent: Maximum number of worker tasks processing downloads.
     """
 
-    def __init__(self, bot, terabox_downloader, reddit_downloader=None, max_concurrent=20):
+    def __init__(self, bot, terabox_downloader, max_concurrent=20):
         self.bot = bot
         self.terabox_downloader = terabox_downloader
-        self.reddit_downloader = reddit_downloader
         self.fallback_downloader = GalleryDLDownloader()
         self.max_concurrent = max_concurrent
         self.global_queue = asyncio.PriorityQueue() # Global queue for all tasks
@@ -238,4 +237,4 @@ class DownloadQueueManager:
         if is_terabox:
             await run_terabox(task, sender_client, self.terabox_downloader)
         else:
-            await run_download_task(task, sender_client, self.fallback_downloader, self.reddit_downloader)
+            await run_download_task(task, sender_client, self.fallback_downloader)

@@ -9,6 +9,7 @@ import os
 import re
 import json
 import asyncio
+import time
 import subprocess
 import aiohttp
 from typing import Optional, List
@@ -190,6 +191,9 @@ async def download_file_async(terabox_downloader, tb_file, output_dir: str) -> s
         sock_read=sock_read,
     )
 
+    # Maximum total download time (~100 KB/s minimum throughput, floor 10 min).
+    max_total = max(600, (tb_file.size_bytes or 0) // (100 * 1024))
+
     r = await terabox_downloader._request_with_retry(
         "GET",
         tb_file.dlink,
@@ -197,9 +201,15 @@ async def download_file_async(terabox_downloader, tb_file, output_dir: str) -> s
         timeout=dl_timeout,
     )
     try:
+        start = time.time()
         with open(filepath, "wb") as f:
             async for chunk in r.content.iter_chunked(8192):
                 f.write(chunk)
+                if time.time() - start > max_total:
+                    raise asyncio.TimeoutError(
+                        f"Download too slow for {tb_file.filename}: "
+                        f"exceeded {max_total}s time limit"
+                    )
     except (asyncio.CancelledError, Exception):
         # Clean up partial file on any failure (timeout, I/O, cancel)
         try:
