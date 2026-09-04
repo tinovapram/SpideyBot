@@ -49,8 +49,10 @@ def build_caption(filename: str, link: str, native: Optional[str] = None) -> str
     When *native* (the post's own caption/description) is provided it is shown
     first, then the filename and the ``Downloaded by SpideyBot`` footer.
     """
-    head = f"{native.strip()}\n\n" if native and native.strip() else ""
-    return f"{head}{filename}\n\nDownloaded by SpideyBot from [link]({link})\n\n"
+
+    head = f"{native}\n\n" if native and native.strip() else ""
+    bot_link = f"[SpideyBot](https://t.me/SpideyUtilBot)"
+    return f"{head}{filename}\n\nDownloaded by {bot_link} from [link]({link})\n\n"
 
 
 def _collect_meta(json_paths: list[str]) -> dict:

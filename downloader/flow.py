@@ -83,6 +83,7 @@ async def _run_streaming(task, client, site, downloader, status, max_size_bytes)
         logger.warning("Streaming download failed, falling back to gallery-dl", error=str(exc))
         status.set_header("⚠️ **SpideyBot:** Primary download failed, trying gallery-dl")
         status.drop("dl")
+        status.drop("dl_count")
         from downloader.gallerydl import GalleryDLDownloader
 
         fallback = GalleryDLDownloader()
@@ -131,6 +132,8 @@ async def _stream_upload(task, client, source, status) -> int:
     sent = 0
     uploaded = 0
     upload_cb = status.bytes_cb("ul", "📤", "Uploading")
+    # Shared state: producer writes downloaded count, consumer reads it.
+    state = {"downloaded": 0, "total": None}
 
     async def produce() -> None:
         def pull():
@@ -143,7 +146,12 @@ async def _stream_upload(task, client, source, status) -> int:
             file_path = await loop.run_in_executor(None, pull)
             if file_path is None:
                 break
+            state["downloaded"] += 1
+            status.row("dl_count", count_line("📥", "Downloaded", state["downloaded"]))
             await queue.put(file_path)
+        state["total"] = state["downloaded"]
+        # Switch to final form with total
+        status.row("dl_count", count_line("📥", "Downloaded", state["downloaded"], state["total"]))
         await queue.put(None)
 
     async def consume() -> None:
@@ -190,7 +198,8 @@ async def _stream_upload(task, client, source, status) -> int:
                     build_caption(os.path.basename(clean), task.link, native=native)
                 )
                 uploaded += 1
-                status.row("up", count_line("📤", "Uploaded", uploaded))
+                total = state.get("total")
+                status.row("ul", count_line("📤", "Uploaded", uploaded, total))
                 if len(pending_media) >= _ALBUM_LIMIT:
                     await flush()
             except Exception as exc:

@@ -30,6 +30,7 @@ def _int_env(name: str, default: int) -> int:
 TG_API_ID = os.getenv("TG_API_ID")
 TG_API_HASH = os.getenv("TG_API_HASH")
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
+TG_BOT_USERNAME = os.getenv("TG_BOT_USERNAME", "")
 
 SESSION_ENCRYPT_KEY = os.getenv("SESSION_ENCRYPT_KEY", "")
 
