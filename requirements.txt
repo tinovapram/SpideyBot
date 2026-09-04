@@ -1,0 +1,35 @@
+# ── Telegram client ──────────────────────────────────────────────
+telethon[speedup]>=1.35.0
+cryptg
+hachoir
+pillow
+
+# ── Configuration ───────────────────────────────────────────────
+python-dotenv>=1.0.1
+structlog>=24.1.0
+
+# ── HTTP & networking ───────────────────────────────────────────
+requests>=2.31.0
+aiohttp>=3.9.0
+requests[socks]
+PySocks
+beautifulsoup4
+
+# ── Security (legacy session decryption) ────────────────────────
+cryptography>=42.0.0
+SQLAlchemy>=2.0.0
+
+# ── Media downloaders (CLI tools) ──────────────────────────────
+gallery-dl
+yt-dlp[default,curl-cffi]
+
+# ── Reddit ──────────────────────────────────────────────────────
+praw
+
+# ── TeraBox ────────────────────────────────────────────────────
+pycryptodomex
+curl_cffi>=0.16.0
+
+# ── Testing ────────────────────────────────────────────────────
+pytest
+pytest-asyncio

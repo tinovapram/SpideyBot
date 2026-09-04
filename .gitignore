@@ -1,0 +1,62 @@
+# ── Python ─────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+
+# ── Virtual environments ───────────────────────────────────────────
+.env
+.venv/
+env/
+venv/
+
+# ── IDE / editor ───────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── Testing / coverage ─────────────────────────────────────────────
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# ── Type checking ──────────────────────────────────────────────────
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# ── Secrets ────────────────────────────────────────────────────────
+.env.*
+!.env.example
+
+# ── Database ───────────────────────────────────────────────────────
+data/
+!data/.gitkeep
+
+# ── User sessions (Telethon file sessions + legacy JSON) ───────────
+user_sessions/
+!user_sessions/.gitkeep
+
+# ── Runtime-generated configs ──────────────────────────────────────
+config/runtime/
+!config/runtime/.gitkeep
+
+# ── Downloads (runtime) ────────────────────────────────────────────
+downloads/
+!downloads/.gitkeep
+
+# ── Telethon session files (bot) ───────────────────────────────────
+*.session
+*.session-journal
+
+# ── Logs / OS ──────────────────────────────────────────────────────
+*.log
+.DS_Store
+Thumbs.db
+desktop.ini

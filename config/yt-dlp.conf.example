@@ -1,0 +1,3 @@
+# yt-dlp options applied to gallery-dl's ytdl module.
+# Leave empty or add flags, e.g.:
+# --no-mtime

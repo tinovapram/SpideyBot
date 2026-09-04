@@ -1,0 +1,130 @@
+"""Base class for all site-specific downloaders."""
+
+from __future__ import annotations
+
+import os
+import time
+from typing import Iterator
+
+import requests
+
+from utils.files import sanitize_filename
+
+
+class BaseDownloader:
+    """Common HTTP plumbing for site-specific downloaders.
+
+    Subclasses implement ``fetch_media(url) -> dict`` and ``download(url,
+    output_dir) -> list[str]``. The default ``download_streaming`` falls back
+    to ``download``.
+    """
+
+    DEFAULT_HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+
+    def __init__(self) -> None:
+        # Each instance owns a requests.Session (connection pooling). Safe for
+        # single-threaded use inside ``run_in_executor``.
+        self._session = requests.Session()
+        self._session.headers.update(self.DEFAULT_HEADERS)
+        self._progress_callback = None
+
+    # ── Helpers for subclasses ─────────────────────────────────────
+
+    def _sanitize_filename(self, filename: str) -> str:
+        return sanitize_filename(filename)
+
+    def _request(
+        self,
+        method: str,
+        url: str,
+        headers: dict | None = None,
+        data: dict | None = None,
+        json_data: dict | None = None,
+        params: dict | None = None,
+        timeout: int = 15,
+        **kwargs,
+    ) -> requests.Response:
+        req_headers = dict(self.DEFAULT_HEADERS)
+        if headers:
+            req_headers.update(headers)
+
+        response = self._session.request(
+            method=method,
+            url=url,
+            headers=req_headers,
+            data=data,
+            json=json_data,
+            params=params,
+            timeout=timeout,
+            **kwargs,
+        )
+        response.raise_for_status()
+        return response
+
+    def _download_file(
+        self,
+        url: str,
+        file_path: str,
+        headers: dict | None = None,
+        progress_callback=None,
+    ) -> str:
+        """Download *url* to *file_path* with optional progress callback."""
+        req_headers = dict(self.DEFAULT_HEADERS)
+        if headers:
+            req_headers.update(headers)
+
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+
+        response = self._session.get(url, headers=req_headers, stream=True, timeout=3600)
+        response.raise_for_status()
+
+        total = int(response.headers.get("Content-Length", 0))
+        downloaded = 0
+        last_cb = 0.0
+        callback = progress_callback or self._progress_callback
+
+        with open(file_path, "wb") as handle:
+            for chunk in response.iter_content(chunk_size=8192):
+                if not chunk:
+                    continue
+                handle.write(chunk)
+                downloaded += len(chunk)
+                if callback and time.time() - last_cb >= 5.0:
+                    last_cb = time.time()
+                    callback(downloaded, total)
+
+        return file_path
+
+    # ── Public API ─────────────────────────────────────────────────
+
+    def download(self, url: str, output_dir: str = "downloads") -> list:
+        raise NotImplementedError
+
+    def download_streaming(self, url: str, output_dir: str = "downloads") -> Iterator[str]:
+        """Yield file paths one by one. Defaults to ``download()``."""
+        yield from self.download(url, output_dir=output_dir)
+
+
+def find_url(obj, *, patterns=(".mp4",)) -> str | None:
+    """Recursively search a JSON-like object for the first matching URL."""
+    if isinstance(obj, dict):
+        for value in obj.values():
+            found = find_url(value, patterns=patterns)
+            if found:
+                return found
+    elif isinstance(obj, list):
+        for value in obj:
+            found = find_url(value, patterns=patterns)
+            if found:
+                return found
+    elif isinstance(obj, str) and obj.startswith(("http://", "https://")):
+        if any(pattern in obj for pattern in patterns):
+            return obj
+    return None
