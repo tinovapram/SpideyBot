@@ -4,38 +4,17 @@ User command handlers: /start, /stop, /help, /site_list, /dl, /dt, /cancel.
 
 from __future__ import annotations
 
-import re
-
 import structlog
 from telethon import Button, events
 from telethon.errors import RPCError as TelethonRPCError
 
 from core import config, db, sessions
-from downloader.terabox import TeraBoxDownloader
 
 logger = structlog.get_logger(__name__)
 
 
 def has_premium_access(user_id: int) -> bool:
     return user_id in config.ADMIN_IDS or db.is_user_premium(user_id)
-
-
-def extract_terabox_links(text: str) -> list[str]:
-    """Extract valid TeraBox URLs from free text."""
-    if not text:
-        return []
-    urls = re.findall(r"https?://[^\s]+", text, re.IGNORECASE)
-    result = []
-    for url in urls:
-        clean = url.rstrip(".,;!?)'\"")
-        if not config.is_terabox_url(clean):
-            continue
-        try:
-            TeraBoxDownloader.parse_surl(clean)
-            result.append(clean)
-        except Exception:
-            pass
-    return result
 
 
 def _tier_label(user_id: int) -> str:
@@ -121,8 +100,8 @@ def register_user_handlers(bot, download_manager) -> None:
             "Tumblr • Snapchat • Dailymotion • Streamtape • [and 100+ more]"
             "(https://github.com/mikf/gallery-dl-supported-sites)\n\n"
             "**Quick start:**\n"
-            "  • Paste a link and I'll auto-detect it\n"
-            "  • Or use `/dl <link>` for explicit control\n\n"
+            "  • `/dl <link>` — Download from any supported site\n"
+            "  • `/dt <t.me>` — Download from a Telegram message\n\n"
             "Type `/help` for the full command list."
         )
         await event.respond(text)
@@ -157,7 +136,6 @@ def register_user_handlers(bot, download_manager) -> None:
             f"**Session:** {_session_badge(user_id)}\n\n"
             "**📥 Downloading**\n"
             "  • `/dl <link>` — Download from any supported site\n"
-            "  • Paste a link — auto-detected\n"
             "  • `/dt <t.me>` — Download from a Telegram message\n"
             "  • `/cancel` — Cancel downloads (or `/cancel <id>`)\n\n"
             "**🔑 Account Session**\n"
@@ -258,22 +236,6 @@ def register_user_handlers(bot, download_manager) -> None:
         task = user_tasks[0]
         task.cancel()
         await event.respond(f"❌ **SpideyBot:** Task #{task.entry_id} cancelled.")
-
-    @bot.on(events.NewMessage)
-    async def default_message_handler(event):
-        text = event.text or ""
-        if not text or text.startswith("/"):
-            return
-
-        links = extract_terabox_links(text)
-        if not links:
-            return
-
-        user = await event.get_sender()
-        user_id = event.sender_id
-        db.save_or_update_user(user_id, user.username if user else None)
-        await _queue_download(event, user_id, links[0], download_manager)
-
 
 async def _queue_download(event, user_id: int, link: str, manager) -> None:
     is_admin = user_id in config.ADMIN_IDS

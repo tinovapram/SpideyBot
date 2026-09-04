@@ -113,6 +113,18 @@ class StatusMessage:
             self.row(name, bytes_line(icon, label, current, total or 0))
         return _cb
 
+    def file_bytes_cb(self, name: str, icon: str) -> Callable[[str, int, int], None]:
+        """Return a ``cb(filename, done, total)`` callback (TeraBox downloaders).
+
+        TeraBox reports per-file progress as ``(filename, done, total)``; this
+        renders a row that names the current file and its percent, e.g.
+        ``📥 movie.mp4: [bar] 45% (1.2 MB / 2.6 MB)``.
+        """
+        def _cb(filename, done, total) -> None:
+            short = filename if len(filename) <= 44 else f"{filename[:41]}..."
+            self.row(name, bytes_line(icon, short, done, total or 0))
+        return _cb
+
     def count_cb(
         self,
         name: str,

@@ -112,18 +112,22 @@ async def _pipeline(task, client, downloader, files, output_dir, status) -> tupl
     total = len(files)
     sent = 0
     failed: list[tuple[str, str]] = []
-    processed = 0
+    downloaded = 0
     ready: asyncio.Queue = asyncio.Queue(maxsize=2)
     upload_cb = status.bytes_cb("ul", "📤", "Uploading")
-    dl_cb = status.bytes_cb("cur", "📥", "Downloading")
+    dl_cb = status.file_bytes_cb("cur", "📥")
     status.set_header("📥 **SpideyBot:** Downloading & uploading")
 
     def refresh() -> None:
-        status.row("dl", count_line("📥", "Downloaded", processed, total))
+        status.row("dl", count_line("📥", "Downloaded", downloaded, total))
         status.row("up", count_line("📤", "Sent", sent, total))
+        if failed:
+            status.row("fail", f"⚠️ Failed: {len(failed)} file(s)")
+        else:
+            status.drop("fail")
 
     async def producer() -> None:
-        nonlocal processed
+        nonlocal downloaded
         for tb_file in files:
             if task.is_cancelled:
                 break
@@ -135,10 +139,10 @@ async def _pipeline(task, client, downloader, files, output_dir, status) -> tupl
                     failed.append((tb_file.filename, "empty file (0 bytes)"))
                 else:
                     await ready.put((path, tb_file.filename))
+                    downloaded += 1
             except Exception as exc:
                 failed.append((tb_file.filename, str(exc) or type(exc).__name__))
             finally:
-                processed += 1
                 status.drop("cur")
                 refresh()
         await ready.put(None)

@@ -1,7 +1,7 @@
 # ════════════════════════════════════════════════════════════════════
 # Stage 1: Builder — compile wheels with build-time deps
 # ════════════════════════════════════════════════════════════════════
-FROM python:3.11-slim AS builder
+FROM python:3.13-slim AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
@@ -26,7 +26,7 @@ FROM denoland/deno:bin AS deno
 # ════════════════════════════════════════════════════════════════════
 # Stage 3: Runtime — minimal image with non-root user
 # ════════════════════════════════════════════════════════════════════
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \

@@ -67,6 +67,24 @@ class TestStatusMessage:
         assert "dl" in status._rows
         assert "50%" in status._rows["dl"]
 
+    def test_file_bytes_cb_accepts_three_args(self):
+        """TeraBox downloaders call cb(filename, done, total) — must not raise."""
+        status = StatusMessage(object())
+        cb = status.file_bytes_cb("cur", "📥")
+        cb("GYA VC (2).mp4", 25, 100)
+        row = status._rows["cur"]
+        assert "GYA VC (2).mp4" in row
+        assert "25%" in row
+
+    def test_file_bytes_cb_truncates_long_filename(self):
+        status = StatusMessage(object())
+        cb = status.file_bytes_cb("cur", "📥")
+        long_name = "A" * 120 + ".mp4"
+        cb(long_name, 10, 40)
+        assert "25%" in status._rows["cur"]
+        assert "A" * 120 not in status._rows["cur"]
+        assert "..." in status._rows["cur"]
+
     def test_animate_while_rows_present(self):
         status = StatusMessage(object(), header="📥 Downloading")
         status.row("dl", "row")
