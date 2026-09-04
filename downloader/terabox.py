@@ -1205,6 +1205,57 @@ class TeraBoxDownloader:
         return await self.resolve(url, mode=mode, **kwargs)
 
 
+# ── Multi-account pool (multi-ndus) ────────────────────────────────
+
+class TeraBoxAccountPool:
+    """Round-robin pool of :class:`TeraBoxDownloader` accounts (multi-ndus).
+
+    Several TeraBox accounts share the load. A task walks accounts via
+    :meth:`ordered_accounts` (starting from the next round-robin slot) and
+    keeps the first account that resolves the share link successfully — that
+    gives automatic fail-over when an account is blocked, expired or
+    rate-limited (e.g. TeraBox ``need verify`` / quota errors).
+    """
+
+    def __init__(self, downloaders: list[TeraBoxDownloader]) -> None:
+        self.logger = structlog.get_logger("TeraBoxAccountPool")
+        self.accounts = [d for d in downloaders if d is not None]
+        if not self.accounts:
+            raise TeraBoxAuthError("TeraBoxAccountPool requires at least one account")
+        self._cursor = 0
+
+    def __len__(self) -> int:
+        return len(self.accounts)
+
+    @property
+    def size(self) -> int:
+        return len(self.accounts)
+
+    def ordered_accounts(self) -> list[TeraBoxDownloader]:
+        """Return every account, starting from the next round-robin slot."""
+        n = len(self.accounts)
+        if n == 0:
+            return []
+        start = self._cursor % n
+        self._cursor = (start + 1) % n
+        return [self.accounts[(start + i) % n] for i in range(n)]
+
+    async def close(self) -> None:
+        for account in self.accounts:
+            try:
+                await account.close()
+            except Exception:
+                pass
+
+    def __repr__(self) -> str:
+        heads = [
+            account.account._cookies_dict.get("ndus", "")
+            for account in self.accounts
+        ]
+        masked = ", ".join(f"{h[:8]}..." if len(h) > 8 else h for h in heads)
+        return f"TeraBoxAccountPool({len(self.accounts)} accounts, ndus=[{masked}])"
+
+
 # ── Module-level async download helper ────────────────────────────
 
 async def download_file_async(

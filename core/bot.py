@@ -15,7 +15,7 @@ from telethon import TelegramClient
 from core import config, db, sessions
 from core.logging import setup_logging
 from core.queue import DownloadQueueManager
-from downloader.terabox import TeraBoxDownloader
+from downloader.terabox import TeraBoxAccountPool, TeraBoxDownloader
 from handler.admin import register_admin_handlers
 from handler.login import register_login_handlers
 from handler.outgoing import set_download_manager
@@ -38,14 +38,26 @@ bot = TelegramClient(
 )
 
 terabox_downloader = None
-if config.TERABOX_COOKIE:
+_account_cookies = config.terabox_account_cookies()
+if _account_cookies:
     try:
-        terabox_downloader = TeraBoxDownloader(
-            cookie=config.TERABOX_COOKIE,
-            js_token=config.TERABOX_JSTOKEN,
-            bds_token=config.TERABOX_BDSTOKEN,
-        )
-        logger.info("TeraBox downloader initialized")
+        downloaders = [
+            TeraBoxDownloader(
+                cookie=cookie,
+                js_token=config.TERABOX_JSTOKEN,
+                bds_token=config.TERABOX_BDSTOKEN,
+            )
+            for cookie in _account_cookies
+            if cookie
+        ]
+        if len(downloaders) == 1:
+            terabox_downloader = downloaders[0]
+            logger.info("TeraBox downloader initialized")
+        elif downloaders:
+            terabox_downloader = TeraBoxAccountPool(downloaders)
+            logger.info("TeraBox pool initialized", accounts=len(downloaders))
+        else:
+            logger.warning("TERABOX_COOKIE(s) present but empty — TeraBox features unavailable")
     except Exception as exc:
         logger.error("Failed to initialize TeraBox downloader", error=str(exc))
 else:

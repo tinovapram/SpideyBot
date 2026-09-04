@@ -57,6 +57,35 @@ TERABOX_COOKIE = os.getenv("TERABOX_COOKIE")
 TERABOX_JSTOKEN = os.getenv("TERABOX_JSTOKEN")
 TERABOX_BDSTOKEN = os.getenv("TERABOX_BDSTOKEN")
 
+# Optional multi-account support. One cookie per account, separated by a
+# pipe ("|"). Each entry is a full cookie string whose important part is
+# `ndus=...` (see parse_cookies in downloader/terabox.py). Example:
+#   TERABOX_COOKIES="ndus=AAA|ndus=BBB|ndus=CCC"
+# If unset, falls back to the legacy single TERABOX_COOKIE.
+_TERABOX_COOKIE_DELIMITER = "|"
+TERABOX_COOKIES = os.getenv("TERABOX_COOKIES", "")
+
+
+def _split_terabox_cookies(raw: str) -> list[str]:
+    """Split a delimited cookie string into non-empty, trimmed entries."""
+    if not raw:
+        return []
+    return [part.strip() for part in raw.split(_TERABOX_COOKIE_DELIMITER) if part.strip()]
+
+
+def terabox_account_cookies() -> list[str]:
+    """Return one cookie string per TeraBox account to use.
+
+    Prefers the delimited ``TERABOX_COOKIES``; falls back to the legacy
+    single ``TERABOX_COOKIE`` when no multi-account list is configured.
+    """
+    accounts = _split_terabox_cookies(TERABOX_COOKIES)
+    if accounts:
+        return accounts
+    if TERABOX_COOKIE:
+        return [TERABOX_COOKIE.strip()]
+    return []
+
 # ── TeraBox transfer engine ──────────────────────────────────────
 # TERABOX_TRANSFER: auto | aria2 | segmented | single
 #   auto       -> aria2 for files >= TERABOX_TRANSFER_MIN_MB when the binary

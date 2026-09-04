@@ -202,37 +202,45 @@ async def aria2_download(
     last_done = 0
     reported = 0
 
-    async def _reader(stream, queue):
+    async def _reader(stream, name, queue):
         try:
             while True:
                 line = await stream.readline()
                 if not line:
                     break
-                queue.put_nowait(line)
+                queue.put_nowait((name, line))
         except Exception:
             pass
 
     queue: asyncio.Queue = asyncio.Queue(maxsize=200)
+    err_lines: list[str] = []
     readers = [
-        asyncio.create_task(_reader(proc.stdout, queue)),
-        asyncio.create_task(_reader(proc.stderr, queue)),
+        asyncio.create_task(_reader(proc.stdout, "out", queue)),
+        asyncio.create_task(_reader(proc.stderr, "err", queue)),
     ]
 
     try:
         while True:
             try:
-                line = await asyncio.wait_for(queue.get(), timeout=1.0)
+                item = await asyncio.wait_for(queue.get(), timeout=1.0)
             except asyncio.TimeoutError:
-                line = None
+                item = None
 
             done = 0
-            if line is not None:
-                parsed = _parse_readout(line.decode("utf-8", "replace"), expected_size)
-                if parsed is not None:
-                    done = parsed
-                else:
-                    # fall back to how much of the target exists on disk
+            if item is not None:
+                name, line = item
+                if name == "err":
+                    text = line.decode("utf-8", "replace").rstrip()
+                    if text:
+                        err_lines.append(text)
+                        if len(err_lines) > 50:
+                            del err_lines[0]
                     done = os.path.getsize(target) if os.path.exists(target) else 0
+                else:
+                    parsed = _parse_readout(line.decode("utf-8", "replace"), expected_size)
+                    done = parsed if parsed is not None else (
+                        os.path.getsize(target) if os.path.exists(target) else 0
+                    )
                 if done > last_done:
                     last_growth = time.monotonic()
                     last_done = done
@@ -257,6 +265,17 @@ async def aria2_download(
             task.cancel()
 
         if proc.returncode != 0:
+            detail = "\n".join(err_lines).strip()
+            if detail:
+                log.warning(
+                    "aria2c exited nonzero",
+                    file=fname,
+                    exit=proc.returncode,
+                    stderr=detail[-1500:],
+                )
+                raise TransferError(
+                    f"aria2c exited with code {proc.returncode} :: {detail[-1500:]}"
+                )
             raise TransferError(f"aria2c exited with code {proc.returncode}")
 
         if not os.path.exists(target) or os.path.getsize(target) == 0:

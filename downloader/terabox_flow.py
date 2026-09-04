@@ -16,7 +16,7 @@ import time
 import structlog
 
 from core import config
-from downloader.terabox import download_file_async
+from downloader.terabox import TeraBoxAccountPool, download_file_async
 from utils import paths
 from utils.files import build_caption, prepare_media
 from utils.progress import StatusMessage, count_line
@@ -28,7 +28,14 @@ _ALBUM_LIMIT = 10
 
 
 async def run_terabox(task, client, downloader) -> None:
-    """Execute a TeraBox download task end-to-end."""
+    """Execute a TeraBox download task end-to-end.
+
+    *downloader* may be a single :class:`TeraBoxDownloader` or a
+    :class:`TeraBoxAccountPool`. With a pool, accounts are tried in
+    round-robin order (starting from the next slot) and the first account
+    that successfully resolves the link is used — automatic fail-over when an
+    account is blocked, expired or rate-limited.
+    """
     footer = f"Send `/cancel {task.entry_id}` to abort."
     if task.status_msg is not None:
         status = StatusMessage(task.status_msg, footer=footer)
@@ -40,7 +47,21 @@ async def run_terabox(task, client, downloader) -> None:
     if downloader is None:
         await status.close(
             "⚠️ **SpideyBot: TeraBox Downloader is not configured.**\n"
-            "Please set `TERABOX_COOKIE` in the `.env` file."
+            "Please set `TERABOX_COOKIE` (or `TERABOX_COOKIES`) in the `.env` file."
+        )
+        return
+
+    if isinstance(downloader, TeraBoxAccountPool):
+        candidates = downloader.ordered_accounts()
+        pool_active = True
+    else:
+        candidates = [downloader]
+        pool_active = False
+
+    if not candidates:
+        await status.close(
+            "⚠️ **SpideyBot: TeraBox Downloader is not configured.**\n"
+            "No usable account found."
         )
         return
 
@@ -49,16 +70,49 @@ async def run_terabox(task, client, downloader) -> None:
     try:
         status.set_header("🔍 **SpideyBot:** Resolving TeraBox link...")
 
-        saved_root = downloader.root_path
-        downloader.root_path = f"/downloads/{task.user_id}/{int(time.time())}"
-        try:
-            result = await downloader.resolve(task.link, mode="download")
-        finally:
-            downloader.root_path = saved_root
+        selected = None
+        result = None
+        last_error = "Unknown error"
 
-        if not result.ok:
+        for index, account in enumerate(candidates, start=1):
+            if task.is_cancelled:
+                break
+            if pool_active:
+                status.set_header(
+                    f"🔍 **SpideyBot:** Resolving TeraBox link... "
+                    f"(account {index}/{len(candidates)})"
+                )
+            saved_root = account.root_path
+            account.root_path = f"/downloads/{task.user_id}/{int(time.time())}"
+            try:
+                attempt = await account.resolve(task.link, mode="download")
+            except Exception as exc:
+                logger.warning(
+                    "TeraBox account resolve raised",
+                    account=repr(account),
+                    error=str(exc),
+                )
+                last_error = str(exc) or type(exc).__name__
+                continue
+            finally:
+                account.root_path = saved_root
+
+            if attempt.ok:
+                selected = account
+                result = attempt
+                break
+            last_error = attempt.error or f"status={attempt.status}"
+            logger.warning(
+                "TeraBox account resolve failed",
+                account=repr(account),
+                error=last_error,
+            )
+
+        if selected is None or result is None:
+            suffix = f" across {len(candidates)} account(s)" if pool_active else ""
             await status.close(
-                f"❌ **SpideyBot: Failed to resolve link.**\nReason: `{result.error or 'Unknown error'}`"
+                f"❌ **SpideyBot: Failed to resolve link**{suffix}.\n"
+                f"Reason: `{last_error}`"
             )
             return
 
@@ -81,7 +135,7 @@ async def run_terabox(task, client, downloader) -> None:
         output_dir = str(paths.DOWNLOADS_DIR / f"tb_{task.user_id}_{task.entry_id}")
         os.makedirs(output_dir, exist_ok=True)
 
-        sent, failed = await _pipeline(task, client, downloader, files, output_dir, status)
+        sent, failed = await _pipeline(task, client, selected, files, output_dir, status)
 
         if os.path.isdir(output_dir):
             shutil.rmtree(output_dir, ignore_errors=True)
