@@ -25,8 +25,9 @@ FROM denoland/deno:bin AS deno
 
 # ════════════════════════════════════════════════════════════════════
 # Stage 3: Runtime — minimal image with non-root user
+# NOTE: must match the builder's Python so installed packages are found.
 # ════════════════════════════════════════════════════════════════════
-FROM python:3.12-slim
+FROM python:3.13-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
