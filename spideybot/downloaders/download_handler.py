@@ -311,7 +311,7 @@ async def run_download_task(task, client, fallback_downloader, reddit_downloader
             if now - last_update_time >= 5.0:
                 pct = f"{current * 100 // total}%" if total else ""
                 try:
-                    await status_msg.edit(f"⬆️ Uploading {pct}…")
+                    await status_msg.edit(f"⬆️ Uploading... {pct}")
                     last_update_time = now
                 except TelethonRPCError:
                     pass
@@ -329,6 +329,7 @@ async def run_download_task(task, client, fallback_downloader, reddit_downloader
         try:
             await _edit_status(
                 f"\U0001f4e5 **SpideyBot:** Downloading from {site_label}..."
+                f"To cancel, delete this message or reply with '/cancel {task.entry_id}'."
             )
 
             # Wire download progress into site downloader
@@ -345,7 +346,7 @@ async def run_download_task(task, client, fallback_downloader, reddit_downloader
                         async def _update():
                             try:
                                 await status_msg.edit(
-                                    f"\U0001f4e5 **SpideyBot:** Downloading… {pct}% "
+                                    f"\U0001f4e5 **SpideyBot:** \nDownloading... {pct}% "
                                     f"({mb_done:.1f}/{mb_total:.1f} MB)"
                                 )
                             except (TelethonRPCError, MessageNotModifiedError):
