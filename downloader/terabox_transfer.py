@@ -83,8 +83,23 @@ def pick_transfer_backend(size_bytes: int) -> str:
     return "single"
 
 
-def wipe_partial(filepath: str) -> None:
-    """Remove a partial target, its aria2 control file and any ``.part*`` files."""
+def wipe_partial(filepath: str, *, fresh: bool = False) -> None:
+    """Remove a partial target, its aria2 control file and any ``.part*`` files.
+
+    Args:
+        filepath: target file path.
+        fresh: when ``True``, always wipe. When ``False`` (default), wipe only
+            if no partial state exists yet — this preserves ``.aria2`` control
+            files and ``.part*`` chunks across retry/resume calls, which is
+            what ``aria2c -c`` and the segmented downloader rely on. Use
+            ``fresh=True`` only for brand-new downloads or after a permanent
+            failure that invalidates the partial state.
+    """
+    if not fresh:
+        # Preserve existing partial state for resume. Leave ``.aria2`` control
+        # files and ``.part*`` chunks intact so the next call can resume from
+        # where the previous attempt stopped.
+        return
     for path in (filepath, filepath + ".aria2"):
         try:
             os.remove(path)

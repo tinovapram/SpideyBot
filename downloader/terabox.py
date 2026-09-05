@@ -1067,7 +1067,9 @@ class TeraBoxDownloader:
                         file=tb_file.filename,
                         error=str(exc),
                     )
-                    wipe_partial(filepath)
+                    # Cross-backend switch: partial bytes are in aria2's
+                    # format, segmented/single streams can't reuse them.
+                    wipe_partial(filepath, fresh=True)
 
             # Segmented mode (auto default for large account links).
             if mode == "segmented" and tb_file.backend == "account":
@@ -1090,7 +1092,9 @@ class TeraBoxDownloader:
                         file=tb_file.filename,
                         error=str(exc),
                     )
-                    wipe_partial(filepath)
+                    # Cross-backend switch: segmented ``.part*`` chunks aren't
+                    # usable by aria2, wipe and start over.
+                    wipe_partial(filepath, fresh=True)
                     # aria2 as second fallback before the single-stream net.
                     if aria2_available():
                         try:
@@ -1110,10 +1114,13 @@ class TeraBoxDownloader:
                                 file=tb_file.filename,
                                 error=str(exc2),
                             )
-                            wipe_partial(filepath)
+                            # Cross-backend switch: aria2 partial state
+                            # can't be reused by single-stream.
+                            wipe_partial(filepath, fresh=True)
 
             # Final fallback: original single-stream behaviour.
-            wipe_partial(filepath)
+            # Cross-backend switch from prior segmented/aria2 attempts.
+            wipe_partial(filepath, fresh=True)
             if tb_file.backend == "direct":
                 return await self.direct.download(
                     tb_file, filepath, progress_callback=progress_callback
@@ -1130,7 +1137,8 @@ class TeraBoxDownloader:
                 logger=log,
             )
         except Exception:
-            wipe_partial(filepath)
+            # Final cleanup on unhandled failure: partial state is unsafe.
+            wipe_partial(filepath, fresh=True)
             raise
 
     async def list_files(self, url: str) -> TeraBoxResult:
