@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from urllib.parse import urlparse
 
-from core import config
+from core.config import get_settings
 from downloader.base import BaseDownloader
 from downloader.site.bluesky import BlueskyDownloader
 from downloader.site.capcut import CapCutDownloader
@@ -49,6 +49,7 @@ def _plain(cls, substrings):
 
 
 def _build_entries():
+    settings = get_settings()
     return [
         _plain(YouTubeDownloader, ("youtube.com", "youtu.be")),
         _plain(TikTokDownloader, ("tiktok.com",)),
@@ -75,9 +76,9 @@ def _build_entries():
         (
             "reddit",
             RedditDownloader(
-                client_id=config.REDDIT_PRAW_CLIENT_ID or None,
-                client_secret=config.REDDIT_PRAW_CLIENT_SECRET or None,
-                refresh_token=config.REDDIT_PRAW_REFRESH_TOKEN or None,
+                client_id=settings.reddit_praw_client_id or None,
+                client_secret=settings.reddit_praw_client_secret or None,
+                refresh_token=settings.reddit_praw_refresh_token or None,
             ),
             _host_matcher(("reddit.com", "redd.it")),
         ),

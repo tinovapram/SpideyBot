@@ -27,7 +27,7 @@ from typing import Callable, Optional
 import aiohttp
 import structlog
 
-from core import config
+from core.config import get_settings
 from downloader.terabox_transfer import (
     aria2_available,
     aria2_download,
@@ -1057,7 +1057,7 @@ class TeraBoxDownloader:
                         headers=headers,
                         expected_size=size_bytes,
                         progress_callback=progress_callback,
-                        connections=config.TERABOX_ARIA2_CONNECTIONS,
+                        connections=get_settings().terabox_aria2_connections,
                         stall_timeout=stall,
                         logger=log,
                     )
@@ -1082,7 +1082,7 @@ class TeraBoxDownloader:
                         headers=headers,
                         expected_size=size_bytes,
                         progress_callback=progress_callback,
-                        connections=config.TERABOX_SEGMENT_CONNECTIONS,
+                        connections=get_settings().terabox_segment_connections,
                         stall_timeout=stall,
                         logger=log,
                     )
@@ -1104,7 +1104,7 @@ class TeraBoxDownloader:
                                 headers=headers,
                                 expected_size=size_bytes,
                                 progress_callback=progress_callback,
-                                connections=config.TERABOX_ARIA2_CONNECTIONS,
+                                connections=get_settings().terabox_aria2_connections,
                                 stall_timeout=stall,
                                 logger=log,
                             )

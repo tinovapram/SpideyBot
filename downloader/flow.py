@@ -19,7 +19,7 @@ import time
 
 import structlog
 
-from core import config
+from core.tiers import size_limit
 from downloader.registry import get_registry
 from utils import paths
 from utils.files import build_caption, extract_native_text, prepare_media, sanitize_filename
@@ -41,7 +41,7 @@ async def run_download(task, client) -> None:
         status = StatusMessage(
             await task.event.reply("⏳ **SpideyBot:** Starting download..."), footer=footer
         )
-    max_size_bytes, _ = config.get_size_limit(task.is_premium, task.is_admin)
+    max_size_bytes, _ = size_limit(task.tier, task.is_admin)
 
     detected = get_registry().detect(task.link)
     site_label = detected[0] if detected else "gallery-dl"

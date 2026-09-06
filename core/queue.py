@@ -1,271 +1,255 @@
-"""
-Priority download queue with per-user concurrency limits and aging.
+"""Persistent priority download queue backed by PostgreSQL.
 
-- A single bot-wide heap orders tasks by ``effective_priority`` (lower runs
-  first): admin < premium < free.
-- Aging prevents starvation: waiting tasks gain priority up to a cap.
-- Per-user concurrency is enforced: a task only runs when its user is below
-  their tier limit.
+Workers claim jobs atomically with ``FOR UPDATE SKIP LOCKED``.  Each claim
+sets ``status='running'``, a fresh ``claim_token``, and ``lease_expires``.
+If a worker crashes, the scheduler re-queues expired leases.
+
+Horizontal-scale ready: multiple worker processes can share the same queue
+with no code changes.
 """
 
 from __future__ import annotations
 
-import asyncio
-import heapq
-import itertools
-import time
-from dataclasses import dataclass, field
-from typing import Any
+import uuid
+from datetime import datetime, timezone
 
-import structlog
-from telethon.errors import RPCError as TelethonRPCError
+from sqlalchemy import func, select, text, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from core import config
-from downloader.flow import run_download
-from downloader.terabox_flow import run_terabox
+from core.config import get_settings
+from core.metrics import get_metrics
+from core.models import DownloadJob, DownloadHistory
+from core.tiers import PRIORITY_ADMIN, tier_policy
 
-logger = structlog.get_logger(__name__)
+# ── Status constants ────────────────────────────────────────────
 
-PRIORITY_ADMIN = 0.5
-PRIORITY_PREMIUM = 1.0
-PRIORITY_FREE = 2.0
-BOOST_PER_SEC = 0.001
-MAX_BOOST = 0.5
-
-_POLL_INTERVAL = 0.2
+QUEUED = "queued"
+RUNNING = "running"
+DONE = "done"
+FAILED = "failed"
+CANCELLED = "cancelled"
 
 
-@dataclass
-class DownloadTask:
-    """A queued download request."""
-
-    user_id: int
-    event: Any
-    link: str
-    is_premium: bool
-    is_admin: bool
-    entry_id: int
-    status_msg: Any = None
-    enqueued_at: float = field(default_factory=time.monotonic)
-    cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
-
-    @property
-    def is_cancelled(self) -> bool:
-        return self.cancel_event.is_set()
-
-    def cancel(self) -> None:
-        self.cancel_event.set()
-
-    @property
-    def base_priority(self) -> float:
-        if self.is_admin:
-            return PRIORITY_ADMIN
-        return PRIORITY_PREMIUM if self.is_premium else PRIORITY_FREE
-
-    def effective_priority(self, now: float) -> float:
-        waited = max(0.0, now - self.enqueued_at)
-        return self.base_priority - min(MAX_BOOST, waited * BOOST_PER_SEC)
+# ── Enqueue ────────────────────────────────────────────────────
 
 
-class DownloadQueueManager:
-    """Async priority queue with per-user concurrency enforcement."""
+async def enqueue(
+    session: AsyncSession,
+    *,
+    user_id: int,
+    link: str,
+    site: str | None = None,
+    tier: str = "free",
+    is_admin: bool = False,
+) -> DownloadJob:
+    """Insert a new job and return it."""
+    priority = PRIORITY_ADMIN if is_admin else tier_policy(tier).priority
+    job = DownloadJob(
+        user_id=user_id,
+        link=link,
+        site=site,
+        tier=tier,
+        priority=priority,
+        status=QUEUED,
+        attempts=0,
+    )
+    session.add(job)
+    await session.flush()
+    return job
 
-    def __init__(self, bot, terabox_downloader, max_concurrent: int = 20) -> None:
-        self.bot = bot
-        self.terabox_downloader = terabox_downloader
-        self.max_concurrent = max_concurrent
 
-        self._heap: list[tuple[float, int, DownloadTask]] = []
-        self._seq = itertools.count()
-        self._cond = asyncio.Condition()
+# ── Claim (worker) ─────────────────────────────────────────────
 
-        self.active_tasks: dict[int, DownloadTask] = {}
-        self._running: set[int] = set()
-        self._user_active: dict[int, int] = {}
 
-        self.workers: list[asyncio.Task] = []
-        self.running = False
+async def claim_next(session: AsyncSession) -> DownloadJob | None:
+    """Atomically claim the next runnable job.
 
-    # ── Lifecycle ──────────────────────────────────────────────────
+    Uses ``FOR UPDATE SKIP LOCKED`` so multiple workers never grab the same
+    job.  Returns ``None`` when the queue is empty.
+    """
+    settings = get_settings()
+    lease_seconds = settings.job_lease_seconds
 
-    def start_workers(self) -> None:
-        if self.running:
-            return
-        self.running = True
-        logger.info("Starting download queue workers", count=self.max_concurrent)
-        for index in range(self.max_concurrent):
-            self.workers.append(asyncio.create_task(self._worker_loop(index)))
+    stmt = text(
+        """
+        UPDATE download_jobs SET
+            status        = 'running',
+            claim_token   = :token,
+            lease_expires = now() + make_interval(secs => :lease),
+            started_at    = coalesce(started_at, now()),
+            attempts      = attempts + 1
+          WHERE id = (
+            SELECT id FROM download_jobs
+             WHERE status = 'queued'
+               AND (lease_expires IS NULL OR lease_expires < now())
+             ORDER BY priority, created_at
+             FOR UPDATE SKIP LOCKED
+             LIMIT 1
+          )
+        RETURNING id, user_id, link, site, tier, priority, status, attempts,
+                  claim_token, lease_expires, created_at, started_at, finished_at
+        """
+    ).bindparams(token=uuid.uuid4(), lease=lease_seconds)
 
-    async def stop_workers(self) -> None:
-        self.running = False
-        for worker in self.workers:
-            worker.cancel()
-        await asyncio.gather(*self.workers, return_exceptions=True)
-        self.workers.clear()
+    result = await session.execute(stmt)
+    row = result.first()
+    if row is None:
+        return None
 
-    # ── Queue API ──────────────────────────────────────────────────
+    get_metrics().incr("queue_claims")
 
-    async def add_task(
-        self,
-        user_id: int,
-        event: Any,
-        link: str,
-        is_premium: bool,
-        is_admin: bool = False,
-        status_msg: Any = None,
-    ) -> tuple[str, DownloadTask | None]:
-        entry_id = next(self._seq)
-        task = DownloadTask(
-            user_id=user_id,
-            event=event,
-            link=link,
-            is_premium=is_premium,
-            is_admin=is_admin,
-            entry_id=entry_id,
-            status_msg=status_msg,
-        )
+    # Return the session-tracked instance (not a detached copy) so later
+    # mutations in complete()/fail() actually flush to the DB.  The raw
+    # UPDATE already committed the new state; refresh() reloads it into the
+    # identity-mapped object.
+    job = await session.get(DownloadJob, row.id)
+    await session.refresh(job)
+    return job
 
-        async with self._cond:
-            self.active_tasks[entry_id] = task
-            heapq.heappush(
-                self._heap,
-                (task.effective_priority(time.monotonic()), entry_id, task),
-            )
-            self._cond.notify()
 
-        logger.info("Task queued", entry_id=entry_id, user_id=user_id, base_priority=task.base_priority)
-        return "ok", task
+# ── Finalize ────────────────────────────────────────────────────
 
-    async def get_next(self) -> DownloadTask | None:
-        """Return the highest-priority runnable task, or None when none is ready."""
-        async with self._cond:
-            live: list[tuple[float, int, DownloadTask]] = []
-            for item in self._heap:
-                if item[2].is_cancelled:
-                    self.active_tasks.pop(item[1], None)
-                else:
-                    live.append(item)
-            self._heap = live
 
-            if not self._heap:
-                return None
+async def complete(
+    session: AsyncSession,
+    job: DownloadJob,
+    *,
+    bytes_downloaded: int | None = None,
+    filename: str | None = None,
+) -> None:
+    """Mark a job done, write history, and record metrics."""
+    job.status = DONE
+    job.finished_at = datetime.now(timezone.utc)
+    job.total_bytes = bytes_downloaded
 
-            now = time.monotonic()
-            self._heap = [
-                (task.effective_priority(now), entry_id, task)
-                for _, entry_id, task in self._heap
-            ]
-            heapq.heapify(self._heap)
+    history = DownloadHistory(
+        user_id=job.user_id,
+        job_id=job.id,
+        link=job.link,
+        site=job.site,
+        filename=filename,
+        bytes=bytes_downloaded,
+        status=DONE,
+    )
+    session.add(history)
 
-            for index, (_, entry_id, task) in enumerate(self._heap):
-                if self._user_has_slot(task):
-                    self._heap.pop(index)
-                    heapq.heapify(self._heap)
-                    self._user_active[task.user_id] = self._user_active.get(task.user_id, 0) + 1
-                    self._running.add(entry_id)
-                    return task
+    get_metrics().incr("downloads_completed")
+    if bytes_downloaded:
+        get_metrics().incr("bytes_downloaded", bytes_downloaded)
 
-            return None
 
-    async def task_done(self, entry_id: int) -> None:
-        async with self._cond:
-            task = self.active_tasks.pop(entry_id, None)
-            self._running.discard(entry_id)
-            if task is not None:
-                remaining = self._user_active.get(task.user_id, 1) - 1
-                if remaining <= 0:
-                    self._user_active.pop(task.user_id, None)
-                else:
-                    self._user_active[task.user_id] = remaining
-            self._cond.notify()
+async def fail(
+    session: AsyncSession,
+    job: DownloadJob,
+    *,
+    retry: bool = True,
+) -> bool:
+    """Mark a job failed.  If *retry* and attempts < max, re-queue it.
 
-    # ── Cancellation / queries ─────────────────────────────────────
+    Returns ``True`` when the job was re-queued for retry.
+    """
+    settings = get_settings()
+    job.finished_at = datetime.now(timezone.utc)
 
-    async def cancel_task(self, entry_id: int) -> bool:
-        task = self.active_tasks.get(entry_id)
-        if task is None:
-            return False
-        task.cancel()
-        logger.info("Task cancelled", entry_id=entry_id, user_id=task.user_id)
+    if retry and job.attempts < settings.job_max_attempts:
+        job.status = QUEUED
+        job.claim_token = None
+        job.lease_expires = None
+        job.started_at = None
+        get_metrics().incr("downloads_failed")
         return True
 
-    async def cancel_user_tasks(self, user_id: int) -> int:
-        targets = [t for t in self.active_tasks.values() if t.user_id == user_id]
-        cancelled = 0
-        for task in targets:
-            if not task.is_cancelled:
-                task.cancel()
-                cancelled += 1
-        return cancelled
+    job.status = FAILED
+    history = DownloadHistory(
+        user_id=job.user_id,
+        job_id=job.id,
+        link=job.link,
+        site=job.site,
+        status=FAILED,
+    )
+    session.add(history)
+    get_metrics().incr("downloads_failed")
+    return False
 
-    def get_queue_position(self, entry_id: int) -> int:
-        """Return 1-based queue position for a queued task, or -1."""
-        if entry_id in self._running:
-            return 0
-        if entry_id not in self.active_tasks:
-            return -1
-        ordered = sorted(
-            (item[1] for item in self._heap),
-            key=lambda eid: self.active_tasks[eid].effective_priority(time.monotonic()),
+
+async def cancel(session: AsyncSession, job_id: int) -> bool:
+    """Cancel a queued job.  Returns ``True`` if the job was queued."""
+    result = await session.execute(
+        update(DownloadJob)
+        .where(DownloadJob.id == job_id, DownloadJob.status == QUEUED)
+        .values(status=CANCELLED, finished_at=datetime.now(timezone.utc))
+    )
+    if result.rowcount:
+        get_metrics().incr("downloads_cancelled")
+    return (result.rowcount or 0) > 0
+
+
+async def cancel_user_queued(session: AsyncSession, user_id: int) -> int:
+    """Cancel all queued jobs for a user.  Returns count cancelled."""
+    result = await session.execute(
+        update(DownloadJob)
+        .where(DownloadJob.user_id == user_id, DownloadJob.status == QUEUED)
+        .values(status=CANCELLED, finished_at=datetime.now(timezone.utc))
+    )
+    count = result.rowcount or 0
+    if count:
+        get_metrics().incr("downloads_cancelled", count)
+    return count
+
+
+# ── Reclaim (scheduler) ─────────────────────────────────────────
+
+
+async def reclaim_expired(session: AsyncSession) -> int:
+    """Re-queue jobs whose lease has expired (worker crash recovery).
+
+    Returns the number of jobs re-queued.
+    """
+    result = await session.execute(
+        update(DownloadJob)
+        .where(
+            DownloadJob.status == RUNNING,
+            DownloadJob.lease_expires < datetime.now(timezone.utc),
         )
-        try:
-            return ordered.index(entry_id) + 1
-        except ValueError:
-            return -1
-
-    def user_tasks(self, user_id: int) -> list[DownloadTask]:
-        return [
-            t for t in self.active_tasks.values()
-            if t.user_id == user_id and not t.is_cancelled
-        ]
-
-    # ── Internals ──────────────────────────────────────────────────
-
-    def _user_has_slot(self, task: DownloadTask) -> bool:
-        limit = config.get_concurrent_limit(task.is_premium or task.is_admin)
-        return self._user_active.get(task.user_id, 0) < limit
-
-    async def _worker_loop(self, worker_id: int) -> None:
-        logger.info("Worker started", worker_id=worker_id)
-        while self.running:
-            task = await self.get_next()
-            if task is None:
-                await asyncio.sleep(_POLL_INTERVAL)
-                continue
-
-            logger.info("Worker picked task", worker_id=worker_id, entry_id=task.entry_id)
-            try:
-                await self._execute_task(task)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception("Error executing task", entry_id=task.entry_id)
-            finally:
-                await self.task_done(task.entry_id)
-
-    async def _execute_task(self, task: DownloadTask) -> None:
-        if task.is_cancelled:
-            if task.status_msg is not None:
-                try:
-                    await task.status_msg.edit("❌ **SpideyBot:** Task was cancelled.")
-                except TelethonRPCError:
-                    pass
-            return
-
-        sender_client = getattr(task.event, "client", None) or self.bot
-
-        if _is_terabox(task.link):
-            await run_terabox(task, sender_client, self.terabox_downloader)
-        else:
-            await run_download(task, sender_client)
+        .values(
+            status=QUEUED,
+            claim_token=None,
+            lease_expires=None,
+            started_at=None,
+        )
+    )
+    count = result.rowcount or 0
+    if count:
+        get_metrics().incr("queue_reclaims", count)
+    return count
 
 
-def _is_terabox(link: str) -> bool:
-    if not config.is_terabox_url(link.rstrip('.,;!?)"\'')):
-        return False
-    try:
-        from downloader.terabox import TeraBoxDownloader
-        TeraBoxDownloader.parse_surl(link)
-        return True
-    except Exception:
-        return False
+# ── Queries ─────────────────────────────────────────────────────
+
+
+async def get_job(session: AsyncSession, job_id: int) -> DownloadJob | None:
+    """Fetch a job by id."""
+    return await session.get(DownloadJob, job_id)
+
+
+async def user_active_count(session: AsyncSession, user_id: int) -> int:
+    """Count queued + running jobs for a user."""
+    result = await session.scalar(
+        select(func.count())
+        .select_from(DownloadJob)
+        .where(
+            DownloadJob.user_id == user_id,
+            DownloadJob.status.in_([QUEUED, RUNNING]),
+        )
+    )
+    return result or 0
+
+
+async def queue_depth(session: AsyncSession) -> int:
+    """Total queued jobs (for /stats)."""
+    result = await session.scalar(
+        select(func.count())
+        .select_from(DownloadJob)
+        .where(DownloadJob.status == QUEUED)
+    )
+    return result or 0

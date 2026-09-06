@@ -15,7 +15,7 @@ import time
 
 import structlog
 
-from core import config
+from core.tiers import size_limit
 from downloader.terabox import TeraBoxAccountPool, download_file_async
 from utils import paths
 from utils.files import build_caption, prepare_media
@@ -65,7 +65,7 @@ async def run_terabox(task, client, downloader) -> None:
         )
         return
 
-    max_size_bytes, limit_str = config.get_size_limit(task.is_premium, task.is_admin)
+    max_size_bytes, limit_str = size_limit(task.tier, task.is_admin)
 
     try:
         status.set_header("🔍 **SpideyBot:** Resolving TeraBox link...")

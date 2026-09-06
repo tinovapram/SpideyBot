@@ -13,10 +13,11 @@ import structlog
 from telethon import TelegramClient
 
 from core import config, db, sessions
+from core.config import get_settings, is_admin
 from core.logging import setup_logging
-from core.queue import DownloadQueueManager
-from downloader.terabox import TeraBoxAccountPool, TeraBoxDownloader
+from core.worker import DownloadManager
 from handler.admin import register_admin_handlers
+from handler.cookie import register_cookie_handlers
 from handler.login import register_login_handlers
 from handler.outgoing import set_download_manager
 from handler.user import register_user_handlers
@@ -26,7 +27,8 @@ setup_logging()
 logger = structlog.get_logger(__name__)
 
 try:
-    _api_id = config.validate_telegram_config()
+    _settings = get_settings()
+    _api_id = _settings.validate_telegram()
 except config.ConfigError as exc:
     logger.error(str(exc))
     raise SystemExit(1) from exc
@@ -34,18 +36,20 @@ except config.ConfigError as exc:
 bot = TelegramClient(
     str(paths.PROJECT_ROOT / "bot_session"),
     _api_id,
-    config.TG_API_HASH,
+    _settings.tg_api_hash,
 )
 
 terabox_downloader = None
-_account_cookies = config.terabox_account_cookies()
+_account_cookies = _settings.terabox_account_cookies()
 if _account_cookies:
     try:
+        from downloader.terabox import TeraBoxAccountPool, TeraBoxDownloader
+
         downloaders = [
             TeraBoxDownloader(
                 cookie=cookie,
-                js_token=config.TERABOX_JSTOKEN,
-                bds_token=config.TERABOX_BDSTOKEN,
+                js_token=_settings.terabox_jstoken,
+                bds_token=_settings.terabox_bdstoken,
             )
             for cookie in _account_cookies
             if cookie
@@ -63,14 +67,13 @@ if _account_cookies:
 else:
     logger.warning("TERABOX_COOKIE not set — TeraBox features unavailable")
 
-download_queue_manager = DownloadQueueManager(
-    bot, terabox_downloader, max_concurrent=config.MAX_CONCURRENT_DOWNLOADS
-)
+download_manager = DownloadManager(bot, terabox_downloader)
 
-register_user_handlers(bot, download_queue_manager)
+register_user_handlers(bot, download_manager)
 register_admin_handlers(bot)
+register_cookie_handlers(bot)
 register_login_handlers(bot)
-set_download_manager(download_queue_manager)
+set_download_manager(download_manager)
 logger.info("All handlers registered")
 
 _shutdown_event = asyncio.Event()
@@ -83,14 +86,8 @@ async def _handle_shutdown(signal_name: str) -> None:
     log = logger.bind(signal=signal_name)
     log.info("Shutdown signal received — stopping gracefully")
 
-    download_queue_manager.running = False
-
-    for task in list(download_queue_manager.active_tasks.values()):
-        if not task.is_cancelled:
-            task.cancel()
-
-    await download_queue_manager.stop_workers()
-    log.info("Download workers stopped")
+    await download_manager.stop()
+    log.info("Download manager stopped")
 
     if terabox_downloader is not None:
         try:
@@ -129,8 +126,8 @@ def main() -> None:
         shutil.rmtree(paths.DOWNLOADS_DIR, ignore_errors=True)
         paths.DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
-        download_queue_manager.start_workers()
-        await bot.start(bot_token=config.TG_BOT_TOKEN)
+        download_manager.start()
+        await bot.start(bot_token=_settings.tg_bot_token)
         logger.info("Bot is running and listening for messages")
         await bot.run_until_disconnected()
 

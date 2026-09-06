@@ -39,7 +39,7 @@ from typing import Callable, Optional
 import aiohttp
 import structlog
 
-from core import config
+from core.config import get_settings
 
 # Progress callback signature used across TeraBox downloaders:
 # cb(filename: str, done_bytes: int, total_bytes: int)
@@ -74,11 +74,11 @@ def pick_transfer_backend(size_bytes: int) -> str:
     Honours ``TERABOX_TRANSFER``; ``auto`` uses native aiohttp segmented for
     files big enough (aria2 is only a fallback), otherwise single-stream.
     """
-    mode = (config.TERABOX_TRANSFER or "auto").strip().lower()
+    mode = (get_settings().terabox_transfer or "auto").strip().lower()
     if mode in ("aria2", "segmented", "single"):
         return mode
 
-    if size_bytes >= config.TERABOX_TRANSFER_MIN_BYTES:
+    if size_bytes >= get_settings().terabox_transfer_min_mb * 1024 * 1024:
         return "segmented"
     return "single"
 

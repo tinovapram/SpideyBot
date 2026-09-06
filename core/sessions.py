@@ -41,7 +41,7 @@ def legacy_file(user_id: int) -> Path:
 def _fernet_cipher() -> Fernet:
     global _fernet
     if _fernet is None:
-        key = config.SESSION_ENCRYPT_KEY
+        key = config.get_settings().session_encrypt_key
         if not key:
             raise RuntimeError("SESSION_ENCRYPT_KEY is not set in the environment")
         _fernet = Fernet(key.encode() if isinstance(key, str) else key)
@@ -122,10 +122,11 @@ def build_client(user_id: int) -> TelegramClient | None:
     if not file_path.exists():
         if not migrate_legacy(user_id):
             return None
+    settings = config.get_settings()
     return TelegramClient(
         SQLiteSession(str(file_path)),
-        int(config.TG_API_ID),
-        config.TG_API_HASH,
+        int(settings.tg_api_id),
+        settings.tg_api_hash,
     )
 
 
@@ -140,10 +141,11 @@ def create_login_client(user_id: int) -> TelegramClient:
             stale.unlink()
         except OSError:
             pass
+    settings = config.get_settings()
     return TelegramClient(
         SQLiteSession(str(session_file(user_id))),
-        int(config.TG_API_ID),
-        config.TG_API_HASH,
+        int(settings.tg_api_id),
+        settings.tg_api_hash,
     )
 
 

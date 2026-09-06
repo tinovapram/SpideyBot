@@ -1,4 +1,4 @@
-# ── Python ─────────────────────────────────────────────────────────
+﻿# ── Python ─────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *$py.class
@@ -25,6 +25,7 @@ venv/
 .coverage
 .coverage.*
 htmlcov/
+tests/
 
 # ── Type checking ──────────────────────────────────────────────────
 .mypy_cache/
@@ -39,28 +40,8 @@ dmypy.json
 data/
 !data/.gitkeep
 
-# ── User sessions (Telethon file sessions + legacy JSON) ───────────
-user_sessions/
-!user_sessions/.gitkeep
-
-# ── Runtime-generated configs ──────────────────────────────────────
-config/runtime/
-!config/runtime/.gitkeep
-
-# ── Downloads (runtime) ────────────────────────────────────────────
+# ── Runtime ────────────────────────────────────────────────────────
 downloads/
-!downloads/.gitkeep
-
-# ── Telethon session files (bot) ───────────────────────────────────
-*.session
-*.session-journal
-
-# ── Logs / OS ──────────────────────────────────────────────────────
-*.log
-.DS_Store
-Thumbs.db
-desktop.ini
-
-
-# ── graphify 
-graphify-out/*
+user_sessions/
+config/runtime/
+graphify-out/

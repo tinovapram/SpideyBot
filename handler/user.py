@@ -1,256 +1,393 @@
 """
-User command handlers: /start, /stop, /help, /site_list, /dl, /dt, /cancel.
+User-facing command handlers: /start, /help, /dl, /dt, /cancel, etc.
 """
 
 from __future__ import annotations
 
-import structlog
-from telethon import Button, events
-from telethon.errors import RPCError as TelethonRPCError
+from telethon import TelegramClient, events
+from telethon.tl.custom import Button
 
-from core import config, db, sessions
+import structlog
+from core import config, sessions
+from core.config import get_settings, is_admin
+from core.db import session_scope
+from core.models import User, get_or_create_user
+from core.quota import get_snapshot
+from core.referral import referral_stats
+from core.tiers import (
+    ALL_SITES, HEAVY_SITES, SOCIAL_SITES, VIDEO_HOST_SITES,
+    tier_policy, size_limit,
+)
+from core.worker import DownloadManager
+from utils import paths
 
 logger = structlog.get_logger(__name__)
 
+# ── pricing / copy ────────────────────────────────────────────────────────────
 
-def has_premium_access(user_id: int) -> bool:
-    return user_id in config.ADMIN_IDS or db.is_user_premium(user_id)
+_FREE_NOTE = "🆓 Free tier: one file at a time, size limit per download."
+_PRO_NOTE = (
+    "✨ Pro — ⬆️ higher limits + faster queues.\n"
+    "    💰 Upgrade: /upgrade"
+)
+_PREMIUM_NOTE = (
+    "💎 Premium — ⬆️ highest limits + priority queue.\n"
+    "    💰 Upgrade: /upgrade"
+)
+
+_HELP_HEADER = (
+    "**Welcome to SpideyBot**\n"
+    "Download videos, files, and media from 30+ platforms — including Terabox, "
+    "YouTube, Reddit, Instagram, and more.\n"
+)
+_HELP_COMMANDS = """
+**Essential commands**
+
+    /start  — Sign up or refresh your status
+    /help   — Show this help guide
+    /dl *URL*  — Download a file
+    /dt *URL*  — Download and auto-split into 1 GB chunks
+    /cancel *ID*  — Cancel a queued download
+    /status — View your active downloads
+    /account — Account & session status
+    /quota — View your usage & limits
+    /sites — List supported platforms
+    /referral — Get your invite link & stats
+"""
+_HELP_NOTES = """
+**Notes**
+
+    • One file at a time. Large files are split automatically if needed.
+    • Terabox links require a logged-in account — use /account to manage sessions.
+"""
+_HELP_ADMIN = """
+
+**Admin only**
+
+    /stats  — View live download statistics
+    /addpremium — Grant Pro to a user
+    /removepremium — Revoke Pro from a user
+    /checkpremium — Check a user's premium status
+"""
+
+# ── helper: has_premium_access ──────────────────────────────────────────────────
 
 
-def _tier_label(user_id: int) -> str:
-    if user_id in config.ADMIN_IDS:
+async def has_premium_access(user_id: int) -> bool:
+    """Return True if user is admin or has pro/premium tier."""
+    if is_admin(user_id):
+        return True
+    async with session_scope() as session:
+        user = await session.get(User, user_id)
+        return user is not None and user.tier in ("pro", "premium")
+
+
+async def _tier_label(user_id: int) -> str:
+    if is_admin(user_id):
         return "👑 Admin"
-    if db.is_user_premium(user_id):
-        return "✨ Premium"
+    async with session_scope() as session:
+        user = await session.get(User, user_id)
+        if user and user.tier in ("pro", "premium"):
+            return f"✨ {user.tier.title()}"
     return "👤 Free"
 
 
-def _session_badge(user_id: int) -> str:
+async def _session_badge(user_id: int) -> str:
     if sessions.is_client_active(user_id):
-        return "🔴 Session active"
+        return "🟢 Connected"
     if sessions.has_session(user_id):
         return "🟡 Session saved (not running)"
-    return "🟢 No session"
+    return "🔴 No session"
 
 
-_SITE_LIST = [
-    ("YouTube", "youtube.com, youtu.be"),
-    ("Twitter / X", "twitter.com, x.com"),
-    ("TikTok", "tiktok.com"),
-    ("Reddit", "reddit.com, redd.it"),
-    ("Doodstream", "dood.stream, playmogo.com, ds2play.com"),
-    ("MixDrop", "mixdrop.ag, mixdrop.to, mixdrop.co"),
-    ("StreamWish", "streamwish.*, playnixes.*, filelions.to"),
-    ("Luluvdoo", "luluvdoo.*, lulustream.*, luluvid.com"),
-    ("Bysejikuar", "bysejikuar.*, bikebyse.com"),
-    ("Vidara", "vidara.me, vidaram.com"),
-    ("Pinterest", "pinterest.com, pin.it"),
-    ("Instagram", "instagram.com (gallery-dl)"),
-    ("Spotify", "open.spotify.com"),
-    ("SoundCloud", "soundcloud.com"),
-    ("Bluesky", "bsky.app, bsky.social"),
-    ("Threads", "threads.net"),
-    ("LinkedIn", "linkedin.com, linkedin.cn"),
-    ("Tumblr", "tumblr.com"),
-    ("Snapchat", "snapchat.com"),
-    ("Dailymotion", "dailymotion.com"),
-    ("Streamtape", "streamtape.com, streamta.site"),
-    ("CapCut", "capcut.com"),
-    ("Douyin", "douyin.com"),
-    ("Kuaishou", "kuaishou.com, ksplay.com"),
-    ("TeraBox", "terabox.com, 1024tera.com, 4funbox.com"),
-]
+# ── /start ──────────────────────────────────────────────────────────────────────
+
+async def start_handler(event):
+    user_id = event.sender_id
+    username = event.sender.username
+
+    async with session_scope() as session:
+        user = await get_or_create_user(session, user_id, username)
+
+    badge = await _tier_label(user_id)
+    lines = [
+        f"**Welcome, {event.sender.first_name}!**",
+        "",
+        badge,
+        "",
+    ]
+    if user.tier == "free":
+        lines.append(_FREE_NOTE)
+    lines.append(_HELP_COMMANDS)
+    buttons = [
+        [Button.url("⭐ Upgrade", "https://t.me/SpideyBot?start=upgrade")],
+    ]
+    await event.respond("\n".join(lines), buttons=buttons)
+    raise events.StopPropagation
 
 
-def register_user_handlers(bot, download_manager) -> None:
-    """Register all user-facing handlers on *bot*."""
+# ── /help ───────────────────────────────────────────────────────────────────────
 
-    @bot.on(events.CallbackQuery(pattern=rb"cancel:(\d+)"))
-    async def cancel_callback(event):
-        entry_id = int(event.data_match.group(1))
-        if await download_manager.cancel_task(entry_id):
-            await event.answer("✅ Download cancelled.")
-            try:
-                await event.edit("❌ **SpideyBot:** Download cancelled.")
-            except TelethonRPCError:
-                pass
-        else:
-            await event.answer("⚠️ Task not found or already completed.", alert=True)
+async def help_handler(event):
+    user_id = event.sender_id
+    username = event.sender.username
 
-    @bot.on(events.NewMessage(pattern="/start"))
-    async def start_handler(event):
-        user = await event.get_sender()
-        user_id = event.sender_id
-        db.save_or_update_user(user_id, user.username if user else None)
+    async with session_scope() as session:
+        user = await get_or_create_user(session, user_id, username)
 
-        first_name = user.first_name if user else "there"
-        session_started = sessions.has_session(user_id) and await sessions.start_client(user_id)
+    tier_label = await _tier_label(user_id)
+    _, size_label = size_limit(user.tier, is_admin(is_admin(user_id)))
+    session_label = await _session_badge(user_id)
 
-        if session_started:
-            session_line = "🔴 **User account connected!**"
-        elif sessions.has_session(user_id):
-            session_line = "⚠️ Could not connect your session. Use /start again later."
-        else:
-            session_line = "🔐 Use `/login` to connect your Telegram account."
+    lines = [
+        _HELP_HEADER,
+        f"    Tier: {tier_label}",
+        f"    Per-file limit: {size_label}",
+        f"    Sessions: {session_label}",
+        "",
+        _HELP_COMMANDS,
+        _HELP_NOTES,
+    ]
+    if is_admin(user_id):
+        lines.append(_HELP_ADMIN)
+    await event.respond("\n".join(lines))
+    raise events.StopPropagation
 
-        text = (
-            f"🌱 **Welcome, {first_name}!**\n\n"
-            f"**Tier:** {_tier_label(user_id)}\n"
-            f"**Session:** {_session_badge(user_id)}\n\n"
-            f"{session_line}\n\n"
-            "**Supported sites:**\n"
-            "TeraBox • YouTube • Twitter/X • TikTok • Reddit • Doodstream • Vidara • "
-            "Pinterest • Instagram • Spotify • SoundCloud • Bluesky • Threads • LinkedIn • "
-            "Tumblr • Snapchat • Dailymotion • Streamtape • [and 100+ more]"
-            "(https://github.com/mikf/gallery-dl-supported-sites)\n\n"
-            "**Quick start:**\n"
-            "  • `/dl <link>` — Download from any supported site\n"
-            "  • `/dt <t.me>` — Download from a Telegram message\n\n"
-            "Type `/help` for the full command list."
-        )
-        await event.respond(text)
 
-    @bot.on(events.NewMessage(pattern="/stop"))
-    async def stop_handler(event):
-        user_id = event.sender_id
-        stopped = await sessions.stop_client(user_id)
-        if stopped:
-            await event.respond("🔴 **Session disconnected.**\n\nYour session data is still saved.")
-        elif sessions.has_session(user_id):
-            await event.respond("⚠️ Session is saved but not running. Use `/start` to reconnect.")
-        else:
-            await event.respond("🟢 No saved session found. Use `/login` to connect your account.")
+# ── /dl ─────────────────────────────────────────────────────────────────────────
 
-    @bot.on(events.NewMessage(pattern="/help"))
-    async def help_handler(event):
-        user = await event.get_sender()
-        user_id = event.sender_id
-        db.save_or_update_user(user_id, user.username if user else None)
+async def dl_handler(event):
+    """Handle /dl URL — download and upload a file."""
+    args = event.text.split(maxsplit=1)
+    if len(args) < 2 or not args[1].strip():
+        await event.respond("**Usage:** /dl *URL*\n\nProvide a link to download.")
+        raise events.StopPropagation
 
-        if user_id in config.ADMIN_IDS:
-            limits = "Unlimited size • 5 concurrent • Priority queue"
-        elif db.is_user_premium(user_id):
-            limits = "1 GB max • 5 concurrent • Priority queue"
-        else:
-            limits = "100 MB max • 1 concurrent"
+    link = args[1].strip()
+    user_id = event.sender_id
 
-        text = (
-            f"**🚀 SpideyBot Help**\n\n"
-            f"**Tier:** {_tier_label(user_id)}  •  **Limits:** {limits}\n"
-            f"**Session:** {_session_badge(user_id)}\n\n"
-            "**📥 Downloading**\n"
-            "  • `/dl <link>` — Download from any supported site\n"
-            "  • `/dt <t.me>` — Download from a Telegram message\n"
-            "  • `/cancel` — Cancel downloads (or `/cancel <id>`)\n\n"
-            "**🔑 Account Session**\n"
-            "  • `/start` — Connect / welcome\n"
-            "  • `/stop` — Disconnect session (saved)\n"
-            "  • `/login` — Connect your Telegram account\n"
-            "  • `/logout` — Remove saved session\n\n"
-            "**📱 Supported Sites**\n"
-            "  TeraBox • YouTube • Twitter/X • TikTok • Reddit • Doodstream • Vidara • "
-            "Pinterest • Instagram • Spotify • SoundCloud • Bluesky • Threads • LinkedIn • "
-            "Tumblr • Snapchat • Dailymotion • Streamtape • [100+ more]"
-            "(https://github.com/mikf/gallery-dl-supported-sites)\n\n"
-            "**💡 Other**\n"
-            "  • `/ping` — Check bot status\n"
-            "  • `/site_list` — Show all supported sites\n"
-        )
-        if user_id in config.ADMIN_IDS:
-            text += (
-                "\n**👑 Admin Commands**\n"
-                "  • `/addpremium <user> <days>` — Grant premium\n"
-                "  • `/removepremium <user>` — Revoke premium\n"
-                "  • `/checkpremium <user>` — Check status\n"
-            )
-        await event.respond(text)
+    async with session_scope() as session:
+        user = await get_or_create_user(session, user_id, event.sender.username)
+        tier = user.tier if user.tier in ("free", "pro", "premium") else "free"
 
-    @bot.on(events.NewMessage(pattern="/site_list"))
-    async def site_list_handler(event):
-        lines = [f"**📱 Supported Sites ({len(_SITE_LIST)})**\n"]
-        lines += [f"  • **{name}** — `{domains}`" for name, domains in _SITE_LIST]
-        lines.append(
-            "\nPlus [100+ sites](https://github.com/mikf/gallery-dl-supported-sites) via gallery-dl."
-        )
-        await event.respond("\n".join(lines))
+    status_msg = await event.respond("⏳ **SpideyBot:** Queuing download…")
+    entry_id, task = await _manager.add_task(
+        user_id, event, link,
+        is_premium=user.tier in ("pro", "premium"),
+        is_admin=is_admin(user_id),
+        status_msg=status_msg,
+    )
+    pos = _manager.get_queue_position(entry_id)
+    if pos > 0:
+        await status_msg.edit(f"📋 Queued — position **#{pos}**. Send `/cancel {entry_id}` to abort.")
+    raise events.StopPropagation
 
-    @bot.on(events.NewMessage(pattern=r"/dl(?:\s+(https?://\S+))?"))
-    async def dl_command_handler(event):
-        user = await event.get_sender()
-        user_id = event.sender_id
-        db.save_or_update_user(user_id, user.username if user else None)
 
-        link = event.pattern_match.group(1)
-        if not link:
-            await event.reply("⚠️ Please specify a valid URL.\nUsage: `/dl <link>`")
-            return
+# ── /dt ─────────────────────────────────────────────────────────────────────────
 
-        if sessions.get_client(user_id) is not None:
-            await event.reply("✅ **Processing via your user account.** Queueing download…")
-            return
+async def dt_handler(event):
+    """Handle /dt URL — download with Telegram split (1 GB chunks)."""
+    args = event.text.split(maxsplit=1)
+    if len(args) < 2 or not args[1].strip():
+        await event.respond("**Usage:** /dt *URL*\n\nProvide a link to download (split into 1 GB chunks).")
+        raise events.StopPropagation
 
-        await _queue_download(event, user_id, link, download_manager)
+    link = args[1].strip()
+    user_id = event.sender_id
 
-    @bot.on(events.NewMessage(pattern=r"/dt(?:\s+(https?://\S+))?"))
-    async def dt_command_handler(event):
-        user = await event.get_sender()
-        user_id = event.sender_id
-        db.save_or_update_user(user_id, user.username if user else None)
+    async with session_scope() as session:
+        user = await get_or_create_user(session, user_id, event.sender.username)
+        tier = user.tier if user.tier in ("free", "pro", "premium") else "free"
 
-        if sessions.get_client(user_id) is not None:
-            await event.reply("✅ **Processing via your user account.** Queueing download…")
-        else:
-            await event.reply("⚠️ **No user session active.** Use `/login` to connect your account.")
-        logger.info("/dt handled", user_id=user_id)
+    status_msg = await event.respond("⏳ **SpideyBot:** Queuing download…")
+    entry_id, task = await _manager.add_task(
+        user_id, event, link,
+        is_premium=user.tier in ("pro", "premium"),
+        is_admin=is_admin(user_id),
+        status_msg=status_msg,
+    )
+    pos = _manager.get_queue_position(entry_id)
+    if pos > 0:
+        await status_msg.edit(f"📋 Queued — position **#{pos}**. Send `/cancel {entry_id}` to abort.")
+    raise events.StopPropagation
 
-    @bot.on(events.NewMessage(pattern=r"/cancel(?:\s+(\d+))?"))
-    async def cancel_handler(event):
-        user_id = event.sender_id
-        dm = download_manager
 
-        if sessions.get_client(user_id) is not None:
-            return
+# ── /cancel ─────────────────────────────────────────────────────────────────────
 
-        target_id = event.pattern_match.group(1)
-        if target_id:
-            entry_id = int(target_id)
-            task = dm.active_tasks.get(entry_id)
-            if task and task.user_id == user_id and not task.is_cancelled:
-                task.cancel()
-                await event.respond(f"❌ **SpideyBot:** Task #{entry_id} cancelled.")
-            else:
-                await event.respond("❌ **SpideyBot:** Task not found or already completed.")
-            return
+async def cancel_handler(event):
+    args = event.text.split(maxsplit=1)
+    if len(args) < 2 or not args[1].strip():
+        await event.respond("**Usage:** /cancel *entry_id*\n\nView your active downloads with /status.")
+        raise events.StopPropagation
 
-        user_tasks = dm.user_tasks(user_id)
-        if not user_tasks:
-            await event.respond("ℹ️ **SpideyBot:** You have no active or queued tasks to cancel.")
-            return
+    entry_id = args[1].strip()
+    user_id = event.sender_id
 
-        if len(user_tasks) > 1:
-            lines = ["**Your active tasks:**"]
-            for task in user_tasks:
-                pos = dm.get_queue_position(task.entry_id)
-                status = f"queue #{pos}" if pos > 0 else "downloading"
-                lines.append(f"  • `#{task.entry_id}` — {task.link[:50]}  ({status})")
-            lines.append("\nUse `/cancel <id>` to cancel one, or send `/cancel` again to cancel all.")
-            await event.respond("\n".join(lines))
-            return
+    task = _manager.cancel_task(entry_id)
+    if task and task.user_id == user_id:
+        await event.respond(f"❌ Cancelled download **{entry_id}**.")
+    elif task:
+        await event.respond("⚠️ That download belongs to another user.")
+    else:
+        await event.respond("⚠️ No active download found with that ID.")
+    raise events.StopPropagation
 
-        task = user_tasks[0]
-        task.cancel()
-        await event.respond(f"❌ **SpideyBot:** Task #{task.entry_id} cancelled.")
 
-async def _queue_download(event, user_id: int, link: str, manager) -> None:
-    is_admin = user_id in config.ADMIN_IDS
-    is_premium = has_premium_access(user_id)
+# ── /status ─────────────────────────────────────────────────────────────────────
 
-    status_msg = await event.reply("⏳ **SpideyBot:** Queueing your download request...")
-    status, task = await manager.add_task(user_id, event, link, is_premium, is_admin, status_msg)
+async def status_handler(event):
+    tasks = _manager.user_tasks(event.sender_id)
+    if not tasks:
+        await event.respond("✅ No active downloads.")
+        raise events.StopPropagation
+    lines = ["**Active downloads:**\n"]
+    for t in tasks:
+        status = "🔄 Running" if not t.is_cancelled else "❌ Cancelled"
+        lines.append(f"  `{t.entry_id}` — {t.link[:50]}… — {status}")
+    await event.respond("\n".join(lines))
+    raise events.StopPropagation
 
-    if status == "ok":
-        pos = manager.get_queue_position(task.entry_id)
-        await status_msg.edit(
-            f"⏳ **SpideyBot:** Task queued (position #{pos} in queue)",
-            buttons=[[Button.inline("❌ Cancel", data=f"cancel:{task.entry_id}")]],
-        )
+
+# ── /quota ─────────────────────────────────────────────────────────────────────
+
+async def quota_handler(event):
+    """Show user's current usage and tier limits."""
+    user_id = event.sender_id
+    async with session_scope() as session:
+        user = await get_or_create_user(session, user_id, event.sender.username)
+        snap = await get_snapshot(session, user)
+
+    tier_label = await _tier_label(user_id)
+
+    def _fmt_bytes(n: int | None) -> str:
+        if n is None:
+            return "∞"
+        if n >= 1024 ** 3:
+            return f"{n / 1024**3:.1f} GB"
+        if n >= 1024 ** 2:
+            return f"{n / 1024**2:.0f} MB"
+        return f"{n} B"
+
+    lines = [
+        "**Quota Status**\n",
+        f"  Tier: {tier_label}",
+    ]
+
+    # Daily downloads
+    if snap.policy.daily_downloads is not None:
+        rem = snap.downloads_remaining
+        lines.append(f"  Downloads today: {snap.downloads_today}/{snap.policy.daily_downloads}"
+                     + (f" (+{snap.referral_bonus} bonus)" if snap.referral_bonus else "")
+                     + (f"  — {rem} left" if rem is not None else ""))
+    else:
+        lines.append(f"  Downloads today: {snap.downloads_today} (∞)")
+
+    # Daily bandwidth
+    if snap.policy.daily_bytes is not None:
+        lines.append(f"  Bandwidth today: {_fmt_bytes(snap.bytes_today)} / {_fmt_bytes(snap.policy.daily_bytes)}")
+    else:
+        lines.append(f"  Bandwidth today: {_fmt_bytes(snap.bytes_today)} (∞)")
+
+    # Monthly bandwidth
+    if snap.policy.monthly_bytes is not None:
+        lines.append(f"  Bandwidth month: {_fmt_bytes(snap.bytes_this_month)} / {_fmt_bytes(snap.policy.monthly_bytes)}")
+    else:
+        lines.append(f"  Bandwidth month: {_fmt_bytes(snap.bytes_this_month)} (∞)")
+
+    lines.append(f"  Concurrent: {snap.policy.concurrent}")
+    lines.append(f"  Per-file limit: {size_limit(snap.tier, is_admin(user_id))[1]}")
+
+    if not snap.can_download:
+        lines.append("\n⚠️ **Quota reached** — try again tomorrow.")
+
+    await event.respond("\n".join(lines))
+    raise events.StopPropagation
+
+
+# ── /sites ─────────────────────────────────────────────────────────────────────
+
+async def sites_handler(event):
+    """List supported sites grouped by category."""
+    user_id = event.sender_id
+    async with session_scope() as session:
+        user = await get_or_create_user(session, user_id, event.sender.username)
+    tier = user.tier if user.tier in ("free", "pro", "premium") else "free"
+    policy = tier_policy(tier)
+
+    def _label(sites: frozenset[str]) -> str:
+        return ", ".join(sorted(sites))
+
+    social = _label(SOCIAL_SITES & ALL_SITES)
+    video = _label(VIDEO_HOST_SITES & ALL_SITES)
+    heavy = _label(HEAVY_SITES & ALL_SITES)
+
+    lines = [
+        "**Supported Platforms**\n",
+        f"  Your tier: **{tier.title()}**\n",
+        f"  📱 Social & video: {social}",
+        f"  🎬 Video hosting: {video}",
+        f"  📦 Heavy / cloud: {heavy}",
+        "",
+        "Send any link with /dl or /dt to download.",
+    ]
+    await event.respond("\n".join(lines))
+    raise events.StopPropagation
+
+
+# ── /referral ───────────────────────────────────────────────────────────────────
+
+async def referral_handler(event):
+    """Show referral link and stats."""
+    user_id = event.sender_id
+    async with session_scope() as session:
+        user = await get_or_create_user(session, user_id, event.sender.username)
+        stats = await referral_stats(session, user_id)
+
+    settings = get_settings()
+    lines = [
+        "**Referral Program**\n",
+        f"  🔗 Your link: {stats['link']}",
+        f"  👥 Invited: {stats['total']}",
+        f"  ✅ Credited: {stats['credited']}",
+        f"  ⏳ Pending: {stats['pending']}",
+        "",
+        f"  💰 Bonus: +{settings.referral_daily_bonus} downloads/day per credited invite",
+        f"     (valid for {settings.referral_bonus_days} days after credit)",
+    ]
+    await event.respond("\n".join(lines))
+    raise events.StopPropagation
+
+
+# ── /account ────────────────────────────────────────────────────────────────────
+
+async def account_handler(event):
+    user_id = event.sender_id
+    badge = await _session_badge(user_id)
+    lines = [
+        "**Account Status**\n",
+        f"    {badge}\n",
+        "To log in to Terabox, use /login.",
+        "To log out, use /logout.",
+    ]
+    await event.respond("\n".join(lines))
+    raise events.StopPropagation
+
+
+# ── registration ────────────────────────────────────────────────────────────────
+
+_manager: DownloadManager
+
+
+def register_user_handlers(client: TelegramClient, manager: DownloadManager) -> None:
+    global _manager
+    _manager = manager
+    client.add_event_handler(start_handler, events.NewMessage(pattern=r"/start"))
+    client.add_event_handler(help_handler, events.NewMessage(pattern=r"/help"))
+    client.add_event_handler(dl_handler, events.NewMessage(pattern=r"/dl"))
+    client.add_event_handler(dt_handler, events.NewMessage(pattern=r"/dt"))
+    client.add_event_handler(cancel_handler, events.NewMessage(pattern=r"/cancel"))
+    client.add_event_handler(status_handler, events.NewMessage(pattern=r"/status"))
+    client.add_event_handler(account_handler, events.NewMessage(pattern=r"/account"))
+    client.add_event_handler(quota_handler, events.NewMessage(pattern=r"/quota"))
+    client.add_event_handler(sites_handler, events.NewMessage(pattern=r"/sites"))
+    client.add_event_handler(referral_handler, events.NewMessage(pattern=r"/referral"))

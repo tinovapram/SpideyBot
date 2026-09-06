@@ -6,6 +6,8 @@ pillow
 
 # ── Configuration ───────────────────────────────────────────────
 python-dotenv>=1.0.1
+pydantic>=2.7.0
+pydantic-settings>=2.0.0
 structlog>=24.1.0
 
 # ── HTTP & networking ───────────────────────────────────────────
@@ -17,7 +19,11 @@ beautifulsoup4
 
 # ── Security (legacy session decryption) ────────────────────────
 cryptography>=42.0.0
-SQLAlchemy>=2.0.0
+
+# ── Database (PostgreSQL, async) ────────────────────────────────
+SQLAlchemy[asyncio]>=2.0.0
+asyncpg>=0.29.0
+alembic>=1.13.0
 
 # ── Media downloaders (CLI tools) ──────────────────────────────
 gallery-dl

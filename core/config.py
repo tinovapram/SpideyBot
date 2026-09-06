@@ -1,169 +1,126 @@
-"""
-Application configuration.
+"""Application configuration (typed, pydantic-settings).
 
-All environment-driven settings live here as module-level constants, loaded
-once at import time. Helper functions expose tier-aware limits.
+Every setting uses the ``SPIDEY_`` env prefix and is loaded once via the
+cached :func:`get_settings`. Validation happens at first access, so a broken
+``.env`` fails fast at startup.
 """
 
 from __future__ import annotations
 
-import os
+from functools import lru_cache
 
-from dotenv import load_dotenv
+from pydantic import field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
-load_dotenv()
+from utils import paths
 
 
 class ConfigError(Exception):
     """Raised when required configuration is missing or malformed."""
 
 
-def _int_env(name: str, default: int) -> int:
-    try:
-        return int(os.getenv(name, str(default)))
-    except (TypeError, ValueError):
-        return default
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_prefix="SPIDEY_",
+        env_file=paths.PROJECT_ROOT / ".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
+    # ── Telegram ─────────────────────────────────────────────────
+    tg_api_id: int | None = None
+    tg_api_hash: str | None = None
+    tg_bot_token: str | None = None
+    tg_bot_username: str = ""
 
-# ── Telegram ──────────────────────────────────────────────────────
+    # ── Database ─────────────────────────────────────────────────
+    database_url: str = "postgresql+asyncpg://spidey:spidey@localhost:5432/spideybot"
 
-TG_API_ID = os.getenv("TG_API_ID")
-TG_API_HASH = os.getenv("TG_API_HASH")
-TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
-TG_BOT_USERNAME = os.getenv("TG_BOT_USERNAME", "")
+    # ── Security ─────────────────────────────────────────────────
+    session_encrypt_key: str = ""
 
-SESSION_ENCRYPT_KEY = os.getenv("SESSION_ENCRYPT_KEY", "")
+    # ── TeraBox ──────────────────────────────────────────────────
+    terabox_cookie: str = ""
+    terabox_cookies: str = ""  # multi-account, "|"-delimited
+    terabox_jstoken: str = ""
+    terabox_bdstoken: str = ""
+    terabox_transfer: str = "auto"  # auto | aria2 | segmented | single
+    terabox_transfer_min_mb: int = 32
+    terabox_segment_connections: int = 8
+    terabox_aria2_connections: int = 16
 
+    # ── Reddit ───────────────────────────────────────────────────
+    reddit_fallback_client_id: str = ""
+    reddit_fallback_client_secret: str = ""
+    reddit_fallback_refresh_token: str = ""
+    gdl_reddit_client_id: str = ""
+    gdl_reddit_client_secret: str = ""
+    gdl_reddit_refresh_token: str = ""
+    reddit_praw_client_id: str = ""
+    reddit_praw_client_secret: str = ""
+    reddit_praw_refresh_token: str = ""
+    gdl_cookies_from_browser: str = ""
 
-def validate_telegram_config() -> int:
-    """Validate Telegram credentials and return ``api_id`` as an int.
+    # ── Download management ──────────────────────────────────────
+    max_concurrent_downloads: int = 20
 
-    Raises:
-        ConfigError: if any required value is missing or malformed.
-    """
-    if not (TG_API_ID and TG_API_HASH and TG_BOT_TOKEN):
-        raise ConfigError(
-            "Missing Telegram configuration: "
-            "TG_API_ID, TG_API_HASH and TG_BOT_TOKEN are all required."
-        )
-    try:
-        return int(TG_API_ID)
-    except (TypeError, ValueError) as exc:
-        raise ConfigError("TG_API_ID must be a valid integer.") from exc
+    # ── Queue / jobs ─────────────────────────────────────────────
+    job_lease_seconds: int = 300
+    job_max_attempts: int = 3
 
+    # ── Admin ────────────────────────────────────────────────────
+    admin_ids: list[int] = []
 
-# ── TeraBox ───────────────────────────────────────────────────────
+    # ── Rate limiting ────────────────────────────────────────────
+    rate_limit_per_minute: int = 12
 
-TERABOX_COOKIE = os.getenv("TERABOX_COOKIE")
-TERABOX_JSTOKEN = os.getenv("TERABOX_JSTOKEN")
-TERABOX_BDSTOKEN = os.getenv("TERABOX_BDSTOKEN")
+    # ── User sessions (on-demand lifecycle) ──────────────────────
+    session_max_live: int = 50
+    session_idle_seconds: int = 600
 
-# Optional multi-account support. One cookie per account, separated by a
-# pipe ("|"). Each entry is a full cookie string whose important part is
-# `ndus=...` (see parse_cookies in downloader/terabox.py). Example:
-#   TERABOX_COOKIES="ndus=AAA|ndus=BBB|ndus=CCC"
-# If unset, falls back to the legacy single TERABOX_COOKIE.
-_TERABOX_COOKIE_DELIMITER = "|"
-TERABOX_COOKIES = os.getenv("TERABOX_COOKIES", "")
+    # ── Retention ────────────────────────────────────────────────
+    downloads_retention_days: int = 3
 
+    # ── Referral ─────────────────────────────────────────────────
+    referral_daily_bonus: int = 10
+    referral_bonus_days: int = 30
 
-def _split_terabox_cookies(raw: str) -> list[str]:
-    """Split a delimited cookie string into non-empty, trimmed entries."""
-    if not raw:
+    @field_validator("admin_ids", mode="before")
+    @classmethod
+    def _parse_admin_ids(cls, value):
+        if value is None or value == "":
+            return []
+        if isinstance(value, str):
+            return [int(x) for x in value.split(",") if x.strip().isdigit()]
+        return value
+
+    # ── Helpers ──────────────────────────────────────────────────
+
+    def validate_telegram(self) -> int:
+        """Validate Telegram credentials and return ``api_id`` as an int."""
+        if not (self.tg_api_id and self.tg_api_hash and self.tg_bot_token):
+            raise ConfigError(
+                "Missing Telegram configuration: SPIDEY_TG_API_ID, "
+                "SPIDEY_TG_API_HASH and SPIDEY_TG_BOT_TOKEN are all required."
+            )
+        return int(self.tg_api_id)
+
+    def terabox_account_cookies(self) -> list[str]:
+        """Return one cookie string per TeraBox account to use."""
+        accounts = [p.strip() for p in self.terabox_cookies.split("|") if p.strip()]
+        if accounts:
+            return accounts
+        if self.terabox_cookie:
+            return [self.terabox_cookie.strip()]
         return []
-    return [part.strip() for part in raw.split(_TERABOX_COOKIE_DELIMITER) if part.strip()]
 
 
-def terabox_account_cookies() -> list[str]:
-    """Return one cookie string per TeraBox account to use.
-
-    Prefers the delimited ``TERABOX_COOKIES``; falls back to the legacy
-    single ``TERABOX_COOKIE`` when no multi-account list is configured.
-    """
-    accounts = _split_terabox_cookies(TERABOX_COOKIES)
-    if accounts:
-        return accounts
-    if TERABOX_COOKIE:
-        return [TERABOX_COOKIE.strip()]
-    return []
-
-# ── TeraBox transfer engine ──────────────────────────────────────
-# TERABOX_TRANSFER: auto | aria2 | segmented | single
-#   auto       -> native aiohttp segmented for files >= TERABOX_TRANSFER_MIN_MB
-#                 (aria2 used only as a fallback), else single-stream.
-#   aria2      -> always delegate to the aria2c binary (needs aria2 installed).
-#   segmented  -> native parallel Range download (multi-connection).
-#   single     -> original single-stream behaviour.
-TERABOX_TRANSFER = os.getenv("TERABOX_TRANSFER", "auto").strip().lower()
-TERABOX_TRANSFER_MIN_MB = _int_env("TERABOX_TRANSFER_MIN_MB", 32)
-TERABOX_TRANSFER_MIN_BYTES = TERABOX_TRANSFER_MIN_MB * 1024 * 1024
-TERABOX_SEGMENT_CONNECTIONS = _int_env("TERABOX_SEGMENT_CONNECTIONS", 8)
-TERABOX_ARIA2_CONNECTIONS = _int_env("TERABOX_ARIA2_CONNECTIONS", 16)
-
-# ── Reddit (fallback chain) ───────────────────────────────────────
-
-REDDIT_FALLBACK_CLIENT_ID = os.getenv(
-    "REDDIT_FALLBACK_CLIENT_ID", os.getenv("REDDIT_GDL_CLIENT_ID", "")
-)
-REDDIT_FALLBACK_CLIENT_SECRET = os.getenv(
-    "REDDIT_FALLBACK_CLIENT_SECRET", os.getenv("REDDIT_GDL_CLIENT_SECRET", "")
-)
-REDDIT_FALLBACK_REFRESH_TOKEN = os.getenv(
-    "REDDIT_FALLBACK_REFRESH_TOKEN", os.getenv("REDDIT_GDL_REFRESH_TOKEN", "")
-)
-
-GDL_REDDIT_CLIENT_ID = os.getenv("GDL_REDDIT_CLIENT_ID", REDDIT_FALLBACK_CLIENT_ID)
-GDL_REDDIT_CLIENT_SECRET = os.getenv("GDL_REDDIT_CLIENT_SECRET", REDDIT_FALLBACK_CLIENT_SECRET)
-GDL_REDDIT_REFRESH_TOKEN = os.getenv("GDL_REDDIT_REFRESH_TOKEN", REDDIT_FALLBACK_REFRESH_TOKEN)
-
-REDDIT_PRAW_CLIENT_ID = os.getenv("REDDIT_PRAW_CLIENT_ID", REDDIT_FALLBACK_CLIENT_ID)
-REDDIT_PRAW_CLIENT_SECRET = os.getenv("REDDIT_PRAW_CLIENT_SECRET", REDDIT_FALLBACK_CLIENT_SECRET)
-REDDIT_PRAW_REFRESH_TOKEN = os.getenv("REDDIT_PRAW_REFRESH_TOKEN", REDDIT_FALLBACK_REFRESH_TOKEN)
-
-# ── Download management ───────────────────────────────────────────
-
-MAX_CONCURRENT_DOWNLOADS = _int_env("MAX_CONCURRENT_DOWNLOADS", 20)
-MAX_CONCURRENT_FREE_TOTAL = _int_env("MAX_CONCURRENT_FREE_TOTAL", 10)
-
-SIZE_LIMIT_FREE = _int_env("MAX_SIZE_FREE_MB", 100) * 1024 * 1024
-SIZE_LIMIT_PREMIUM = _int_env("MAX_SIZE_PREMIUM_MB", 1000) * 1024 * 1024
-
-CONCURRENT_LIMIT_FREE = _int_env("MAX_CONCURRENT_FREE", 1)
-CONCURRENT_LIMIT_PREMIUM = _int_env("MAX_CONCURRENT_PREMIUM", 5)
-
-# ── Admin ─────────────────────────────────────────────────────────
-
-ADMIN_IDS: list[int] = [
-    int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()
-]
-
-# ── Constants ─────────────────────────────────────────────────────
-
-TERABOX_DOMAINS = ("terabox", "nephobox", "dubox", "1024tera", "teraboxapp")
+@lru_cache
+def get_settings() -> Settings:
+    """Return the cached settings instance."""
+    return Settings()
 
 
-# ── Helpers ───────────────────────────────────────────────────────
-
-def is_terabox_url(url: str) -> bool:
-    """Return True when *url* belongs to a TeraBox domain."""
-    lowered = url.lower()
-    return any(domain in lowered for domain in TERABOX_DOMAINS)
-
-
-def _format_size_limit(size_bytes: float) -> str:
-    mb = size_bytes / (1024 * 1024)
-    return f"{mb / 1024:.0f}GB" if mb >= 1000 else f"{mb:.0f}MB"
-
-
-def get_size_limit(is_premium: bool, is_admin: bool) -> tuple[float, str]:
-    """Return ``(max_size_bytes, human_label)`` for a user tier."""
-    if is_admin:
-        return float("inf"), "Unlimited"
-    if is_premium:
-        return float(SIZE_LIMIT_PREMIUM), _format_size_limit(SIZE_LIMIT_PREMIUM)
-    return float(SIZE_LIMIT_FREE), _format_size_limit(SIZE_LIMIT_FREE)
-
-
-def get_concurrent_limit(is_premium: bool) -> int:
-    """Return the per-user concurrent download limit for a tier."""
-    return CONCURRENT_LIMIT_PREMIUM if is_premium else CONCURRENT_LIMIT_FREE
+def is_admin(user_id: int) -> bool:
+    """Return True when *user_id* is in the admin allowlist."""
+    return user_id in get_settings().admin_ids
