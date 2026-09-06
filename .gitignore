@@ -60,3 +60,7 @@ downloads/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+
+# ── graphify 
+graphify-out/*
