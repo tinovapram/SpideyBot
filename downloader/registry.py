@@ -34,6 +34,7 @@ from downloader.site.tumblr import TumblrDownloader
 from downloader.site.twitter import TwitterDownloader
 from downloader.site.vidara import VidaraDownloader
 from downloader.site.youtube import YouTubeDownloader
+from downloader.site.mega import MegaDownloader
 
 
 def _host_matcher(substrings: tuple[str, ...]):
@@ -73,6 +74,7 @@ def _build_entries():
         ("streamwish", StreamWishDownloader(), StreamWishDownloader.matches),
         ("luluvdoo", LuluvdooDownloader(), LuluvdooDownloader.matches),
         ("bysejikuar", BysejikuarDownloader(), BysejikuarDownloader.matches),
+        _plain(MegaDownloader, ("mega.nz", "mega.co.nz")),
         (
             "reddit",
             RedditDownloader(

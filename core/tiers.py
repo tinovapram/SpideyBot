@@ -63,7 +63,7 @@ SOCIAL_SITES = frozenset({
 
 VIDEO_HOST_SITES = frozenset({
     "doodstream", "streamtape", "mixdrop", "streamwish", "luluvdoo",
-    "bysejikuar", "vidara", "telegram",
+    "bysejikuar", "vidara", "telegram", "mega",
 })
 
 HEAVY_SITES = frozenset({"terabox"})
