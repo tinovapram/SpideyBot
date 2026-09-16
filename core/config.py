@@ -67,7 +67,7 @@ class Settings(BaseSettings):
     job_max_attempts: int = 3
 
     # ── Admin ────────────────────────────────────────────────────
-    admin_ids: list[int] = []
+    admin_ids: str = ""
 
     # ── Rate limiting ────────────────────────────────────────────
     rate_limit_per_minute: int = 12
@@ -83,14 +83,11 @@ class Settings(BaseSettings):
     referral_daily_bonus: int = 10
     referral_bonus_days: int = 30
 
-    @field_validator("admin_ids", mode="before")
-    @classmethod
-    def _parse_admin_ids(cls, value):
-        if value is None or value == "":
+    def admin_id_list(self) -> list[int]:
+        """Parse comma-separated ``admin_ids`` string into a list."""
+        if not self.admin_ids:
             return []
-        if isinstance(value, str):
-            return [int(x) for x in value.split(",") if x.strip().isdigit()]
-        return value
+        return [int(x) for x in self.admin_ids.split(",") if x.strip().isdigit()]
 
     # ── Helpers ──────────────────────────────────────────────────
 
@@ -116,4 +113,4 @@ def get_settings() -> Settings:
 
 def is_admin(user_id: int) -> bool:
     """Return True when *user_id* is in the admin allowlist."""
-    return user_id in get_settings().admin_ids
+    return user_id in get_settings().admin_id_list()
