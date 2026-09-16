@@ -1,0 +1,4 @@
+# Force LF for files that must be Unix-only
+*.sh    text eol=lf
+*.bash  text eol=lf
+Dockerfile* text eol=lf

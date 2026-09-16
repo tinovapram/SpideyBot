@@ -51,6 +51,9 @@ COPY --chown=spideybot:spideybot . .
 RUN mkdir -p data downloads user_sessions config/runtime config/cyberdrop-dl .gallery-dl \
     && chown -R spideybot:spideybot data downloads user_sessions config/runtime config/cyberdrop-dl .gallery-dl
 
+# Strip BOM + CRLF from shell scripts (safety net for Windows builds)
+RUN sed -i 's/\r$//' entrypoint.sh && sed -i '1s/^\xEF\xBB\xBF//' entrypoint.sh
+
 COPY --chown=spideybot:spideybot entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
