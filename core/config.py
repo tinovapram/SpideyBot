@@ -31,7 +31,6 @@ class Settings(BaseSettings):
     tg_api_id: int | None = None
     tg_api_hash: str | None = None
     tg_bot_token: str | None = None
-    tg_bot_username: str = ""
 
     # ── Database ─────────────────────────────────────────────────
     database_url: str = "postgresql+asyncpg://spidey:spidey@localhost:5432/spideybot"
@@ -40,8 +39,7 @@ class Settings(BaseSettings):
     session_encrypt_key: str = ""
 
     # ── TeraBox ──────────────────────────────────────────────────
-    terabox_cookie: str = ""
-    terabox_cookies: str = ""  # multi-account, "|"-delimited
+    terabox_cookies: str = ""  # single or multi-account, "|"-delimited
     terabox_jstoken: str = ""
     terabox_bdstoken: str = ""
     terabox_transfer: str = "auto"  # auto | aria2 | segmented | single
@@ -107,12 +105,7 @@ class Settings(BaseSettings):
 
     def terabox_account_cookies(self) -> list[str]:
         """Return one cookie string per TeraBox account to use."""
-        accounts = [p.strip() for p in self.terabox_cookies.split("|") if p.strip()]
-        if accounts:
-            return accounts
-        if self.terabox_cookie:
-            return [self.terabox_cookie.strip()]
-        return []
+        return [p.strip() for p in self.terabox_cookies.split("|") if p.strip()]
 
 
 @lru_cache

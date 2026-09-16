@@ -1,0 +1,13 @@
+download_folder: downloads
+deep_scrape: false
+delete_partial_files: true
+ignore_history: true
+ignore_hashes: true
+mtime: false
+max_thread_depth: 0
+subfolders:
+  create: false
+sort:
+  enabled: false
+hashing:
+  enabled: off

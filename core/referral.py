@@ -25,10 +25,9 @@ from core.models import Referral
 # ── Link / payload helpers ──────────────────────────────────────
 
 
-def referral_link(user_id: int) -> str:
-    """Build the deep-link for *user_id* using the configured bot username."""
-    bot = get_settings().tg_bot_username
-    return f"https://t.me/{bot}?start={user_id}"
+def referral_link(user_id: int, bot_username: str) -> str:
+    """Build the deep-link for *user_id* using the bot username."""
+    return f"https://t.me/{bot_username}?start={user_id}"
 
 
 def parse_start_payload(text: str) -> int | None:
@@ -131,7 +130,7 @@ async def bonus_downloads(session: AsyncSession, user_id: int) -> int:
 # ── Stats ───────────────────────────────────────────────────────
 
 
-async def referral_stats(session: AsyncSession, user_id: int) -> dict:
+async def referral_stats(session: AsyncSession, user_id: int, *, bot_username: str) -> dict:
     """Return referral statistics for *user_id*."""
     total_count = await session.scalar(
         select(func.count()).select_from(Referral).where(Referral.referrer_id == user_id)
@@ -148,7 +147,7 @@ async def referral_stats(session: AsyncSession, user_id: int) -> dict:
     ) or 0
 
     return {
-        "link": referral_link(user_id),
+        "link": referral_link(user_id, bot_username),
         "total": total_count,
         "credited": credited_count,
         "pending": pending_count,

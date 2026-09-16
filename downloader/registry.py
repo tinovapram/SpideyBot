@@ -35,6 +35,7 @@ from downloader.site.twitter import TwitterDownloader
 from downloader.site.vidara import VidaraDownloader
 from downloader.site.youtube import YouTubeDownloader
 from downloader.site.mega import MegaDownloader
+from downloader.site.cyberdrop import CyberdropDLDownloader
 
 
 def _host_matcher(substrings: tuple[str, ...]):
@@ -84,6 +85,12 @@ def _build_entries():
             ),
             _host_matcher(("reddit.com", "redd.it")),
         ),
+        _plain(CyberdropDLDownloader, (
+            "cyberdrop.me", "cyberdrop.to", "cyberdrop.cr",
+            "bunkrr.su", "bunkr.",
+            "cyberfile.me", "iceyfile.",
+            "gofile.io", "saint2faucet.",
+        )),
     ]
 
 

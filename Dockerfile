@@ -48,8 +48,8 @@ WORKDIR /app
 
 COPY --chown=spideybot:spideybot . .
 
-RUN mkdir -p data downloads user_sessions config/runtime .gallery-dl \
-    && chown -R spideybot:spideybot data downloads user_sessions config/runtime .gallery-dl
+RUN mkdir -p data downloads user_sessions config/runtime config/cyberdrop-dl .gallery-dl \
+    && chown -R spideybot:spideybot data downloads user_sessions config/runtime config/cyberdrop-dl .gallery-dl
 
 COPY --chown=spideybot:spideybot entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh

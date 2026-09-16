@@ -28,6 +28,7 @@ alembic>=1.13.0
 # ── Media downloaders (CLI tools) ──────────────────────────────
 gallery-dl
 yt-dlp[default,curl-cffi]
+cyberdrop-dl-patched
 
 # ── Reddit ──────────────────────────────────────────────────────
 praw
@@ -35,6 +36,9 @@ praw
 # ── TeraBox ────────────────────────────────────────────────────
 pycryptodomex
 curl_cffi>=0.16.0
+
+# ── Link bypass ──────────────────────────────────────────────
+playwright>=1.40.0
 
 # ── Testing ────────────────────────────────────────────────────
 pytest

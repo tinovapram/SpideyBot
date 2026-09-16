@@ -52,6 +52,7 @@ _HELP_COMMANDS = """
     /account — Account & session status
     /quota — View your usage & limits
     /sites — List supported platforms
+    /bypass *URL* — Resolve link shorteners to final destination
     /referral — Get your invite link & stats
 """
 _HELP_NOTES = """
@@ -339,9 +340,10 @@ async def sites_handler(event):
 async def referral_handler(event):
     """Show referral link and stats."""
     user_id = event.sender_id
+    me = await _client.get_me()
     async with session_scope() as session:
         user = await get_or_create_user(session, user_id, event.sender.username)
-        stats = await referral_stats(session, user_id)
+        stats = await referral_stats(session, user_id, bot_username=me.username)
 
     settings = get_settings()
     lines = [

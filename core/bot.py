@@ -17,6 +17,7 @@ from core.config import get_settings, is_admin
 from core.logging import setup_logging
 from core.worker import DownloadManager
 from handler.admin import register_admin_handlers
+from handler.bypass import register_bypass_handler
 from handler.cookie import register_cookie_handlers
 from handler.login import register_login_handlers
 from handler.outgoing import set_download_manager
@@ -61,16 +62,17 @@ if _account_cookies:
             terabox_downloader = TeraBoxAccountPool(downloaders)
             logger.info("TeraBox pool initialized", accounts=len(downloaders))
         else:
-            logger.warning("TERABOX_COOKIE(s) present but empty — TeraBox features unavailable")
+            logger.warning("TERABOX_COOKIES present but empty — TeraBox features unavailable")
     except Exception as exc:
         logger.error("Failed to initialize TeraBox downloader", error=str(exc))
 else:
-    logger.warning("TERABOX_COOKIE not set — TeraBox features unavailable")
+    logger.warning("TERABOX_COOKIES not set — TeraBox features unavailable")
 
 download_manager = DownloadManager(bot, terabox_downloader)
 
 register_user_handlers(bot, download_manager)
 register_admin_handlers(bot)
+register_bypass_handler(bot)
 register_cookie_handlers(bot)
 register_login_handlers(bot)
 set_download_manager(download_manager)

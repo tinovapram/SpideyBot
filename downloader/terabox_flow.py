@@ -47,7 +47,7 @@ async def run_terabox(task, client, downloader) -> None:
     if downloader is None:
         await status.close(
             "⚠️ **SpideyBot: TeraBox Downloader is not configured.**\n"
-            "Please set `TERABOX_COOKIE` (or `TERABOX_COOKIES`) in the `.env` file."
+            "Please set `TERABOX_COOKIES` in the `.env` file."
         )
         return
 

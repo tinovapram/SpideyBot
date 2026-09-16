@@ -64,12 +64,10 @@ All settings use the `SPIDEY_` env prefix. Copy `.env.example` to `.env` and fil
 | `SPIDEY_TG_API_ID` | Yes | Telegram API ID from [my.telegram.org](https://my.telegram.org) |
 | `SPIDEY_TG_API_HASH` | Yes | Telegram API hash |
 | `SPIDEY_TG_BOT_TOKEN` | Yes | Bot token from [@BotFather](https://t.me/BotFather) |
-| `SPIDEY_TG_BOT_USERNAME` | Yes | Bot username (without @) |
 | `SPIDEY_DATABASE_URL` | Yes | PostgreSQL connection string |
 | `SPIDEY_SESSION_ENCRYPT_KEY` | Yes | Fernet key for cookie encryption |
 | `SPIDEY_ADMIN_IDS` | Yes | Comma-separated Telegram user IDs |
-| `SPIDEY_TERABOX_COOKIE` | No | Default TeraBox cookie |
-| `SPIDEY_TERABOX_COOKIES` | No | Multi-account TeraBox cookies (`\|`-delimited) |
+| `SPIDEY_TERABOX_COOKIES` | No | TeraBox cookie(s) — single or `\|`-delimited for multi-account |
 
 ## User tiers
 
