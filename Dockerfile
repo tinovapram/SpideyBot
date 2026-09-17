@@ -37,10 +37,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     atomicparsley \
     procps \
     gosu \
+    libnss3 \
+    libatk-bridge2.0-0 \
+    libdrm2 \
+    libxkbcommon0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxrandr2 \
+    libgbm1 \
+    libpango-1.0-0 \
+    libasound2 \
+    libatspi2.0-0 \
+    libxshmfence1 \
+    fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=deno /deno /usr/local/bin/deno
 COPY --from=builder /install /usr/local
+
+# Playwright Chromium (for /bypass link-shortener resolution)
+RUN playwright install chromium
 
 RUN groupadd -r spideybot && useradd -r -g spideybot -d /app -m spideybot
 
