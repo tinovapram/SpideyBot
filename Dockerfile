@@ -55,8 +55,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=deno /deno /usr/local/bin/deno
 COPY --from=builder /install /usr/local
 
+# Set shared path so both root (build time) and spideybot (runtime) find the browser
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+
 # Playwright Chromium (for /bypass link-shortener resolution)
-RUN playwright install chromium
+RUN playwright install chromium && chmod -R 777 /ms-playwright
 
 RUN groupadd -r spideybot && useradd -r -g spideybot -d /app -m spideybot
 
