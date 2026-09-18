@@ -337,13 +337,38 @@ async def sites_handler(event):
 
 # ── /referral ───────────────────────────────────────────────────────────────────
 
+_bot_username: str | None = None
+
+
+async def _resolve_bot_username() -> str | None:
+    """Return the bot's own @username, memoised for the process lifetime.
+
+    `get_me()` is a network round-trip and the username never changes while the
+    bot runs, so resolve it once. A failed lookup is not cached, so it retries
+    on the next call.
+    """
+    global _bot_username
+    if _bot_username is None:
+        me = await _client.get_me()
+        _bot_username = (getattr(me, "username", None) or None) if me else None
+    return _bot_username
+
+
 async def referral_handler(event):
     """Show referral link and stats."""
     user_id = event.sender_id
-    me = await _client.get_me()
+
+    bot_username = await _resolve_bot_username()
+    if not bot_username:
+        await event.respond(
+            "⚠️ **Can't build your invite link.**\n"
+            "Invite links need a public @username for the bot."
+        )
+        raise events.StopPropagation
+
     async with session_scope() as session:
-        user = await get_or_create_user(session, user_id, event.sender.username)
-        stats = await referral_stats(session, user_id, bot_username=me.username)
+        await get_or_create_user(session, user_id, event.sender.username)
+        stats = await referral_stats(session, user_id, bot_username=bot_username)
 
     settings = get_settings()
     lines = [
@@ -378,11 +403,13 @@ async def account_handler(event):
 # ── registration ────────────────────────────────────────────────────────────────
 
 _manager: DownloadManager
+_client: TelegramClient
 
 
 def register_user_handlers(client: TelegramClient, manager: DownloadManager) -> None:
-    global _manager
+    global _manager, _client
     _manager = manager
+    _client = client
     client.add_event_handler(start_handler, events.NewMessage(pattern=r"/start"))
     client.add_event_handler(help_handler, events.NewMessage(pattern=r"/help"))
     client.add_event_handler(dl_handler, events.NewMessage(pattern=r"/dl"))
