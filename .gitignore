@@ -45,3 +45,4 @@ downloads/
 user_sessions/
 config/runtime/
 graphify-out/
+.devcontainer/

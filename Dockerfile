@@ -1,7 +1,18 @@
 ﻿# ════════════════════════════════════════════════════════════════════
-# Stage 1: Builder — compile wheels with build-time deps
+# Stage 1: Builder — resolve deps with uv into a relocatable venv
+#
+# Base image is the official python:3.14-slim build with the uv binary layered
+# on top (Debian trixie, CPython 3.14.7 at /usr/local/bin/python), so there is
+# no separate uv-copy stage and builder/runtime cannot drift apart.
 # ════════════════════════════════════════════════════════════════════
-FROM python:3.14-slim AS builder
+FROM ghcr.io/astral-sh/uv:0.12.17-python3.14-trixie-slim AS builder
+
+# Byte-compile on install and copy (not hardlink) so the venv survives the copy
+# into the runtime stage. UV_PYTHON_DOWNLOADS=0 keeps uv on the interpreter the
+# base image already ships instead of fetching a managed one.
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=0
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
@@ -16,18 +27,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 COPY requirements.txt .
-RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+RUN uv venv /opt/venv --python 3.14 --python-preference only-system \
+    && uv pip install --no-cache --python /opt/venv/bin/python -r requirements.txt
 
 # ════════════════════════════════════════════════════════════════════
-# Stage 2: Deno — copy binary only
+# Stage 2: Bun — copy binary only
 # ════════════════════════════════════════════════════════════════════
-FROM denoland/deno:bin AS deno
+FROM oven/bun:1 AS bun
 
 # ════════════════════════════════════════════════════════════════════
 # Stage 3: Runtime — minimal image with non-root user
-# NOTE: must match the builder's Python so installed packages are found.
+# NOTE: same image tag as the builder so the venv's interpreter path (and
+# therefore every console script shebang) stays valid.
 # ════════════════════════════════════════════════════════════════════
-FROM python:3.14-slim
+FROM ghcr.io/astral-sh/uv:0.12.17-python3.14-trixie-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
@@ -92,8 +105,17 @@ RUN which Xvfb \
     && mkdir -p /tmp/.X11-unix \
     && chmod 1777 /tmp/.X11-unix
 
-COPY --from=deno /deno /usr/local/bin/deno
-COPY --from=builder /install /usr/local
+COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
+RUN ln -sf /usr/local/bin/bun /usr/local/bin/bunx
+
+# The venv built in stage 1 (uv already ships in the base image). It is copied
+# to the identical /opt/venv path it was created at, so its shebangs still
+# resolve; putting its bin/ first on PATH makes python, alembic, gallery-dl,
+# yt-dlp and cyberdrop-dl resolve to the venv rather than the base image.
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH" \
+    VIRTUAL_ENV=/opt/venv \
+    UV_PYTHON_DOWNLOADS=0
 
 # Camoufox install dir derives from XDG_CACHE_HOME (platformdirs), so pin it to
 # a shared path both root (build time) and spideybot (runtime) can read.
