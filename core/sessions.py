@@ -173,8 +173,11 @@ async def start_client(user_id: int) -> bool:
 
         _active_clients[user_id] = client
 
-        from handler.outgoing import register_outgoing_handlers
-        register_outgoing_handlers(client, user_id)
+        # Imported lazily: handler.handler imports core.sessions at module level.
+        # While this client is live it is the priority path for /dl and /dt, and
+        # the bot side stands down so the command isn't handled twice.
+        from handler.handler import get_handler
+        get_handler().register_user_handlers(client)
         await client.get_dialogs()
 
         logger.info("User client started", user_id=user_id)

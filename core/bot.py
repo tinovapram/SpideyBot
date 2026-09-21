@@ -13,15 +13,15 @@ import structlog
 from telethon import TelegramClient
 
 from core import config, db, sessions
-from core.config import get_settings, is_admin
+from core.config import get_settings
 from core.logging import setup_logging
 from core.worker import DownloadManager
+
 from handler.admin import register_admin_handlers
 from handler.bypass import register_bypass_handler
 from handler.cookie import register_cookie_handlers
+from handler.handler import install
 from handler.login import register_login_handlers
-from handler.outgoing import set_download_manager
-from handler.user import register_user_handlers
 from utils import paths
 
 setup_logging()
@@ -70,12 +70,14 @@ else:
 
 download_manager = DownloadManager(bot, terabox_downloader)
 
-register_user_handlers(bot, download_manager)
+# `handler` owns the command handlers; `install` also makes it reachable from
+# core.sessions so user clients can attach their own handlers.
+handler = install(bot, download_manager)
+handler.register_bot_handlers()
 register_admin_handlers(bot)
 register_bypass_handler(bot)
 register_cookie_handlers(bot)
 register_login_handlers(bot)
-set_download_manager(download_manager)
 logger.info("All handlers registered")
 
 _shutdown_event = asyncio.Event()

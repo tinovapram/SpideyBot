@@ -1,0 +1,490 @@
+"""
+User-facing command handlers: /start, /help, /dl, /dt, /cancel, /status,
+/account, /quota, /sites, /referral.
+
+``Handler`` owns both sides of the bot:
+
+* :meth:`Handler.register_bot_handlers` — the slash commands, on the shared bot
+  client.
+* :meth:`Handler.register_user_handlers` — ``/dl`` and ``/dt`` on a *user's own*
+  client (see ``core.sessions``).
+
+``/dl`` and ``/dt`` therefore exist twice. A live user session is the priority
+path: the user's client sees the command as an outgoing message and runs it, so
+the bot handler checks :func:`core.sessions.is_client_active` and stands down.
+Without that check the same link would be queued twice.
+
+Call :func:`install` once at startup. User clients reach that instance through
+:func:`get_handler`, which keeps a single ``DownloadManager`` behind both sides.
+"""
+
+from __future__ import annotations
+
+from telethon import TelegramClient, events
+from telethon.tl.custom import Button
+
+import structlog
+from core import sessions
+from core.config import get_settings, is_admin
+from core.db import session_scope
+from core.models import User, get_or_create_user
+from core.quota import get_snapshot
+from core.referral import referral_stats
+from core.tiers import (
+    ALL_SITES, HEAVY_SITES, SOCIAL_SITES, VIDEO_HOST_SITES, size_limit,
+)
+from core.worker import DownloadManager
+
+logger = structlog.get_logger(__name__)
+
+# ── pricing / copy ────────────────────────────────────────────────────────────
+
+_FREE_NOTE = "🆓 Free tier: one file at a time, size limit per download."
+_PRO_NOTE = (
+    "✨ Pro — ⬆️ higher limits + faster queues.\n"
+    "    💰 Upgrade: /upgrade"
+)
+_PREMIUM_NOTE = (
+    "💎 Premium — ⬆️ highest limits + priority queue.\n"
+    "    💰 Upgrade: /upgrade"
+)
+
+_HELP_HEADER = (
+    "**Welcome to SpideyBot**\n"
+    "Download videos, files, and media from 30+ platforms — including Terabox, "
+    "YouTube, Reddit, Instagram, and more.\n"
+)
+_HELP_COMMANDS = """
+**Essential commands**
+
+    /start  — Sign up or refresh your status
+    /help   — Show this help guide
+    /dl *URL*  — Download a file
+    /dt *URL*  — Download and auto-split into 1 GB chunks
+    /cancel *ID*  — Cancel a queued download
+    /status — View your active downloads
+    /account — Account & session status
+    /quota — View your usage & limits
+    /sites — List supported platforms
+    /bypass *URL* — Resolve link shorteners to final destination
+    /referral — Get your invite link & stats
+"""
+_HELP_NOTES = """
+**Notes**
+
+    • One file at a time. Large files are split automatically if needed.
+    • Terabox links require a logged-in account — use /account to manage sessions.
+"""
+_HELP_ADMIN = """
+
+**Admin only**
+
+    /stats  — View live download statistics
+    /addpremium — Grant Pro to a user
+    /removepremium — Revoke Pro from a user
+    /checkpremium — Check a user's premium status
+"""
+
+_USAGE_DL = "**Usage:** /dl *URL*\n\nProvide a link to download."
+_USAGE_DT = "**Usage:** /dt *URL*\n\nProvide a link to download (split into 1 GB chunks)."
+_USAGE_CANCEL = "**Usage:** /cancel *ID*\n\nView your active downloads with /status."
+
+
+def _sender_username(event) -> str | None:
+    """Sender's @username, or ``None`` for private accounts."""
+    sender = event.sender
+    return getattr(sender, "username", None) if sender else None
+
+
+class Handler:
+    """Bot-side command handlers plus the user-side auto-download handlers."""
+
+    def __init__(self, client: TelegramClient, manager: DownloadManager) -> None:
+        self.client = client
+        self.manager = manager
+        self._bot_username: str | None = None
+
+    # ── shared helpers ────────────────────────────────────────────────────────
+
+    async def has_premium_access(self, user_id: int) -> bool:
+        """True when *user_id* is an admin or has pro/premium tier."""
+        if is_admin(user_id):
+            return True
+        async with session_scope() as session:
+            user = await session.get(User, user_id)
+            return user is not None and user.tier in ("pro", "premium")
+
+    async def _tier_label(self, user_id: int) -> str:
+        if is_admin(user_id):
+            return "👑 Admin"
+        async with session_scope() as session:
+            user = await session.get(User, user_id)
+            if user and user.tier in ("pro", "premium"):
+                return f"✨ {user.tier.title()}"
+        return "👤 Free"
+
+    async def _session_badge(self, user_id: int) -> str:
+        if sessions.is_client_active(user_id):
+            return "🟢 Connected"
+        if sessions.has_session(user_id):
+            return "🟡 Session saved (not running)"
+        return "🔴 No session"
+
+    async def _resolve_bot_username(self) -> str | None:
+        """Return the bot's own @username, cached for the process lifetime.
+
+        ``get_me()`` is a network round-trip and the username is fixed while the
+        bot runs, so resolve it once. Failures aren't cached, so they retry.
+        """
+        if self._bot_username is None:
+            me = await self.client.get_me()
+            self._bot_username = (getattr(me, "username", None) or None) if me else None
+        return self._bot_username
+
+    # ── download plumbing ─────────────────────────────────────────────────────
+
+    async def _enqueue_download(self, event, link: str) -> None:
+        """Queue *link* for the sender and report back the queue position."""
+        user_id = event.sender_id
+        async with session_scope() as session:
+            user = await get_or_create_user(session, user_id, _sender_username(event))
+            is_premium = user.tier in ("pro", "premium")
+
+        status_msg = await event.respond("⏳ **SpideyBot:** Queuing download…")
+        # add_task returns (status, task) — the id lives on the task.
+        _, task = await self.manager.add_task(
+            user_id, event, link,
+            is_premium=is_premium,
+            is_admin=is_admin(user_id),
+            status_msg=status_msg,
+        )
+        position = self.manager.get_queue_position(task.entry_id)
+        if position > 0:
+            await status_msg.edit(
+                f"📋 Queued — position **#{position}**. "
+                f"Send `/cancel {task.entry_id}` to abort."
+            )
+
+    async def _link_command(self, event, *, usage: str) -> None:
+        """Shared /dl and /dt implementation: parse the URL and enqueue it."""
+        args = (event.text or "").split(maxsplit=1)
+        if len(args) < 2 or not args[1].strip():
+            await event.respond(usage)
+            raise events.StopPropagation
+        await self._enqueue_download(event, args[1].strip())
+        raise events.StopPropagation
+
+    # ── /start ────────────────────────────────────────────────────────────────
+
+    async def start_handler(self, event) -> None:
+        user_id = event.sender_id
+
+        async with session_scope() as session:
+            user = await get_or_create_user(session, user_id, _sender_username(event))
+
+        badge = await self._tier_label(user_id)
+        lines = [
+            f"**Welcome, {event.sender.first_name}!**",
+            "",
+            badge,
+            "",
+        ]
+        if user.tier == "free":
+            lines.append(_FREE_NOTE)
+        lines.append(_HELP_COMMANDS)
+        buttons = [
+            [Button.url("⭐ Upgrade", "https://t.me/SpideyBot?start=upgrade")],
+        ]
+        await event.respond("\n".join(lines), buttons=buttons)
+        raise events.StopPropagation
+
+    # ── /help ─────────────────────────────────────────────────────────────────
+
+    async def help_handler(self, event) -> None:
+        user_id = event.sender_id
+
+        async with session_scope() as session:
+            user = await get_or_create_user(session, user_id, _sender_username(event))
+
+        tier_label = await self._tier_label(user_id)
+        _, size_label = size_limit(user.tier, is_admin(user_id))
+        session_label = await self._session_badge(user_id)
+
+        lines = [
+            _HELP_HEADER,
+            f"    Tier: {tier_label}",
+            f"    Per-file limit: {size_label}",
+            f"    Sessions: {session_label}",
+            "",
+            _HELP_COMMANDS,
+            _HELP_NOTES,
+        ]
+        if is_admin(user_id):
+            lines.append(_HELP_ADMIN)
+        await event.respond("\n".join(lines))
+        raise events.StopPropagation
+
+    # ── /dl and /dt (bot side) ────────────────────────────────────────────────
+    #
+    # Both commands exist twice: here, and on the user's own client. When a user
+    # session is live the user's client sees their own /dl as an outgoing
+    # message and handles it, so the bot stands down — otherwise the same link
+    # is queued twice. When no session is running there is nothing to arbitrate:
+    # only the bot can see the command at all.
+
+    def _handled_by_user_session(self, event) -> bool:
+        """True when the sender has a live user client that will handle this."""
+        return sessions.is_client_active(event.sender_id)
+
+    async def dl_handler(self, event) -> None:
+        """Bot-side /dl — stands down when the user's own session has it."""
+        if self._handled_by_user_session(event):
+            return
+        await self._link_command(event, usage=_USAGE_DL)
+
+    async def dt_handler(self, event) -> None:
+        """Bot-side /dt — stands down when the user's own session has it."""
+        if self._handled_by_user_session(event):
+            return
+        await self._link_command(event, usage=_USAGE_DT)
+
+    # ── /cancel ───────────────────────────────────────────────────────────────
+
+    async def cancel_handler(self, event) -> None:
+        args = (event.text or "").split(maxsplit=1)
+        if len(args) < 2 or not args[1].strip():
+            await event.respond(_USAGE_CANCEL)
+            raise events.StopPropagation
+
+        raw = args[1].strip()
+        if not raw.isdigit():
+            await event.respond(
+                "⚠️ **Invalid ID** — pass the number shown by /status."
+            )
+            raise events.StopPropagation
+
+        entry_id = int(raw)
+        task = self.manager.get_task(entry_id)
+        if task is None:
+            await event.respond(f"⚠️ No active download with ID `{entry_id}`.")
+        elif task.user_id != event.sender_id:
+            await event.respond("⚠️ That download belongs to another user.")
+        else:
+            await self.manager.cancel_task(entry_id)
+            await event.respond(f"❌ Cancelled download **{entry_id}**.")
+        raise events.StopPropagation
+
+    # ── /status ───────────────────────────────────────────────────────────────
+
+    async def status_handler(self, event) -> None:
+        tasks = self.manager.user_tasks(event.sender_id)
+        if not tasks:
+            await event.respond("✅ No active downloads.")
+            raise events.StopPropagation
+
+        lines = ["**Active downloads:**\n"]
+        for task in tasks:
+            state = "❌ Cancelled" if task.is_cancelled else "🔄 Running"
+            link = task.link if len(task.link) <= 50 else task.link[:50] + "…"
+            lines.append(f"  `{task.entry_id}` — {link} — {state}")
+        await event.respond("\n".join(lines))
+        raise events.StopPropagation
+
+    # ── /account ──────────────────────────────────────────────────────────────
+
+    async def account_handler(self, event) -> None:
+        badge = await self._session_badge(event.sender_id)
+        lines = [
+            "**Account Status**\n",
+            f"    {badge}\n",
+            "To log in to Terabox, use /login.",
+            "To log out, use /logout.",
+        ]
+        await event.respond("\n".join(lines))
+        raise events.StopPropagation
+
+    # ── /quota ────────────────────────────────────────────────────────────────
+
+    async def quota_handler(self, event) -> None:
+        """Show the user's current usage and tier limits."""
+        user_id = event.sender_id
+        async with session_scope() as session:
+            user = await get_or_create_user(session, user_id, _sender_username(event))
+            snap = await get_snapshot(session, user)
+
+        tier_label = await self._tier_label(user_id)
+
+        def _fmt_bytes(n: int | None) -> str:
+            if n is None:
+                return "∞"
+            if n >= 1024 ** 3:
+                return f"{n / 1024**3:.1f} GB"
+            if n >= 1024 ** 2:
+                return f"{n / 1024**2:.0f} MB"
+            return f"{n} B"
+
+        lines = [
+            "**Quota Status**\n",
+            f"  Tier: {tier_label}",
+        ]
+
+        if snap.policy.daily_downloads is not None:
+            remaining = snap.downloads_remaining
+            lines.append(
+                f"  Downloads today: {snap.downloads_today}/{snap.policy.daily_downloads}"
+                + (f" (+{snap.referral_bonus} bonus)" if snap.referral_bonus else "")
+                + (f"  — {remaining} left" if remaining is not None else "")
+            )
+        else:
+            lines.append(f"  Downloads today: {snap.downloads_today} (∞)")
+
+        if snap.policy.daily_bytes is not None:
+            lines.append(
+                f"  Bandwidth today: {_fmt_bytes(snap.bytes_today)} / "
+                f"{_fmt_bytes(snap.policy.daily_bytes)}"
+            )
+        else:
+            lines.append(f"  Bandwidth today: {_fmt_bytes(snap.bytes_today)} (∞)")
+
+        if snap.policy.monthly_bytes is not None:
+            lines.append(
+                f"  Bandwidth month: {_fmt_bytes(snap.bytes_this_month)} / "
+                f"{_fmt_bytes(snap.policy.monthly_bytes)}"
+            )
+        else:
+            lines.append(f"  Bandwidth month: {_fmt_bytes(snap.bytes_this_month)} (∞)")
+
+        lines.append(f"  Concurrent: {snap.policy.concurrent}")
+        lines.append(f"  Per-file limit: {size_limit(snap.tier, is_admin(user_id))[1]}")
+
+        if not snap.can_download:
+            lines.append("\n⚠️ **Quota reached** — try again tomorrow.")
+
+        await event.respond("\n".join(lines))
+        raise events.StopPropagation
+
+    # ── /sites ────────────────────────────────────────────────────────────────
+
+    async def sites_handler(self, event) -> None:
+        """List supported sites grouped by category."""
+        user_id = event.sender_id
+        async with session_scope() as session:
+            user = await get_or_create_user(session, user_id, _sender_username(event))
+            tier = user.tier if user.tier in ("free", "pro", "premium") else "free"
+
+        def _label(sites: frozenset[str]) -> str:
+            return ", ".join(sorted(sites))
+
+        lines = [
+            "**Supported Platforms**\n",
+            f"  Your tier: **{tier.title()}**\n",
+            f"  📱 Social & video: {_label(SOCIAL_SITES & ALL_SITES)}",
+            f"  🎬 Video hosting: {_label(VIDEO_HOST_SITES & ALL_SITES)}",
+            f"  📦 Heavy / cloud: {_label(HEAVY_SITES & ALL_SITES)}",
+            "",
+            "Send any link with /dl or /dt to download.",
+        ]
+        await event.respond("\n".join(lines))
+        raise events.StopPropagation
+
+    # ── /referral ─────────────────────────────────────────────────────────────
+
+    async def referral_handler(self, event) -> None:
+        """Show the user's invite link and referral stats."""
+        user_id = event.sender_id
+
+        bot_username = await self._resolve_bot_username()
+        if not bot_username:
+            await event.respond(
+                "⚠️ **Can't build your invite link.**\n"
+                "Invite links need a public @username for the bot."
+            )
+            raise events.StopPropagation
+
+        async with session_scope() as session:
+            await get_or_create_user(session, user_id, _sender_username(event))
+            stats = await referral_stats(session, user_id, bot_username=bot_username)
+
+        settings = get_settings()
+        lines = [
+            "**Referral Program**\n",
+            f"  🔗 Your link: {stats['link']}",
+            f"  👥 Invited: {stats['total']}",
+            f"  ✅ Credited: {stats['credited']}",
+            f"  ⏳ Pending: {stats['pending']}",
+            "",
+            f"  💰 Bonus: +{settings.referral_daily_bonus} downloads/day per credited invite",
+            f"     (valid for {settings.referral_bonus_days} days after credit)",
+        ]
+        await event.respond("\n".join(lines))
+        raise events.StopPropagation
+
+    # ── user-side handlers (run on the user's own client) ─────────────────────
+    #
+    # No session check here — this *is* the session, and it is the priority
+    # path. `outgoing=True` is the only filter, which keeps the client from
+    # reacting to messages other people send the user.
+
+    async def dl_user_handler(self, event) -> None:
+        """User-side /dl typed from the user's own account."""
+        await self._link_command(event, usage=_USAGE_DL)
+
+    async def dt_user_handler(self, event) -> None:
+        """User-side /dt typed from the user's own account."""
+        await self._link_command(event, usage=_USAGE_DT)
+
+    # ── registration ──────────────────────────────────────────────────────────
+
+    def register_bot_handlers(self) -> None:
+        """Register the slash commands on the shared bot client."""
+        add = self.client.add_event_handler
+        # Telethon compiles string patterns with re.match, so they are already
+        # anchored to the start of the text. `\b` still matters — without it
+        # "/dl" would also fire on "/dload ...". `^\s*` tolerates leading space.
+        add(self.start_handler, events.NewMessage(pattern=r"^\s*/start\b"))
+        add(self.help_handler, events.NewMessage(pattern=r"^\s*/help\b"))
+        add(self.dl_handler, events.NewMessage(pattern=r"^\s*/dl\b"))
+        add(self.dt_handler, events.NewMessage(pattern=r"^\s*/dt\b"))
+        add(self.cancel_handler, events.NewMessage(pattern=r"^\s*/cancel\b"))
+        add(self.status_handler, events.NewMessage(pattern=r"^\s*/status\b"))
+        add(self.account_handler, events.NewMessage(pattern=r"^\s*/account\b"))
+        add(self.quota_handler, events.NewMessage(pattern=r"^\s*/quota\b"))
+        add(self.sites_handler, events.NewMessage(pattern=r"^\s*/sites\b"))
+        add(self.referral_handler, events.NewMessage(pattern=r"^\s*/referral\b"))
+
+    def register_user_handlers(self, client: TelegramClient) -> None:
+        """Attach the download commands to *client* (a user's own client).
+
+        ``outgoing=True`` is the only filter: it stops the client reacting to
+        messages other people send the user. No session check is needed — this
+        client only exists while the session is live, and the bot side stands
+        down for exactly that window.
+        """
+        client.add_event_handler(
+            self.dl_user_handler, events.NewMessage(outgoing=True, pattern=r"^\s*/dl\b")
+        )
+        client.add_event_handler(
+            self.dt_user_handler, events.NewMessage(outgoing=True, pattern=r"^\s*/dt\b")
+        )
+
+
+# ── app-wide instance ─────────────────────────────────────────────────────────
+
+_handler: Handler | None = None
+
+
+def install(client: TelegramClient, manager: DownloadManager) -> Handler:
+    """Create the app-wide :class:`Handler` and return it.
+
+    User clients reach this instance through :func:`get_handler`.
+    """
+    global _handler
+    _handler = Handler(client, manager)
+    return _handler
+
+
+def get_handler() -> Handler:
+    """Return the instance created by :func:`install`."""
+    if _handler is None:
+        raise RuntimeError("handler.install() must be called before get_handler()")
+    return _handler

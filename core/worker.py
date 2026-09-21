@@ -303,6 +303,13 @@ class DownloadManager:
         """All active tasks for *user_id*."""
         return [t for t in self.active_tasks.values() if t.user_id == user_id]
 
+    def get_task(self, entry_id: int) -> DownloadTask | None:
+        """Return the active task for *entry_id*, or ``None`` when unknown.
+
+        Lets callers check ownership (``task.user_id``) before mutating.
+        """
+        return self.active_tasks.get(entry_id)
+
     def task_done(self, entry_id: int) -> None:
         """Remove a task from active tracking."""
         self.active_tasks.pop(entry_id, None)
