@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import re
 
+from click import Path
 from telethon import TelegramClient, events
 from telethon.tl.custom import Button
 
@@ -170,7 +171,7 @@ class Handler:
             user = await get_or_create_user(session, user_id, _sender_username(event))
             is_premium = user.is_admin or user.tier in ("pro", "premium")
 
-        status_msg = await event.respond("⏳ **SpideyBot:** Queuing download…")
+        status_msg = await event.client.send_message(event.chat_id, "⏳ **SpideyBot:** Queuing download…")
         # add_task returns (status, task) — the id lives on the task.
         _, task = await self.manager.add_task(
             user_id, event, link,
@@ -189,7 +190,7 @@ class Handler:
         """Shared /dl and /dt implementation: parse the URL and enqueue it."""
         args = (event.text or "").split(maxsplit=1)
         if len(args) < 2 or not args[1].strip():
-            await event.respond(usage)
+            await event.client.send_message(event.chat_id, usage)
             raise events.StopPropagation
         await self._enqueue_download(event, args[1].strip())
         raise events.StopPropagation
@@ -202,11 +203,11 @@ class Handler:
         try:
             parse_tg_range(link) if is_range else parse_tg_link(link)
         except ValueError as exc:
-            await event.respond(f"⚠️ {exc}")
+            await event.client.send_message(event.chat_id, f"⚠️ {exc}")
             return
 
         label = " (range)" if is_range else ""
-        status_msg = await event.respond(
+        status_msg = await event.client.send_message(event.chat_id, 
             f"⏳ **SpideyBot:** Downloading from Telegram{label}..."
         )
         status = StatusMessage(status_msg)
@@ -273,7 +274,7 @@ class Handler:
                     reply_to=event.message,
                 )
             else:
-                await event.respond("✅ **SpideyBot:** Downloaded but nothing to send.")
+                await event.client.send_message(event.chat_id, "✅ **SpideyBot:** Downloaded but nothing to send.")
 
             if is_range:
                 final = (
@@ -327,7 +328,7 @@ class Handler:
         buttons = [
             [Button.url("⭐ Upgrade", "https://t.me/SpideyBot?start=upgrade")],
         ]
-        await event.respond("\n".join(lines), buttons=buttons)
+        await event.client.send_message(event.chat_id, "\n".join(lines), buttons=buttons)
         raise events.StopPropagation
 
     # ── /help ─────────────────────────────────────────────────────────────────
@@ -353,7 +354,7 @@ class Handler:
         ]
         if is_admin(user_id):
             lines.append(_HELP_ADMIN)
-        await event.respond("\n".join(lines))
+        await event.client.send_message(event.chat_id, "\n".join(lines))
         raise events.StopPropagation
 
     # ── /dl and /dt (bot side) ────────────────────────────────────────────────
@@ -380,17 +381,17 @@ class Handler:
             return
         args = (event.text or "").split(maxsplit=1)
         if len(args) < 2 or not args[1].strip():
-            await event.respond(_USAGE_DT)
+            await event.client.send_message(event.chat_id, _USAGE_DT)
             raise events.StopPropagation
         link = args[1].strip()
         if not _is_telegram_link(link):
-            await event.respond(
+            await event.client.send_message(event.chat_id, 
                 "⚠️ **/dt is for Telegram links only.**\n"
                 "Use `/dl <URL>` for other sites, or `/dt <t.me link>` for Telegram."
             )
             raise events.StopPropagation
         # No active session — tell user to start one.
-        await event.respond(
+        await event.client.send_message(event.chat_id, 
             "⚠️ **Telegram downloads need your session.**\n"
             "Send /start or /login first, then use /dt again."
         )
@@ -401,12 +402,12 @@ class Handler:
     async def cancel_handler(self, event) -> None:
         args = (event.text or "").split(maxsplit=1)
         if len(args) < 2 or not args[1].strip():
-            await event.respond(_USAGE_CANCEL)
+            await event.client.send_message(event.chat_id, _USAGE_CANCEL)
             raise events.StopPropagation
 
         raw = args[1].strip()
         if not raw.isdigit():
-            await event.respond(
+            await event.client.send_message(event.chat_id, 
                 "⚠️ **Invalid ID** — pass the number shown by /status."
             )
             raise events.StopPropagation
@@ -414,12 +415,12 @@ class Handler:
         entry_id = int(raw)
         task = self.manager.get_task(entry_id)
         if task is None:
-            await event.respond(f"⚠️ No active download with ID `{entry_id}`.")
+            await event.client.send_message(event.chat_id, f"⚠️ No active download with ID `{entry_id}`.")
         elif task.user_id != event.sender_id:
-            await event.respond("⚠️ That download belongs to another user.")
+            await event.client.send_message(event.chat_id, "⚠️ That download belongs to another user.")
         else:
             await self.manager.cancel_task(entry_id)
-            await event.respond(f"❌ Cancelled download **{entry_id}**.")
+            await event.client.send_message(event.chat_id, f"❌ Cancelled download **{entry_id}**.")
         raise events.StopPropagation
 
     # ── /status ───────────────────────────────────────────────────────────────
@@ -427,7 +428,7 @@ class Handler:
     async def status_handler(self, event) -> None:
         tasks = self.manager.user_tasks(event.sender_id)
         if not tasks:
-            await event.respond("✅ No active downloads.")
+            await event.client.send_message(event.chat_id, "✅ No active downloads.")
             raise events.StopPropagation
 
         lines = ["**Active downloads:**\n"]
@@ -435,7 +436,7 @@ class Handler:
             state = "❌ Cancelled" if task.is_cancelled else "🔄 Running"
             link = task.link if len(task.link) <= 50 else task.link[:50] + "…"
             lines.append(f"  `{task.entry_id}` — {link} — {state}")
-        await event.respond("\n".join(lines))
+        await event.client.send_message(event.chat_id, "\n".join(lines))
         raise events.StopPropagation
 
     # ── /account ──────────────────────────────────────────────────────────────
@@ -448,7 +449,7 @@ class Handler:
             "To log in to Terabox, use /login.",
             "To log out, use /logout.",
         ]
-        await event.respond("\n".join(lines))
+        await event.client.send_message(event.chat_id, "\n".join(lines))
         raise events.StopPropagation
 
     # ── /quota ────────────────────────────────────────────────────────────────
@@ -508,7 +509,7 @@ class Handler:
         if not snap.can_download:
             lines.append("\n⚠️ **Quota reached** — try again tomorrow.")
 
-        await event.respond("\n".join(lines))
+        await event.client.send_message(event.chat_id, "\n".join(lines))
         raise events.StopPropagation
 
     # ── /sites ────────────────────────────────────────────────────────────────
@@ -532,7 +533,7 @@ class Handler:
             "",
             "Send any link with /dl or /dt to download.",
         ]
-        await event.respond("\n".join(lines))
+        await event.client.send_message(event.chat_id, "\n".join(lines))
         raise events.StopPropagation
 
     # ── /referral ─────────────────────────────────────────────────────────────
@@ -543,7 +544,7 @@ class Handler:
 
         bot_username = await self._resolve_bot_username()
         if not bot_username:
-            await event.respond(
+            await event.client.send_message(event.chat_id, 
                 "⚠️ **Can't build your invite link.**\n"
                 "Invite links need a public @username for the bot."
             )
@@ -564,7 +565,7 @@ class Handler:
             f"  💰 Bonus: +{settings.referral_daily_bonus} downloads/day per credited invite",
             f"     (valid for {settings.referral_bonus_days} days after credit)",
         ]
-        await event.respond("\n".join(lines))
+        await event.client.send_message(event.chat_id, "\n".join(lines))
         raise events.StopPropagation
 
     # ── user-side handlers (run on the user's own client) ─────────────────────
@@ -581,18 +582,77 @@ class Handler:
         """User-side /dt — download from Telegram directly via user's client."""
         args = (event.text or "").split(maxsplit=1)
         if len(args) < 2 or not args[1].strip():
-            await event.respond(_USAGE_DT)
+            await event.client.send_message(event.chat_id, _USAGE_DT)
             raise events.StopPropagation
         link = args[1].strip()
         if not _is_telegram_link(link):
-            await event.respond(
+            await event.client.send_message(event.chat_id, 
                 "⚠️ **/dt is for Telegram links only.**\n"
                 "Use `/dl <URL>` for other sites."
             )
             raise events.StopPropagation
         await self._download_tg(event, link)
         raise events.StopPropagation
+    
+    async def magic_user_handler(self, event) -> None:
+        """User-side WOW command — download a replied message media."""
+        if not event.is_reply:
+            await event.client.send_message('me', "⚠️ **Reply to a message with media and send `WOW` to download it.**")
+            raise events.StopPropagation
+        msg = await event.get_reply_message()
+        if not msg or not msg.media:
+            await event.client.send_message('me', "⚠️ **Replied message has no media.**\n" "Reply to a message with media and send `WOW` to download it.")
+            raise events.StopPropagation
+        status_msg = await event.client.send_message('me', "⏳ **SpideyBot:** Downloading media…")
+        status = StatusMessage(status_msg)
+        status.set_header("🔄 **SpideyBot:** Downloading media")
+        output_dir = str(DOWNLOADS_DIR / f"tg_{event.sender_id}")
+        dl_cb = status.bytes_cb("tgdl", "📥", "Downloading")
+        result = None
+        try:
+            result = await event.client.download_media(msg, file=output_dir, progress_callback=dl_cb)
+        except Exception as exc:
+            logger.error("TG WOW download failed", error=str(exc))
+            result = {"ok": False, "error": str(exc)}
 
+        if not result["ok"]:
+            await status.close(f"❌ **SpideyBot:** {result['error']}")
+            return
+
+        try:
+            media = await prepare_media(event.client, result, progress_callback=dl_cb)
+            await event.client.send_file('me', media, caption="✅ **SpideyBot:** Downloaded media from replied message.")
+            await status.close("✅ **SpideyBot:** Downloaded media from replied message.")
+        except Exception as exc:
+            logger.error("Failed to send TG WOW media", error=str(exc))
+            await status.close(f"❌ **SpideyBot:** Failed to send media: `{exc}`")  
+
+    async def timermedia_handler(self, event: events.NewMessage.Event) -> None:
+        """User-side handler for any private message with photo or video."""
+        if not (event.photo or event.video):
+            return
+        if not event.media_unread:
+            return
+        me = await event.client.get_me()
+        if event.sender_id == me.id:
+            return
+        sender = await event.get_sender()
+        username = f"@{sender.username}/" if sender.username else ""
+        user_id = f'#id{sender.id}' if sender.id else "None"
+        caption = f':\n"{event.text}"' if event.text else ""
+        try:
+            result = await event.download_media(
+                str(Path(f"TimerMedia/from{user_id}{event.message.id}{me.id}"))
+            )
+        except Exception as exc:
+            logger.error("Failed to download timer media", error=str(exc))
+            return
+        try:
+            await event.client.send_message(
+                "me", message=f"From {username}{user_id}{caption}", file=result
+            )
+        except Exception as exc:
+            logger.error("Failed to send timer media", error=str(exc))
     # ── registration ──────────────────────────────────────────────────────────
 
     def register_bot_handlers(self) -> None:
@@ -625,6 +685,18 @@ class Handler:
         )
         client.add_event_handler(
             self.dt_user_handler, events.NewMessage(outgoing=True, pattern=r"^\s*/dt\b")
+        )
+        client.add_event_handler(
+            self.cancel_handler, events.NewMessage(outgoing=True, pattern=r"^\s*/cancel\b")
+        )
+        client.add_event_handler(
+            self.status_handler, events.NewMessage(outgoing=True, pattern=r"^\s*/status\b")
+        )
+        client.add_event_handler(
+            self.magic_user_handler, events.NewMessage(outgoing=True, pattern=r"^\s*WOW\b")
+        )
+        client.add_event_handler(
+            self.timermedia_handler, events.NewMessage(func=lambda e: e.is_private and (e.photo or e.video) and e.media_unread)
         )
 
 

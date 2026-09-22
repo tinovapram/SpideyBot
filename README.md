@@ -1,12 +1,13 @@
 ﻿# SpideyBot V4 — Telegram Media Downloader Bot
 
 Download media from **TeraBox**, **Twitter/X**, **Instagram**, **TikTok**,
-**YouTube**, **Reddit**, **Bluesky**, **Pinterest**, **Spotify**, and 20+ more
+**YouTube**, **Reddit**, **Bluesky**, **Pinterest**, **Spotify**, and 28+
 platforms — all from a single Telegram bot. Send a link, get the files in chat.
 
 ## Features
 
-- **30+ platforms** — TeraBox, YouTube, Twitter/X, Instagram, TikTok, Reddit, and more
+- **28+ platforms** — TeraBox, YouTube, Twitter/X, Instagram, TikTok, Reddit, and more
+- **Telegram-native downloads** — `/dt` pulls files directly from Telegram messages via your own session
 - **Tiered access** — Free, Pro, and Premium tiers with configurable limits
 - **Persistent queue** — PostgreSQL-backed job queue with priority scheduling
 - **Rate limiting** — Per-user rate limits to prevent abuse
@@ -14,6 +15,7 @@ platforms — all from a single Telegram bot. Send a link, get the files in chat
 - **Per-user cookies** — Encrypted per-user TeraBox session cookies
 - **User sessions** — On-demand Telegram account sessions with automatic lifecycle
 - **Admin tools** — Stats, premium management, and user oversight
+- **Camoufox browser** — Anti-detection browser for sites that block headless clients
 
 ## Architecture
 
@@ -23,7 +25,7 @@ SpideyBot/
 ├── core/              # config, database, queue, sessions, tiers, referral
 ├── downloader/        # downloaders (base, registry, gallery-dl, TeraBox, per-site)
 ├── utils/             # paths, files, formatting, progress, Telegram helpers
-├── handler/           # Telegram handlers (user, admin, login, outgoing, cookie)
+├── handler/           # Telegram handlers (user, admin, login, outgoing, setting)
 ├── migrations/        # Alembic database migrations
 ├── downloads/         # runtime download staging (gitignored)
 ├── config/            # gallery-dl / yt-dlp config templates
@@ -38,12 +40,19 @@ docker compose up --build -d
 docker compose logs -f
 ```
 
+The container runs PostgreSQL + SpideyBot. Camoufox (anti-detection browser)
+is baked into the image during build. Bind-mounted volumes persist data,
+user sessions, and gallery-dl config across restarts.
+
 ## Quick start (local)
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
+
+# Fetch Camoufox browser (needed for /bypass and some downloaders)
+camoufox fetch
 
 # Start PostgreSQL (Docker or local)
 docker compose up -d postgres
@@ -75,7 +84,7 @@ All settings use the `SPIDEY_` env prefix. Copy `.env.example` to `.env` and fil
 |------|-----------|------------|-----------------|---------|-------------|-------|
 | Free | 10 | 100 MB | 1 GB | 20 GB | 1 | Social |
 | Pro | 50 | 2 GB | 25 GB | 500 GB | 3 | Social + Video |
-| Premium | 200 | 10 GB | 100 GB | 2 TB | 5 | All |
+| Premium | 200 | 10 GB | 100 GB | 2 TB | 8 | All |
 
 Admins bypass all limits.
 
@@ -83,16 +92,19 @@ Admins bypass all limits.
 
 | Command | Description |
 |---------|-------------|
-| `/start` | Sign up or refresh your status |
+| `/start` | Sign up, refresh your status, or auto-start a saved session |
 | `/help` | Show help guide |
 | `/dl <URL>` | Download from any supported platform |
-| `/dt <URL>` | Download and auto-split into 1 GB chunks |
+| `/dt <t.me link>` | Download directly from a Telegram message (requires `/start` or `/login`) |
 | `/cancel <ID>` | Cancel a queued download |
 | `/status` | View your active downloads |
 | `/account` | Account & session status |
 | `/quota` | View your usage & limits |
 | `/sites` | List supported platforms |
 | `/referral` | Get your invite link & stats |
+| `/login` | Start a Telegram user session (interactive 2FA flow) |
+| `/logout` | Disconnect your active session |
+| `/bypass <URL>` | Resolve link shorteners (ouo, adfly, gplinks, etc.) to final destination |
 
 ### Admin commands
 
@@ -105,20 +117,22 @@ Admins bypass all limits.
 
 ## Per-user TeraBox cookies
 
-Users can set their own TeraBox cookies via the `/cookie` command:
+Users manage their TeraBox cookies via `/setting`, which opens an interactive button menu:
 
-```
-/cookie set ndus=YOUR_NDUS_VALUE
-/cookie status
-/cookie delete
-```
+1. Press **/setting** → tap **TeraBox Cookie**
+2. **Set** → sends your cookie with `/setting tera set ndus=...`
+3. **View** → shows your masked saved cookie
+4. **Delete** → confirms and removes your cookie
 
 Cookies are encrypted with Fernet and stored in the database.
+Free-tier cookies are shared across the bot's account pool; Pro/Premium cookies stay private.
 
 ## Testing
 
 ```bash
-pytest
+pytest               # 148 tests
+pytest -v            # verbose
+pytest tests/test_handler.py   # handler tests only
 ```
 
 ## License

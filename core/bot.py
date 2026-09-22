@@ -19,8 +19,8 @@ from core.worker import DownloadManager
 
 from handler.admin import register_admin_handlers
 from handler.bypass import register_bypass_handler
-from handler.cookie import register_cookie_handlers
 from handler.handler import install
+from handler.setting import register_setting_handlers
 from handler.login import register_login_handlers
 from utils import paths
 
@@ -76,7 +76,7 @@ handler = install(bot, download_manager)
 handler.register_bot_handlers()
 register_admin_handlers(bot)
 register_bypass_handler(bot)
-register_cookie_handlers(bot)
+register_setting_handlers(bot)
 register_login_handlers(bot)
 logger.info("All handlers registered")
 

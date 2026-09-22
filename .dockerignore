@@ -16,6 +16,14 @@ data
 downloads
 user_sessions
 config/runtime
+# Host-side gallery-dl state / credentials. The container's own .gallery-dl
+# dir is the bind-mounted volume, so a developer copy would only seed that
+# volume with junk (or leak cookies into the image).
+.gallery-dl
+.netrc
+# NOTE: config/gallery-dl.json is deliberately NOT ignored — the container
+# runs on a server and only config/runtime is bind-mounted, so that file has
+# to be baked into the image at build time to be visible to gallery-dl.
 .pytest_cache
 *.log
 docs

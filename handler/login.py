@@ -30,11 +30,11 @@ def register_login_handlers(bot) -> None:
         user_id = event.sender_id
 
         if user_id in _login_locks:
-            await event.respond("⏳ A login flow is already in progress. Send /cancel to abort.")
+            await event.client.send_message(event.chat_id, "⏳ A login flow is already in progress. Send /cancel to abort.")
             return
 
         if sessions.has_session(user_id):
-            await event.respond(
+            await event.client.send_message(event.chat_id, 
                 "✅ You are already logged in.\nUse /logout first to re-login with a different account."
             )
             return
@@ -138,7 +138,7 @@ def register_login_handlers(bot) -> None:
         except Exception as exc:
             logger.error("Login conversation failed", user_id=user_id, error=str(exc))
             try:
-                await event.respond("❌ Login timed out or failed. Please try again with /login.")
+                await event.client.send_message(event.chat_id, "❌ Login timed out or failed. Please try again with /login.")
             except Exception:
                 pass
         finally:
@@ -148,9 +148,9 @@ def register_login_handlers(bot) -> None:
     async def logout_handler(event):
         removed = await sessions.remove_session(event.sender_id)
         if removed:
-            await event.respond("🔓 Logged out successfully. Your session has been removed.")
+            await event.client.send_message(event.chat_id, "🔓 Logged out successfully. Your session has been removed.")
         else:
-            await event.respond("ℹ️ You are not currently logged in.")
+            await event.client.send_message(event.chat_id, "ℹ️ You are not currently logged in.")
 
 
 async def _handle_2fa(conv, client, user_id):

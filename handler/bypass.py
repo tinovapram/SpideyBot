@@ -393,7 +393,7 @@ async def bypass_handler(event):
     """Handle /bypass <url> — resolve a link shortener to its final destination."""
     args = event.text.split(maxsplit=1)
     if len(args) < 2 or not args[1].strip():
-        await event.respond(
+        await event.client.send_message(event.chat_id, 
             "**Usage:** /bypass *URL*\n\n"
             "Resolves link shorteners and wait pages to the final destination."
         )
@@ -401,7 +401,7 @@ async def bypass_handler(event):
 
     url = args[1].strip()
 
-    status_msg = await event.respond("⏳ **Resolving link…**")
+    status_msg = await event.client.send_message(event.chat_id, "⏳ **Resolving link…**")
 
     try:
         final_url = await resolve_url(url)

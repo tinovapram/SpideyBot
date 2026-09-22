@@ -27,8 +27,13 @@ alembic>=1.13.0
 
 # ── Media downloaders (CLI tools) ──────────────────────────────
 gallery-dl
-yt-dlp[default,curl-cffi]
-yt-dlp-ejs
+# No JavaScript runtime is shipped (no deno/node/bun) and no yt-dlp-ejs, so the
+# `default` extra is avoided: it would only pull yt-dlp-ejs back in. The pieces
+# of `default` we still use are listed by hand instead.
+yt-dlp[curl-cffi]
+brotli      # compressed HTTP responses
+mutagen     # thumbnail/metadata embedding
+websockets  # websocket downloads
 cyberdrop-dl-patched
 
 # ── Reddit ──────────────────────────────────────────────────────

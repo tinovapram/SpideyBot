@@ -23,7 +23,7 @@ async def stats_handler(event):
     """Show live download stats (admin only)."""
     user_id = event.sender_id
     if not is_admin(user_id):
-        await event.respond("⛔ Admin only.")
+        await event.client.send_message(event.chat_id, "⛔ Admin only.")
         raise events.StopPropagation
     try:
         from core.bot import download_manager as dm
@@ -34,9 +34,9 @@ async def stats_handler(event):
             f"  Running: {running}",
             f"  Cancelled: {cancelled}",
         ]
-        await event.respond("\n".join(lines))
+        await event.client.send_message(event.chat_id, "\n".join(lines))
     except Exception as exc:
-        await event.respond(f"Stats error: {exc}")
+        await event.client.send_message(event.chat_id, f"Stats error: {exc}")
     raise events.StopPropagation
 
 
@@ -144,12 +144,12 @@ async def addpremium_handler(event):
     """Usage: /addpremium <user_id_or_@username> [days=30]"""
     user_id = event.sender_id
     if not is_admin(user_id):
-        await event.respond("⛔ Admin only.")
+        await event.client.send_message(event.chat_id, "⛔ Admin only.")
         raise events.StopPropagation
 
     args = event.text.split()
     if len(args) < 2:
-        await event.respond("**Usage:** /addpremium `<user_id or @username>` `[days]`")
+        await event.client.send_message(event.chat_id, "**Usage:** /addpremium `<user_id or @username>` `[days]`")
         raise events.StopPropagation
 
     target = args[1]
@@ -160,7 +160,7 @@ async def addpremium_handler(event):
     else:
         result = await _add_premium_by_username(target, days)
 
-    await event.respond(result)
+    await event.client.send_message(event.chat_id, result)
     raise events.StopPropagation
 
 
@@ -170,17 +170,17 @@ async def removepremium_handler(event):
     """Usage: /removepremium <user_id_or_@username>"""
     user_id = event.sender_id
     if not is_admin(user_id):
-        await event.respond("⛔ Admin only.")
+        await event.client.send_message(event.chat_id, "⛔ Admin only.")
         raise events.StopPropagation
 
     args = event.text.split()
     if len(args) < 2:
-        await event.respond("**Usage:** /removepremium `<user_id or @username>`")
+        await event.client.send_message(event.chat_id, "**Usage:** /removepremium `<user_id or @username>`")
         raise events.StopPropagation
 
     target = args[1]
     result = await _remove_premium(target)
-    await event.respond(result)
+    await event.client.send_message(event.chat_id, result)
     raise events.StopPropagation
 
 
@@ -190,17 +190,17 @@ async def checkpremium_handler(event):
     """Usage: /checkpremium <user_id_or_@username>"""
     user_id = event.sender_id
     if not is_admin(user_id):
-        await event.respond("⛔ Admin only.")
+        await event.client.send_message(event.chat_id, "⛔ Admin only.")
         raise events.StopPropagation
 
     args = event.text.split()
     if len(args) < 2:
-        await event.respond("**Usage:** /checkpremium `<user_id or @username>`")
+        await event.client.send_message(event.chat_id, "**Usage:** /checkpremium `<user_id or @username>`")
         raise events.StopPropagation
 
     target = args[1]
     result = await _check_premium(target)
-    await event.respond(result)
+    await event.client.send_message(event.chat_id, result)
     raise events.StopPropagation
 
 
