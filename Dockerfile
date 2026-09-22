@@ -14,6 +14,7 @@ ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     UV_PYTHON_DOWNLOADS=0
 
+ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libcurl4-openssl-dev \
@@ -49,6 +50,7 @@ FROM ghcr.io/astral-sh/uv:0.12.17-python3.14-trixie-slim
 # ── System packages (matches upstream camoufox-docker + our tool needs) ──
 # Only packages Camoufox actually requires + the tools we call.
 # ponytail: recheck when upgrading Camoufox; browser deps are upstream's call.
+ENV DEBIAN_FRONTEND=noninteractive
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \

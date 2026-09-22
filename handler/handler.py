@@ -182,11 +182,19 @@ class Handler:
         async with session_scope() as session:
             user = await get_or_create_user(session, user_id, _sender_username(event))
 
+        # Auto-start saved session so /dl and /dt work everywhere immediately.
+        if sessions.has_session(user_id) and not sessions.is_client_active(user_id):
+            started = await sessions.start_client(user_id)
+            if started:
+                logger.info("Auto-started user session from /start", user_id=user_id)
+
         badge = await self._tier_label(user_id)
+        session_label = await self._session_badge(user_id)
         lines = [
             f"**Welcome, {event.sender.first_name}!**",
             "",
             badge,
+            f"    Sessions: {session_label}",
             "",
         ]
         if user.tier == "free":
