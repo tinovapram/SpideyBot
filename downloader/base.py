@@ -10,6 +10,7 @@ from typing import Iterator
 import requests
 import structlog
 
+from types import MappingProxyType
 from utils.files import sanitize_filename
 
 logger = structlog.get_logger(__name__)
@@ -23,14 +24,14 @@ class BaseDownloader:
     to ``download``.
     """
 
-    DEFAULT_HEADERS = {
+    DEFAULT_HEADERS = MappingProxyType({
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         ),
         "Accept": "*/*",
         "Accept-Language": "en-US,en;q=0.9",
-    }
+    })
 
     def __init__(self) -> None:
         # Each instance owns a requests.Session (connection pooling). Safe for

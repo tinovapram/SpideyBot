@@ -243,7 +243,7 @@ class DownloadManager:
 
         async with session_scope() as session:
             user = await get_or_create_user(session, user_id)
-            real_tier = effective_tier(user.tier, user.tier_expiry)
+            real_tier = effective_tier(user.tier, user.tier_expiry, is_admin=user.is_admin)
             if real_tier != tier:
                 tier = real_tier
             job = await Q.enqueue(
@@ -395,7 +395,7 @@ class DownloadManager:
             async with session_scope() as session:
                 user = await session.get(User, job.user_id)
                 if user is not None:
-                    task.tier = effective_tier(user.tier, user.tier_expiry)
+                    task.tier = effective_tier(user.tier, user.tier_expiry, is_admin=user.is_admin)
                     task.is_admin = user.is_admin
         except Exception:
             pass  # fall back to job-tier
@@ -499,19 +499,3 @@ class DownloadManager:
         except Exception:
             logger.exception("Failed to record job completion", job_id=entry_id)
         self.task_done(entry_id)
-
-
-# ── Module-level singleton ─────────────────────────────────────────
-
-_manager: DownloadManager | None = None
-
-
-def get_manager() -> DownloadManager | None:
-    """Return the global :class:`DownloadManager`, or ``None``."""
-    return _manager
-
-
-def set_manager(mgr: DownloadManager) -> None:
-    """Set the global :class:`DownloadManager`."""
-    global _manager
-    _manager = mgr

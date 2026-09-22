@@ -128,12 +128,15 @@ def is_known_tier(tier: str) -> bool:
     """Return True when *tier* is a configured tier name."""
     return tier in TIERS
 
-def effective_tier(tier: str, tier_expiry: datetime | None) -> str:
-    """Return the user's effective tier, accounting for expiry.
+def effective_tier(tier: str, tier_expiry: datetime | None, *, is_admin: bool = False) -> str:
+    """Return the user's effective tier, accounting for expiry and admin status.
 
+    Admins always get ``"premium"`` regardless of stored tier.
     If *tier_expiry* is in the past, returns ``DEFAULT_TIER`` ("free").
     Unknown tiers also fall back to ``DEFAULT_TIER``.
     """
+    if is_admin:
+        return "premium"
     if tier_expiry is not None:
         expiry = tier_expiry if tier_expiry.tzinfo else tier_expiry.replace(tzinfo=timezone.utc)
         if expiry < datetime.now(timezone.utc):

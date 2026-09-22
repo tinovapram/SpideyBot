@@ -26,8 +26,7 @@ async def stats_handler(event):
         await event.respond("⛔ Admin only.")
         raise events.StopPropagation
     try:
-        from core.worker import get_manager
-        dm = get_manager()
+        from core.bot import download_manager as dm
         running = sum(1 for t in dm.active_tasks.values() if not t.is_cancelled)
         cancelled = sum(1 for t in dm.active_tasks.values() if t.is_cancelled)
         lines = [

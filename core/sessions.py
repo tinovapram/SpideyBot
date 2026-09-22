@@ -22,6 +22,7 @@ from utils import paths
 
 logger = structlog.get_logger(__name__)
 
+MAX_ACTIVE_CLIENTS = 100
 _active_clients: dict[int, TelegramClient] = {}
 _fernet: Fernet | None = None
 
@@ -159,6 +160,10 @@ async def start_client(user_id: int) -> bool:
     existing = _active_clients.get(user_id)
     if existing is not None and existing.is_connected():
         return True
+
+    if len(_active_clients) >= MAX_ACTIVE_CLIENTS:
+        logger.warning("Active client limit reached", limit=MAX_ACTIVE_CLIENTS)
+        return False
 
     client = build_client(user_id)
     if client is None:

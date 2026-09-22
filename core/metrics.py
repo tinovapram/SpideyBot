@@ -24,12 +24,14 @@ class Metrics:
     queue_claims: int = 0
     queue_reclaims: int = 0
     rate_limited: int = 0
+    tasks_enqueued: int = 0
+    tasks_cancelled: int = 0
 
     _lock: Lock = field(default_factory=Lock, repr=False, compare=False)
 
     def incr(self, attr: str, amount: int = 1) -> None:
         with self._lock:
-            setattr(self, attr, getattr(self, attr) + amount)
+            setattr(self, attr, getattr(self, attr, 0) + amount)
 
     def snapshot(self) -> dict[str, int]:
         with self._lock:

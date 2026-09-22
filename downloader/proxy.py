@@ -17,7 +17,9 @@ from __future__ import annotations
 import os
 import threading
 
-_pool: list[str] = []
+# Sentinel: distinguish "never loaded" from "loaded but empty pool".
+_UNSET = object()
+_pool: list[str] | object = _UNSET
 _lock = threading.Lock()
 _counters: dict[str, int] = {}
 
@@ -25,13 +27,10 @@ _counters: dict[str, int] = {}
 def _load() -> list[str]:
     global _pool  # noqa: PLW0603
     with _lock:
-        if _pool is not None and _pool:
+        if _pool is not _UNSET:
             return _pool
         raw = os.getenv("PROXY_POOL", "").strip()
-        if not raw:
-            _pool = []
-        else:
-            _pool = [p.strip() for p in raw.split(",") if p.strip()]
+        _pool = [p.strip() for p in raw.split(",") if p.strip()] if raw else []
         return _pool
 
 

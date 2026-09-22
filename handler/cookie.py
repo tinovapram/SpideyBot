@@ -42,7 +42,7 @@ def register_cookie_handlers(bot) -> None:
             async with session_scope() as session:
                 user = await get_or_create_user(session, user_id, username=_sender_username(event))
                 await cookie_store.save_cookie(session, user_id, cookie)
-                tier = effective_tier(user.tier, user.tier_expiry)
+                tier = effective_tier(user.tier, user.tier_expiry, is_admin=user.is_admin)
         except cookie_store.CookieConfigError as exc:
             logger.error("Cookie storage misconfigured", error=str(exc))
             await event.reply("⚠️ Cookie storage is not configured. Contact an admin.")

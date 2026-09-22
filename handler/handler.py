@@ -148,7 +148,7 @@ class Handler:
         user_id = event.sender_id
         async with session_scope() as session:
             user = await get_or_create_user(session, user_id, _sender_username(event))
-            is_premium = user.tier in ("pro", "premium")
+            is_premium = user.is_admin or user.tier in ("pro", "premium")
 
         status_msg = await event.respond("⏳ **SpideyBot:** Queuing download…")
         # add_task returns (status, task) — the id lives on the task.

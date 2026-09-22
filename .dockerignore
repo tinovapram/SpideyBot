@@ -1,5 +1,9 @@
 .git
 .gitignore
+.devcontainer
+.vscode
+.idea
+.agents
 .venv
 venv
 .env
@@ -14,3 +18,7 @@ user_sessions
 config/runtime
 .pytest_cache
 *.log
+docs
+graphify-out
+tests
+*.md

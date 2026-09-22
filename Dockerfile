@@ -39,55 +39,27 @@ FROM oven/bun:1 AS bun
 # Stage 3: Runtime — minimal image with non-root user
 # NOTE: same image tag as the builder so the venv's interpreter path (and
 # therefore every console script shebang) stays valid.
+#
+# Layer cache strategy: things that change rarely (apt deps, bun binary,
+# venv, camoufox) come first; application code is last so rebuilds skip
+# the expensive layers above.
 # ════════════════════════════════════════════════════════════════════
 FROM ghcr.io/astral-sh/uv:0.12.17-python3.14-trixie-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg \
-    git \
-    aria2 \
-    mkvtoolnix \
-    atomicparsley \
-    procps \
-    gosu \
-    libnss3 \
-    libatk-bridge2.0-0 \
-    libdrm2 \
-    libxkbcommon0 \
-    libxcomposite1 \
-    libxdamage1 \
-    libxrandr2 \
-    libgbm1 \
-    libpango-1.0-0 \
-    libasound2 \
-    libatspi2.0-0 \
-    libxshmfence1 \
-    fonts-liberation \
-    && rm -rf /var/lib/apt/lists/*
-
-# Camoufox hard requirements. These package names are stable across Debian
-# releases, so they are installed fail-fast — a silent miss here would only
-# surface as a runtime browser launch failure.
-#   xvfb          -> headless="virtual" display buffer
-#   libgl1/egl    -> WebGL under Mesa software GLX
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    xvfb \
-    libx11-xcb1 \
-    libxcb-shm0 \
-    libxrender1 \
-    libxfixes3 \
-    libxi6 \
-    libxext6 \
-    libgl1 \
-    libglx-mesa0 \
-    libgl1-mesa-dri \
-    libegl1 \
-    && rm -rf /var/lib/apt/lists/*
-
-# Remaining Firefox deps whose names vary across Debian releases (t64 renames),
-# so install tolerantly rather than hard-failing the build.
+# ── System packages: single apt layer to avoid 3× apt-get update ──
+# Core runtime tools + Camoufox hard requirements (stable names) +
+# Firefox/t64 variant deps (tolerant fallback). Xvfb + socket dir
+# validated here so a broken display fails the build, not every /bypass.
 RUN set -eux; \
     apt-get update; \
+    apt-get install -y --no-install-recommends \
+        ffmpeg git aria2 mkvtoolnix atomicparsley procps gosu \
+        fonts-liberation \
+        libnss3 libatk-bridge2.0-0 libdrm2 libxkbcommon0 \
+        libxcomposite1 libxdamage1 libxrandr2 libgbm1 \
+        libpango-1.0-0 libasound2 libatspi2.0-0 libxshmfence1 \
+        xvfb libx11-xcb1 libxcb-shm0 libxrender1 libxfixes3 \
+        libxi6 libxext6 libgl1 libglx-mesa0 libgl1-mesa-dri libegl1; \
     for pkg in \
         libgtk-3-0 libgtk-3-0t64 \
         libdbus-glib-1-2 libdbus-glib-1-2t64 \
@@ -96,50 +68,38 @@ RUN set -eux; \
         libglib2.0-0 libglib2.0-0t64 \
         libfontconfig1 \
     ; do apt-get install -y --no-install-recommends "$pkg" || true; done; \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/*; \
+    which Xvfb; \
+    mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
 
-# Verify Xvfb really landed, so a broken virtual display fails the build
-# instead of failing every /bypass at runtime. Xvfb also needs a writable
-# socket dir, which slim images don't always ship.
-RUN which Xvfb \
-    && mkdir -p /tmp/.X11-unix \
-    && chmod 1777 /tmp/.X11-unix
+# ── Bun (single binary, no package manager) ──
+COPY --from=bun /usr/local/bin/bun /usr/local/bin/bunx
 
-COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
-RUN ln -sf /usr/local/bin/bun /usr/local/bin/bunx
-
-# The venv built in stage 1 (uv already ships in the base image). It is copied
-# to the identical /opt/venv path it was created at, so its shebangs still
-# resolve; putting its bin/ first on PATH makes python, alembic, gallery-dl,
-# yt-dlp and cyberdrop-dl resolve to the venv rather than the base image.
+# ── Python venv from builder ──
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH" \
     VIRTUAL_ENV=/opt/venv \
     UV_PYTHON_DOWNLOADS=0
 
-# Camoufox install dir derives from XDG_CACHE_HOME (platformdirs), so pin it to
-# a shared path both root (build time) and spideybot (runtime) can read.
-ENV XDG_CACHE_HOME=/ms-camoufox
-# Run Firefox on an Xvfb virtual display — stealthier than true headless.
-ENV CAMOUFOX_HEADLESS=virtual
-
-# Camoufox (stealth Firefox) — the /bypass browser engine
+# ── Camoufox (stealth Firefox) — the /bypass browser engine ──
+# XDG_CACHE_HOME pins the install to a shared root/spideybot path.
+ENV XDG_CACHE_HOME=/ms-camoufox \
+    CAMOUFOX_HEADLESS=virtual
 RUN camoufox fetch && chmod -R 777 /ms-camoufox
 
+# ── Non-root user ──
 RUN groupadd -r spideybot && useradd -r -g spideybot -d /app -m spideybot
 
+# ── Application code (changes every rebuild — always last) ──
 WORKDIR /app
-
 COPY --chown=spideybot:spideybot . .
 
+# Bind-mount dirs, sandbox dirs, BOM/CRLF fix, entrypoint perms — one layer.
 RUN mkdir -p data downloads user_sessions config/runtime config/cyberdrop-dl .gallery-dl \
-    && chown -R spideybot:spideybot data downloads user_sessions config/runtime config/cyberdrop-dl .gallery-dl
-
-# Strip BOM + CRLF from shell scripts (safety net for Windows builds)
-RUN sed -i 's/\r$//' entrypoint.sh && sed -i '1s/^\xEF\xBB\xBF//' entrypoint.sh
-
-COPY --chown=spideybot:spideybot entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/entrypoint.sh
+    && chown -R spideybot:spideybot data downloads user_sessions config/runtime config/cyberdrop-dl .gallery-dl \
+    && sed -i 's/\r$//' entrypoint.sh \
+    && sed -i '1s/^\xEF\xBB\xBF//' entrypoint.sh \
+    && chmod +x entrypoint.sh
 
 # Health check: verify the bot process is alive
 HEALTHCHECK --interval=60s --timeout=5s --start-period=15s --retries=3 \

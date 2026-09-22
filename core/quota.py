@@ -161,7 +161,7 @@ async def _atomic_increment(
 
 async def get_snapshot(session: AsyncSession, user: User) -> QuotaSnapshot:
     """Build a read-only quota snapshot for *user*."""
-    tier = effective_tier(user.tier, user.tier_expiry)
+    tier = effective_tier(user.tier, user.tier_expiry, is_admin=user.is_admin)
     policy = tier_policy(tier)
 
     today = _today_utc()
