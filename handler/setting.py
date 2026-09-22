@@ -3,9 +3,11 @@
 Pressing a button triggers a ``CallbackQuery`` that edits the same
 message in place — no chat clutter.
 
-Current groups (add more by extending ``_GROUPS``):
+Current groups:
 
 - **tera** — TeraBox cookie: view / set / delete
+- **tm** — TimerMedia: toggle on/off
+- **magic** — Magic word: view / change
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ from telethon import events
 from telethon.tl.custom import Button
 
 from core import cookies as cookie_store
+from core.config import get_settings
 from core.db import session_scope
 from core.models import get_or_create_user
 from core.tiers import DEFAULT_TIER, effective_tier
@@ -50,6 +53,10 @@ _CB_CSET   = b"s:cs"         # set cookie prompt
 _CB_CSHOW  = b"s:cw"         # show masked cookie
 _CB_CDEL   = b"s:cd"         # delete cookie
 _CB_CDELY  = b"s:cdy"        # confirm delete
+_CB_TM     = b"s:tm"         # timermedia page
+_CB_TM_TGL = b"s:tmt"        # toggle timermedia
+_CB_MG     = b"s:mg"         # magic word page
+_CB_MG_SET = b"s:mgs"        # set magic word prompt
 
 
 # ── Cookie helpers ────────────────────────────────────────────────────────────
@@ -91,8 +98,49 @@ def _main_page() -> tuple[str, list[list[Button]]]:
         "\u2699\ufe0f **Settings**\n\n"
         "Choose a category to manage:"
     )
-    buttons = [[Button.inline("\U0001f511 TeraBox Cookie", data=_CB_COOKIE)]]
+    buttons = [
+        [Button.inline("\U0001f511 TeraBox Cookie", data=_CB_COOKIE)],
+        [Button.inline("\U0001f4f7 TimerMedia", data=_CB_TM)],
+        [Button.inline("\u2728 Magic Word", data=_CB_MG)],
+    ]
     return text, buttons
+
+def _timermedia_page(user_id: int):
+    async def _build():
+        async with session_scope() as session:
+            user = await get_or_create_user(session, user_id)
+            enabled = user.timer_media_enabled
+        state = "\u2705 ON" if enabled else "\u274c OFF"
+        text = (
+            "\U0001f4f7 **TimerMedia**\n\n"
+            f"Auto-save photos/videos sent to you privately: **{state}**\n\n"
+            "When ON, incoming media is saved to `TimerMedia/` and forwarded to you."
+        )
+        toggle_label = "\u274c Turn OFF" if enabled else "\u2705 Turn ON"
+        buttons = [
+            [Button.inline(toggle_label, data=_CB_TM_TGL)],
+            [Button.inline("\u2b05\ufe0f Back", data=_CB_MAIN)],
+        ]
+        return text, buttons
+    return _build()
+
+def _magicword_page(user_id: int):
+    async def _build():
+        async with session_scope() as session:
+            user = await get_or_create_user(session, user_id)
+            word = user.magic_word
+        text = (
+            "\u2728 **Magic Word**\n\n"
+            f"Current word: `{word}`\n\n"
+            "When you type this word (case insensitive) as a reply to media, "
+            "the bot downloads it for you."
+        )
+        buttons = [
+            [Button.inline("\U0001f4dd Change", data=_CB_MG_SET)],
+            [Button.inline("\u2b05\ufe0f Back", data=_CB_MAIN)],
+        ]
+        return text, buttons
+    return _build()
 
 
 def _cookie_page(user_id: int):  # async-capable → returns a coroutine
@@ -130,6 +178,12 @@ def register_setting_handlers(bot) -> None:
     async def setting_tera_set_cmd(event):
         cookie = event.pattern_match.group(1).strip()
         await _do_set_cookie(event, cookie)
+
+    # ── /setting magic set <word> — direct command fallback ──────────────
+    @bot.on(events.NewMessage(pattern=r"/setting\s+magic\s+set\s+(.+)", incoming=True))
+    async def setting_magic_set_cmd(event):
+        word = event.pattern_match.group(1).strip()
+        await _do_set_magic_word(event, word)
 
     # ── All inline-button presses ─────────────────────────────────────────
     @bot.on(events.CallbackQuery)
@@ -233,6 +287,47 @@ def register_setting_handlers(bot) -> None:
             ])
             return
 
+        # ── timermedia page ──────────────────────────────────────────────
+        if data == _CB_TM:
+            text, buttons = await _timermedia_page(uid)
+            await event.edit(text, buttons=buttons)
+            return
+
+        # ── toggle timermedia ────────────────────────────────────────────
+        if data == _CB_TM_TGL:
+            try:
+                async with session_scope() as session:
+                    user = await get_or_create_user(session, uid)
+                    user.timer_media_enabled = not user.timer_media_enabled
+                    new_state = user.timer_media_enabled
+            except Exception:
+                logger.exception("Failed to toggle timermedia")
+                await event.answer("\u274c Failed to update setting.", alert=True)
+                return
+            state = "\u2705 ON" if new_state else "\u274c OFF"
+            await event.answer(f"TimerMedia {state}")
+            text, buttons = await _timermedia_page(uid)
+            await event.edit(text, buttons=buttons)
+            return
+
+        # ── magic word page ──────────────────────────────────────────────
+        if data == _CB_MG:
+            text, buttons = await _magicword_page(uid)
+            await event.edit(text, buttons=buttons)
+            return
+
+        # ── set magic word prompt ────────────────────────────────────────
+        if data == _CB_MG_SET:
+            text = (
+                "\u2728 **Change Magic Word**\n\n"
+                "Send your new magic word as your next message.\n\n"
+                "_Or use:_ `/setting magic set YOUR_WORD`"
+            )
+            await event.edit(text, buttons=[
+                [Button.inline("\u2b05\ufe0f Back", data=_CB_MG)]
+            ])
+            return
+
 
 # ── Set-cookie logic (shared by button prompt and direct command) ─────────────
 
@@ -270,4 +365,28 @@ async def _do_set_cookie(event, cookie: str) -> None:
     await event.client.send_message(event.chat_id, 
         f"\u2705 TeraBox cookie saved.\n\n{sharing}",
         buttons=[[Button.inline("\U0001f511 View cookie", data=_CB_COOKIE)]],
+    )
+
+
+# ── Set-magic-word logic (shared by button prompt and direct command) ─────────
+
+async def _do_set_magic_word(event, word: str) -> None:
+    if len(word) > 50:
+        await event.client.send_message(event.chat_id, "\u274c Magic word must be 50 characters or fewer.")
+        return
+
+    try:
+        async with session_scope() as session:
+            user = await get_or_create_user(
+                session, event.sender_id, username=_sender_username(event),
+            )
+            user.magic_word = word.upper()
+    except Exception as exc:
+        logger.exception("Failed to save magic word", error=str(exc))
+        await event.client.send_message(event.chat_id, "\u274c Failed to save your magic word. Please try again.")
+        return
+
+    await event.client.send_message(event.chat_id,
+        f"\u2705 Magic word set to `{word.upper()}`.",
+        buttons=[[Button.inline("\u2728 Magic Word", data=_CB_MG)]],
     )

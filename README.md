@@ -115,9 +115,13 @@ Admins bypass all limits.
 | `/removepremium` | Revoke Pro tier from a user |
 | `/checkpremium` | Check a user's premium status |
 
-## Per-user TeraBox cookies
+## User settings (/setting)
 
-Users manage their TeraBox cookies via `/setting`, which opens an interactive button menu:
+The `/setting` command opens an interactive button menu for per-user preferences:
+
+- **TeraBox Cookie** — Set, view, or delete your TeraBox session cookie
+- **TimerMedia** — Toggle auto-save of private photos/videos (default: ON)
+- **Magic Word** — Change the word that triggers media download when replying (default: `WOW`, case insensitive)
 
 1. Press **/setting** → tap **TeraBox Cookie**
 2. **Set** → sends your cookie with `/setting tera set ndus=...`

@@ -87,6 +87,8 @@ _HELP_NOTES = """
 
     • One file at a time. Large files are split automatically if needed.
     • Terabox links require a logged-in account — use /account to manage sessions.
+    • Reply to media and send your magic word (default: `WOW`) to download it.
+    • Private photos/videos are auto-saved — manage via /setting.
 """
 _HELP_ADMIN = """
 
@@ -595,7 +597,17 @@ class Handler:
         raise events.StopPropagation
     
     async def magic_user_handler(self, event) -> None:
-        """User-side WOW command — download a replied message media."""
+        """User-side magic word — download a replied message media."""
+        # Load user's custom magic word (case insensitive check)
+        try:
+            async with session_scope() as session:
+                user = await get_or_create_user(session, event.sender_id)
+                magic_word = user.magic_word
+        except Exception:
+            magic_word = "WOW"  # fallback to default
+        text = (event.text or "").strip()
+        if text.upper() != magic_word.upper():
+            return  # not the magic word — silently ignore
         if not event.is_reply:
             await event.client.send_message('me', "⚠️ **Reply to a message with media and send `WOW` to download it.**")
             raise events.StopPropagation
@@ -636,6 +648,14 @@ class Handler:
         me = await event.client.get_me()
         if event.sender_id == me.id:
             return
+        # Check user's timer_media_enabled setting
+        try:
+            async with session_scope() as session:
+                user = await get_or_create_user(session, me.id)
+                if not user.timer_media_enabled:
+                    return
+        except Exception:
+            pass  # if DB check fails, proceed anyway (default is ON)
         sender = await event.get_sender()
         username = f"@{sender.username}/" if sender.username else ""
         user_id = f'#id{sender.id}' if sender.id else "None"
@@ -693,7 +713,7 @@ class Handler:
             self.status_handler, events.NewMessage(outgoing=True, pattern=r"^\s*/status\b")
         )
         client.add_event_handler(
-            self.magic_user_handler, events.NewMessage(outgoing=True, pattern=r"^\s*WOW\b")
+            self.magic_user_handler, events.NewMessage(outgoing=True, pattern=r"^\s*\S+\s*$")
         )
         client.add_event_handler(
             self.timermedia_handler, events.NewMessage(func=lambda e: e.is_private and (e.photo or e.video) and e.media_unread)

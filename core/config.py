@@ -79,6 +79,10 @@ class Settings(BaseSettings):
     # ── Retention ────────────────────────────────────────────────
     downloads_retention_days: int = 3
 
+    # ── Bot behavior defaults ────────────────────────────────────
+    default_timer_media: bool = True
+    default_magic_word: str = "WOW"
+
     # ── Referral ─────────────────────────────────────────────────
     referral_daily_bonus: int = 10
     referral_bonus_days: int = 30

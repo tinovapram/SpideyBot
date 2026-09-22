@@ -41,6 +41,8 @@ class User(Base):
     tier: Mapped[str] = mapped_column(String(20), nullable=False, default="free")
     tier_expiry: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    timer_media_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    magic_word: Mapped[str] = mapped_column(String(50), nullable=False, default="WOW")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
