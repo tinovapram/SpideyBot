@@ -46,28 +46,19 @@ FROM oven/bun:1 AS bun
 # ════════════════════════════════════════════════════════════════════
 FROM ghcr.io/astral-sh/uv:0.12.17-python3.14-trixie-slim
 
-# ── System packages: single apt layer to avoid 3× apt-get update ──
-# Core runtime tools + Camoufox hard requirements (stable names) +
-# Firefox/t64 variant deps (tolerant fallback). Xvfb + socket dir
-# validated here so a broken display fails the build, not every /bypass.
+# ── System packages (matches upstream camoufox-docker + our tool needs) ──
+# Only packages Camoufox actually requires + the tools we call.
+# ponytail: recheck when upgrading Camoufox; browser deps are upstream's call.
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-        ffmpeg git aria2 mkvtoolnix atomicparsley procps gosu \
+        ffmpeg git aria2 gosu \
         fonts-liberation \
-        libnss3 libatk-bridge2.0-0 libdrm2 libxkbcommon0 \
-        libxcomposite1 libxdamage1 libxrandr2 libgbm1 \
-        libpango-1.0-0 libasound2 libatspi2.0-0 libxshmfence1 \
-        xvfb libx11-xcb1 libxcb-shm0 libxrender1 libxfixes3 \
-        libxi6 libxext6 libgl1 libglx-mesa0 libgl1-mesa-dri libegl1; \
-    for pkg in \
-        libgtk-3-0 libgtk-3-0t64 \
-        libdbus-glib-1-2 libdbus-glib-1-2t64 \
-        libxt6 libxt6t64 \
-        libxmu6 libxmu6t64 \
-        libglib2.0-0 libglib2.0-0t64 \
-        libfontconfig1 \
-    ; do apt-get install -y --no-install-recommends "$pkg" || true; done; \
+        libgtk-3-0 libasound2 libx11-xcb1 libxcomposite1 \
+        libxdamage1 libxrandr2 libgbm1 libpango-1.0-0 \
+        libcairo2 libatk1.0-0 libatk-bridge2.0-0 libxshmfence1 \
+        libdbus-glib-1-2 libnss3 \
+        xvfb; \
     rm -rf /var/lib/apt/lists/*; \
     which Xvfb; \
     mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
