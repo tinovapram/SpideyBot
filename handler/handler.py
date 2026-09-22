@@ -20,6 +20,8 @@ Call :func:`install` once at startup. User clients reach that instance through
 
 from __future__ import annotations
 
+import re
+
 from telethon import TelegramClient, events
 from telethon.tl.custom import Button
 
@@ -34,6 +36,16 @@ from core.tiers import (
     ALL_SITES, HEAVY_SITES, SOCIAL_SITES, VIDEO_HOST_SITES, size_limit,
 )
 from core.worker import DownloadManager
+from downloader.telegram import (
+    download_tg_message,
+    download_tg_range,
+    is_tg_range_url,
+    parse_tg_link,
+    parse_tg_range,
+)
+from utils.files import prepare_media
+from utils.paths import DOWNLOADS_DIR
+from utils.progress import StatusMessage
 
 logger = structlog.get_logger(__name__)
 
@@ -86,7 +98,7 @@ _HELP_ADMIN = """
 """
 
 _USAGE_DL = "**Usage:** /dl *URL*\n\nProvide a link to download."
-_USAGE_DT = "**Usage:** /dt *URL*\n\nProvide a link to download (split into 1 GB chunks)."
+_USAGE_DT = "**Usage:** /dt *Telegram link*\n\nDownload directly from a Telegram message (t.me link). Requires an active session — use /start or /login."
 _USAGE_CANCEL = "**Usage:** /cancel *ID*\n\nView your active downloads with /status."
 
 
@@ -94,6 +106,14 @@ def _sender_username(event) -> str | None:
     """Sender's @username, or ``None`` for private accounts."""
     sender = event.sender
     return getattr(sender, "username", None) if sender else None
+
+
+_TG_LINK_RE = re.compile(r"https?://(?:t\.me|telegram\.me)/")
+
+
+def _is_telegram_link(url: str) -> bool:
+    """Return True when *url* is a Telegram message/channel link."""
+    return bool(_TG_LINK_RE.search(url))
 
 
 class Handler:
@@ -174,6 +194,110 @@ class Handler:
         await self._enqueue_download(event, args[1].strip())
         raise events.StopPropagation
 
+    async def _download_tg(self, event, link: str) -> None:
+        """Download from Telegram message link using the user's own client."""
+        from telethon.errors import RPCError as TelethonRPCError
+
+        is_range = is_tg_range_url(link)
+        try:
+            parse_tg_range(link) if is_range else parse_tg_link(link)
+        except ValueError as exc:
+            await event.respond(f"⚠️ {exc}")
+            return
+
+        label = " (range)" if is_range else ""
+        status_msg = await event.respond(
+            f"⏳ **SpideyBot:** Downloading from Telegram{label}..."
+        )
+        status = StatusMessage(status_msg)
+        status.set_header(f"🔄 **SpideyBot:** Downloading from Telegram{label}")
+
+        output_dir = str(DOWNLOADS_DIR / f"tg_{event.sender_id}")
+        dl_cb = status.bytes_cb("tgdl", "📥", "Downloading")
+        try:
+            if is_range:
+                result = await download_tg_range(
+                    self.client, link, output_dir=output_dir,
+                    progress_callback=dl_cb,
+                )
+            else:
+                result = await download_tg_message(
+                    self.client, link, output_dir=output_dir,
+                    progress_callback=dl_cb,
+                )
+        except Exception as exc:
+            logger.error("TG download failed", error=str(exc))
+            result = {"ok": False, "error": str(exc)}
+
+        if not result["ok"]:
+            await status.close(f"❌ **SpideyBot:** {result['error']}")
+            return
+
+        files = result["files"]
+        metadata = result.get("file_metadata") or [None] * len(files)
+
+        import os
+        try:
+            status.drop("tgdl")
+            status.set_header("📤 **SpideyBot:** Uploading to Telegram")
+            up_cb = status.bytes_cb("ul", "📤", "Uploading")
+            media = []
+            for fp, meta in zip(files, metadata):
+                if not os.path.isfile(fp):
+                    continue
+                try:
+                    kwargs = {}
+                    if meta:
+                        if meta.get("photo"):
+                            kwargs["as_image"] = True
+                        elif meta.get("animated"):
+                            kwargs["supports_streaming"] = True
+                            kwargs["nosound_video"] = True
+                        elif meta.get("video"):
+                            kwargs["supports_streaming"] = True
+                        elif meta.get("force_document"):
+                            kwargs["force_document"] = True
+                    media.append(
+                        await prepare_media(
+                            self.client, fp,
+                            progress_callback=up_cb, **kwargs,
+                        )
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to prepare TG file", file=fp, error=str(exc))
+
+            if media:
+                await self.client.send_file(
+                    event.chat_id, media,
+                    caption=f"✅ **SpideyBot:** Downloaded {len(media)} file(s) from Telegram{label}.",
+                    reply_to=event.message,
+                )
+            else:
+                await event.respond("✅ **SpideyBot:** Downloaded but nothing to send.")
+
+            if is_range:
+                final = (
+                    f"✅ **SpideyBot:** Downloaded {result.get('downloaded_messages', len(files))} file(s) "
+                    f"from {result.get('total_messages', len(files))} messages in "
+                    f"`{result.get('chat_title', '')}`."
+                )
+            else:
+                final = f"✅ **SpideyBot:** Downloaded {len(files)} file(s) from `{result.get('chat_title', '')}`."
+            await status.close(final)
+        except Exception as exc:
+            logger.error("Failed to send TG files", error=str(exc))
+            await status.close(f"❌ **SpideyBot:** Failed to send files: `{exc}`")
+        finally:
+            for fp in files:
+                try:
+                    os.remove(fp)
+                except OSError:
+                    pass
+            try:
+                os.rmdir(output_dir)
+            except OSError:
+                pass
+
     # ── /start ────────────────────────────────────────────────────────────────
 
     async def start_handler(self, event) -> None:
@@ -251,10 +375,26 @@ class Handler:
         await self._link_command(event, usage=_USAGE_DL)
 
     async def dt_handler(self, event) -> None:
-        """Bot-side /dt — stands down when the user's own session has it."""
+        """Bot-side /dt — only for Telegram links, requires user session."""
         if self._handled_by_user_session(event):
             return
-        await self._link_command(event, usage=_USAGE_DT)
+        args = (event.text or "").split(maxsplit=1)
+        if len(args) < 2 or not args[1].strip():
+            await event.respond(_USAGE_DT)
+            raise events.StopPropagation
+        link = args[1].strip()
+        if not _is_telegram_link(link):
+            await event.respond(
+                "⚠️ **/dt is for Telegram links only.**\n"
+                "Use `/dl <URL>` for other sites, or `/dt <t.me link>` for Telegram."
+            )
+            raise events.StopPropagation
+        # No active session — tell user to start one.
+        await event.respond(
+            "⚠️ **Telegram downloads need your session.**\n"
+            "Send /start or /login first, then use /dt again."
+        )
+        raise events.StopPropagation
 
     # ── /cancel ───────────────────────────────────────────────────────────────
 
@@ -438,8 +578,20 @@ class Handler:
         await self._link_command(event, usage=_USAGE_DL)
 
     async def dt_user_handler(self, event) -> None:
-        """User-side /dt typed from the user's own account."""
-        await self._link_command(event, usage=_USAGE_DT)
+        """User-side /dt — download from Telegram directly via user's client."""
+        args = (event.text or "").split(maxsplit=1)
+        if len(args) < 2 or not args[1].strip():
+            await event.respond(_USAGE_DT)
+            raise events.StopPropagation
+        link = args[1].strip()
+        if not _is_telegram_link(link):
+            await event.respond(
+                "⚠️ **/dt is for Telegram links only.**\n"
+                "Use `/dl <URL>` for other sites."
+            )
+            raise events.StopPropagation
+        await self._download_tg(event, link)
+        raise events.StopPropagation
 
     # ── registration ──────────────────────────────────────────────────────────
 

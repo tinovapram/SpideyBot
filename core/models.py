@@ -23,6 +23,7 @@ from sqlalchemy import (
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+from core.config import is_admin as _cfg_is_admin
 from core.tiers import DEFAULT_TIER
 
 
@@ -153,12 +154,17 @@ async def get_or_create_user(
     """Fetch a user by id, creating a free-tier row if absent.
 
     Updates *username* if the user already exists and the name changed.
+    Syncs ``is_admin`` from the config allowlist (single source of truth).
     """
     user = await session.get(User, user_id)
     if user is None:
-        user = User(id=user_id, username=username, tier=DEFAULT_TIER, is_admin=False)
+        user = User(id=user_id, username=username, tier=DEFAULT_TIER, is_admin=_cfg_is_admin(user_id))
         session.add(user)
         await session.flush()
-    elif username and user.username != username:
-        user.username = username
+    else:
+        # Keep DB admin flag in sync with config allowlist.
+        if user.is_admin != _cfg_is_admin(user_id):
+            user.is_admin = _cfg_is_admin(user_id)
+        if username and user.username != username:
+            user.username = username
     return user

@@ -37,9 +37,17 @@ RUN uv venv /opt/venv --python 3.14 --python-preference only-system \
 FROM oven/bun:1 AS bun
 
 # ════════════════════════════════════════════════════════════════════
-# Stage 3: Runtime — minimal image with non-root user
-# NOTE: same image tag as the builder so the venv's interpreter path (and
-# therefore every console script shebang) stays valid.
+# Stage 3: Camoufox — pre-fetch browser binaries (~300 MB).
+# This stage is ONLY rebuilt when CAMOUFOX_VER changes, so venv or
+# code rebuilds never re-download the browser.
+# ════════════════════════════════════════════════════════════════════
+FROM python:3.14-slim AS camoufox-bin
+ARG CAMOUFOX_VER=0.5.6
+RUN pip install --no-cache-dir "camoufox>=${CAMOUFOX_VER}" \
+    && camoufox fetch
+
+# ════════════════════════════════════════════════════════════════════
+# Stage 4: Runtime — minimal image with non-root user
 #
 # Layer cache strategy: things that change rarely (apt deps, bun binary,
 # venv, camoufox) come first; application code is last so rebuilds skip
@@ -74,11 +82,13 @@ ENV PATH="/opt/venv/bin:$PATH" \
     VIRTUAL_ENV=/opt/venv \
     UV_PYTHON_DOWNLOADS=0
 
-# ── Camoufox (stealth Firefox) — the /bypass browser engine ──
-# XDG_CACHE_HOME pins the install to a shared root/spideybot path.
+# ── Camoufox (stealth Firefox) — pre-fetched browser binaries ──
+# COPY from the dedicated stage instead of running `camoufox fetch` here.
+# Only rebuilds when CAMOUFOX_VER changes (bump to update browser).
 ENV XDG_CACHE_HOME=/ms-camoufox \
     CAMOUFOX_HEADLESS=virtual
-RUN camoufox fetch && chmod -R 777 /ms-camoufox
+COPY --from=camoufox-bin /root/.cache/camoufox /ms-camoufox/camoufox
+RUN chmod -R 777 /ms-camoufox
 
 # ── Non-root user ──
 RUN groupadd -r spideybot && useradd -r -g spideybot -d /app -m spideybot
