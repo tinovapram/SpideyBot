@@ -35,7 +35,7 @@ if [[ "$(id -u)" -eq 0 ]]; then
     # Re-execute this same script as spideybot.
     #
     # From this point onward, no commands run as root.
-    exec gosu "${APP_USER}" "$@"
+    exec gosu "${APP_USER}" "$0" "$@"
 fi
 
 
