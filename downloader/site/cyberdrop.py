@@ -63,24 +63,47 @@ class CyberdropDLDownloader(BaseDownloader):
     # ── Config bootstrap ──────────────────────────────────────────
 
     def _ensure_config(self) -> None:
-        """Write a minimal YAML config if absent."""
+        """Write a minimal v10-compatible YAML config if absent.
+
+        v10 uses pydantic models validated by cyclopts.  Some CLI flags
+        (``--hashing off``) trigger a cyclopts ``IndexError`` bug, so we
+        put everything into the config file and keep the CLI lean.
+        """
         if os.path.exists(self._config_path):
             return
-        # Minimal config: disable interactive features, set reasonable defaults.
         config = (
-            "download_folder: downloads\n"
-            "deep_scrape: false\n"
-            "delete_partial_files: true\n"
-            "ignore_history: true\n"
+            "downloads:\n"
+            "  attempts: 2\n"
+            "  concurrency: 15\n"
+            "  concurrent_segments: 10\n"
+            "hashing:\n"
+            "  algorithms: [xxh128]\n"
+            "  dedupe:\n"
+            "    enabled: true\n"
+            "    use_trash_bin: true\n"
+            '  mode: "off"\n'
             "ignore_hashes: true\n"
+            "ignore_history: true\n"
+            "delete_partial_files: true\n"
             "mtime: false\n"
             "max_thread_depth: 0\n"
+            "crawlers:\n"
+            "  generic:\n"
+            "    chevereto:\n"
+            "    - https://igbsa.lol\n"
             "subfolders:\n"
             "  create: false\n"
+            "  include:\n"
+            "    album_id: false\n"
+            "    domain: false\n"
+            "    thread_id: false\n"
+            "  separate_posts:\n"
+            "    enabled: false\n"
             "sort:\n"
             "  enabled: false\n"
-            "hashing:\n"
-            "  enabled: off\n"
+            "ui:\n"
+            "  mode: disabled\n"
+            "  show_stats: false\n"
         )
         try:
             with open(self._config_path, "w", encoding="utf-8") as f:
@@ -164,7 +187,6 @@ class CyberdropDLDownloader(BaseDownloader):
             "--ignore-hashes",
             "--delete-partial-files",
             "--no-sort",
-            "--hashing", "off",
             "--ui", "disabled",
         ]
 

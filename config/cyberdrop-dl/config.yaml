@@ -1,13 +1,32 @@
-download_folder: downloads
-deep_scrape: false
-delete_partial_files: true
-ignore_history: true
+downloads:
+  attempts: 2
+  concurrency: 15
+  concurrent_segments: 10
+hashing:
+  algorithms: [xxh128]
+  dedupe:
+    enabled: true
+    use_trash_bin: true
+  mode: "off"
 ignore_hashes: true
+ignore_history: true
+delete_partial_files: true
 mtime: false
 max_thread_depth: 0
+crawlers:
+  generic:
+    chevereto:
+    - https://igbsa.lol
 subfolders:
   create: false
+  include:
+    album_id: false
+    domain: false
+    thread_id: false
+  separate_posts:
+    enabled: false
 sort:
   enabled: false
-hashing:
-  enabled: off
+ui:
+  mode: disabled
+  show_stats: false
