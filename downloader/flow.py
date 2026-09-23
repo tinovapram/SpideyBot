@@ -35,11 +35,13 @@ _QUEUE_SIZE = 4
 async def run_download(task, client) -> None:
     """Execute a generic (non-TeraBox) download task end-to-end."""
     footer = f"Send `/cancel {task.entry_id}` to abort."
+    resend = task.event.new_status if task.status_msg is not None else None
     if task.status_msg is not None:
-        status = StatusMessage(task.status_msg, footer=footer)
+        status = StatusMessage(task.status_msg, footer=footer, _resend=resend)
     else:
         status = StatusMessage(
-            await task.event.reply("⏳ **SpideyBot:** Starting download..."), footer=footer
+            await task.event.reply("⏳ **SpideyBot:** Starting download..."), footer=footer,
+            _resend=task.event.new_status,
         )
     max_size_bytes, _ = size_limit(task.tier, task.is_admin)
 
@@ -173,7 +175,7 @@ async def _stream_upload(task, client, source, status) -> int:
             status.drop("ul")
             sent += await send_album(
                 client, task.event.chat_id, media, captions,
-                reply_to=task.event.message.id,
+                reply_to=task.event.command_msg_id,
             )
 
         while True:
@@ -252,7 +254,7 @@ async def _send_all_at_once(task, client, downloaded_files, status) -> int:
 
     return await send_album(
         client, task.event.chat_id, media, captions,
-        reply_to=task.event.message.id,
+        reply_to=task.event.command_msg_id,
     )
 
 

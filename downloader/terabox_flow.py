@@ -37,11 +37,13 @@ async def run_terabox(task, client, downloader) -> None:
     account is blocked, expired or rate-limited.
     """
     footer = f"Send `/cancel {task.entry_id}` to abort."
+    resend = task.event.new_status if task.status_msg is not None else None
     if task.status_msg is not None:
-        status = StatusMessage(task.status_msg, footer=footer)
+        status = StatusMessage(task.status_msg, footer=footer, _resend=resend)
     else:
         status = StatusMessage(
-            await task.event.reply("⏳ **SpideyBot:** Starting download..."), footer=footer
+            await task.event.reply("⏳ **SpideyBot:** Starting download..."), footer=footer,
+            _resend=task.event.new_status,
         )
 
     if downloader is None:
@@ -215,7 +217,7 @@ async def _pipeline(task, client, downloader, files, output_dir, status) -> tupl
         status.drop("ul")
         sent += await send_album(
             client, task.event.chat_id, batch, captions,
-            reply_to=task.event.message, support_streaming=True,
+            reply_to=task.event.command_msg_id, support_streaming=True,
         )
         refresh()
 

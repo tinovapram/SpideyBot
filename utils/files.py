@@ -139,7 +139,7 @@ def make_video_thumb(video_path: str) -> Optional[str]:
     if ext not in _VIDEO_EXTS:
         return None
     try:
-        if os.path.getsize(video_path) <= _BIG_FILE_BYTES:
+        if os.path.getsize(video_path) <= _BIG_FILE_BYTES and not video_path.lower().endswith(".mov"):
             return None
     except OSError:
         return None

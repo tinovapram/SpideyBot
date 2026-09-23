@@ -66,7 +66,8 @@ class StatusMessage:
     ANIM_INTERVAL = 1.2    # minimum gap between liveness-only edits (stuck progress)
     PULSE_INTERVAL = 0.6   # how often the renderer re-checks while a row is active
 
-    def __init__(self, message, *, header: str = "", footer: str = "") -> None:
+    def __init__(self, message, *, header: str = "", footer: str = "",
+                 _resend: Optional[Callable] = None) -> None:
         self._message = message
         self._header = header
         self._footer = footer
@@ -78,6 +79,8 @@ class StatusMessage:
         self._last_text = ""
         self._last_body = ""
         self._render_future = None
+        # ponytail: recreate deleted status messages; add when richer lifecycle needed
+        self._resend = _resend
         try:
             self._loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -156,7 +159,9 @@ class StatusMessage:
                 future.cancel()
             except Exception:
                 pass
-        return await safe_edit(self._message, text)
+        if await safe_edit(self._message, text):
+            return True
+        return await self._try_resend(text)
 
     async def render_now(self) -> None:
         """Force an immediate render of the current header/rows/footer."""
@@ -233,6 +238,19 @@ class StatusMessage:
             with self._lock:
                 self._in_flight = False
 
+    async def _try_resend(self, text: str) -> bool:
+        """If the progress message was deleted, send a fresh one replying to the command."""
+        if self._resend is None:
+            return False
+        try:
+            new_msg = await self._resend(text)
+            if new_msg is not None:
+                self._message = new_msg
+                return True
+        except Exception:
+            pass
+        return False
+
     async def _render_pass(self) -> None:
         now = time.time()
         content_changed = self._body() != self._last_body
@@ -243,6 +261,10 @@ class StatusMessage:
         if text == self._last_text:
             return
         if await safe_edit(self._message, text):
+            self._last_edit = now
+            self._last_text = text
+            self._last_body = self._body()
+        elif await self._try_resend(text):
             self._last_edit = now
             self._last_text = text
             self._last_body = self._body()

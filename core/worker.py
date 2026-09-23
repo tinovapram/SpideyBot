@@ -60,12 +60,14 @@ class _MessageStub:
 class _TaskEvent:
     """Bare ``.event`` surface that flows call ``.reply()`` / ``.chat_id`` on."""
 
-    __slots__ = ("chat_id", "message", "_client")
+    __slots__ = ("chat_id", "message", "command_msg_id", "_client")
 
-    def __init__(self, client: Any, chat_id: int, msg_id: int) -> None:
+    def __init__(self, client: Any, chat_id: int, msg_id: int, command_msg_id: int | None = None) -> None:
         self._client = client
         self.chat_id = chat_id
         self.message = _MessageStub(msg_id, client, chat_id)
+        # ponytail: original command msg id; add when reply_to semantics change
+        self.command_msg_id = command_msg_id if command_msg_id is not None else msg_id
 
     async def reply(self, text: str, **_kw: Any) -> _MessageStub:
         if self._client is not None:
@@ -73,6 +75,19 @@ class _TaskEvent:
                 msg = await self._client.send_message(self.chat_id, text, reply_to=self.message.id)
                 self.message.id = msg.id if msg else self.message.id
                 return self.message
+            except Exception:
+                pass
+        return self.message
+
+    async def new_status(self, text: str) -> _MessageStub:
+        """Send a fresh status message replying to the **command** (not the old status)."""
+        if self._client is not None:
+            try:
+                msg = await self._client.send_message(
+                    self.chat_id, text, reply_to=self.command_msg_id,
+                )
+                stub = _MessageStub(msg.id if msg else 0, self._client, self.chat_id)
+                return stub
             except Exception:
                 pass
         return self.message
@@ -259,7 +274,9 @@ class DownloadManager:
 
         chat_id = event.chat_id if hasattr(event, "chat_id") else event.message.chat_id
         msg_id = status_msg.id if hasattr(status_msg, "id") else status_msg.message_id
-        adapter = _TaskEvent(self.bot, chat_id, msg_id)
+        cmd_msg_id = getattr(event, 'message', None)
+        cmd_msg_id = getattr(cmd_msg_id, 'id', None)
+        adapter = _TaskEvent(self.bot, chat_id, msg_id, command_msg_id=cmd_msg_id)
 
         task = DownloadTask(
             entry_id=job_id,
