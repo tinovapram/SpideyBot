@@ -16,7 +16,7 @@ from utils import paths
 logger = structlog.get_logger(__name__)
 
 _PROGRESS_RE = re.compile(r"\[download\]\s+(\d+\.\d+)%\s+of\s+(\S+)\s+at\s+(\S+)\s+ETA\s+(\S+)")
-_MEDIA_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".mp4", ".webp")
+_URL_RE = re.compile(r"^https?://\S+")
 
 
 class GalleryDLDownloader:
@@ -122,6 +122,7 @@ class GalleryDLDownloader:
         monitor = asyncio.create_task(monitor_size())
         downloaded_count = 0
         video_progress = ""
+        current_file = ""
 
         try:
             while True:
@@ -132,15 +133,21 @@ class GalleryDLDownloader:
                 if not line:
                     continue
 
+                url_match = _URL_RE.match(line)
                 match = _PROGRESS_RE.search(line)
                 if match:
                     pct, size, speed, eta = match.groups()
                     video_progress = f"\n• Video: {pct}% of {size} ({speed}, ETA {eta})"
-                elif line.lower().endswith(_MEDIA_EXTS):
+                elif url_match:
                     downloaded_count += 1
+                    current_file = url_match.group().split("?")[0].rsplit("/", 1)[-1]
+                    video_progress = ""
 
                 if progress_callback:
+                    short = current_file if len(current_file) <= 40 else current_file[:37] + "..."
                     text = f"📥 **SpideyBot: Downloading...**\n• Files downloaded: {downloaded_count}"
+                    if short:
+                        text += f"\n• Current: `{short}`"
                     if video_progress:
                         text += video_progress
                     await progress_callback(text)

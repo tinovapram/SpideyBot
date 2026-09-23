@@ -86,13 +86,19 @@ async def _run_streaming(task, client, site, downloader, status, max_size_bytes)
         status.set_header("⚠️ **SpideyBot:** Primary download failed, trying gallery-dl")
         status.drop("dl")
         status.drop("dl_count")
-        from downloader.gallerydl import GalleryDLDownloader
+        try:
+            from downloader.gallerydl import GalleryDLDownloader
 
-        fallback = GalleryDLDownloader()
-        downloaded = await fallback.download(
-            task.link, _staging_dir(task, "gdl_fallback"), max_size_bytes,
-            progress_callback=await _gallerydl_hook(status),
-        )
+            downloaded = await GalleryDLDownloader().download(
+                task.link, _staging_dir(task, "gdl_fallback"), max_size_bytes,
+                progress_callback=await _gallerydl_hook(status),
+            )
+        except Exception as exc2:
+            logger.warning("gallery-dl also failed, trying cyberdrop-dl", error=str(exc2))
+            status.row("gdl", "⚠️ gallery-dl failed, trying cyberdrop-dl…")
+            downloaded = await _try_cyberdrop_dl(
+                task, _staging_dir(task, "cdl_fallback"), max_size_bytes, status,
+            )
         sent = await _send_all_at_once(task, client, downloaded, status) if downloaded else 0
     finally:
         downloader._progress_callback = None
@@ -102,15 +108,19 @@ async def _run_streaming(task, client, site, downloader, status, max_size_bytes)
 
 
 async def _run_gallerydl(task, client, status, max_size_bytes) -> int:
-    from downloader.gallerydl import GalleryDLDownloader
-
-    fallback = GalleryDLDownloader()
     staging = _staging_dir(task, "gallery-dl")
+    try:
+        from downloader.gallerydl import GalleryDLDownloader
 
-    downloaded = await fallback.download(
-        task.link, staging, max_size_bytes,
-        progress_callback=await _gallerydl_hook(status),
-    )
+        downloaded = await GalleryDLDownloader().download(
+            task.link, staging, max_size_bytes,
+            progress_callback=await _gallerydl_hook(status),
+        )
+    except Exception as exc:
+        logger.warning("gallery-dl failed, trying cyberdrop-dl", error=str(exc))
+        status.row("gdl", "⚠️ gallery-dl failed, trying cyberdrop-dl…")
+        downloaded = await _try_cyberdrop_dl(task, staging, max_size_bytes, status)
+
     if not downloaded:
         await status.close("❌ **SpideyBot: No files downloaded from the link.**")
         return 0
@@ -118,6 +128,25 @@ async def _run_gallerydl(task, client, status, max_size_bytes) -> int:
     sent = await _send_all_at_once(task, client, downloaded, status)
     shutil.rmtree(staging, ignore_errors=True)
     return sent
+
+
+async def _try_cyberdrop_dl(task, staging_dir: str, max_size_bytes: float, status: StatusMessage) -> list[str]:
+    """Try cyberdrop-dl as a fallback. Returns downloaded file paths or []."""
+    from downloader.site.cyberdrop import CyberdropDLDownloader
+
+    try:
+        downloaded = await CyberdropDLDownloader().download_async(task.link, staging_dir)
+    except Exception as exc:
+        logger.warning("cyberdrop-dl also failed", error=str(exc))
+        return []
+    if not downloaded:
+        return []
+    # Enforce size limit (cyberdrop-dl doesn't check it).
+    total = sum(os.path.getsize(f) for f in downloaded if os.path.isfile(f))
+    if total > max_size_bytes:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise ValueError(f"Download size limit of {max_size_bytes / (1024*1024):.1f} MB exceeded.")
+    return downloaded
 
 
 async def _gallerydl_hook(status: StatusMessage):

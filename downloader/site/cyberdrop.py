@@ -28,6 +28,7 @@ logger = structlog.get_logger(__name__)
 _CYBERDROP_HOSTS = ("cyberdrop.me", "cyberdrop.to", "cyberdrop.cr")
 _BUNKR_HOSTS = ("bunkrr.su", "bunkr.su", "bunkr.is", "bunkr.la", "bunkr.se", "bunkr.cr")
 _CYBERFILE_HOSTS = ("cyberfile.me",)
+_VIDARA_HOSTS = ("igbsa.lol",)
 
 _MEDIA_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".mp4", ".webp", ".mkv"}
 
@@ -56,7 +57,7 @@ class CyberdropDLDownloader(BaseDownloader):
         host = (urlparse(url).hostname or "").lower()
         return any(
             host == h or host.endswith("." + h)
-            for h in _CYBERDROP_HOSTS + _BUNKR_HOSTS + _CYBERFILE_HOSTS
+            for h in _CYBERDROP_HOSTS + _BUNKR_HOSTS + _CYBERFILE_HOSTS + _VIDARA_HOSTS
         )
 
     # ── Config bootstrap ──────────────────────────────────────────

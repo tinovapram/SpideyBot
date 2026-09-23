@@ -104,6 +104,7 @@ def _build_entries():
             "bunkrr.su", "bunkr.",
             "cyberfile.me", "iceyfile.",
             "gofile.io", "saint2faucet.",
+            "igbsa.lol",
         )),
     ]
 

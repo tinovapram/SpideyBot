@@ -1,22 +1,60 @@
-"""Vidara downloader — based on cloudstream's Vidara extractor."""
+"""Vidara downloader — based on cloudstream's Vidara extractor.
+
+Vidara frequently changes domains, so ``matches()`` uses two tiers:
+1. Fast regex for known domain patterns (zero network cost).
+2. Fingerprint probe — fetches the page and checks for Vidara-specific
+   markers (``ENCRYPTION_KEY``, ``/api/stream``).  Matches are cached
+   in ``_FINGERPRINT_CACHE`` so each new domain is only probed once.
+"""
 
 import os
 import re
 import time
 from urllib.parse import urlparse
 
+import requests as _req
+
 from ..base import BaseDownloader
+
+# Known Vidara domain patterns (fast, no network).
+_DOMAIN_RE = re.compile(r"vidara|vidar[ae]")
+
+# HTML markers unique to Vidara pages.
+_FINGERPRINTS = ("ENCRYPTION_KEY", "/api/stream")
+_FINGERPRINT_TIMEOUT = 8  # seconds — short so we don't stall detection
 
 
 class VidaraDownloader(BaseDownloader):
     """Download videos from Vidara and mirrors."""
 
-    _DOMAIN_RE = re.compile(r"vidara|vidar[ae]")
+    # Domains confirmed via fingerprint probe (persists for the process lifetime).
+    _FINGERPRINT_CACHE: set[str] = set()
 
     @classmethod
     def matches(cls, url: str) -> bool:
         host = urlparse(url).hostname or ""
-        return bool(cls._DOMAIN_RE.search(host))
+        # Tier 1: known pattern — instant.
+        if _DOMAIN_RE.search(host):
+            return True
+        # Tier 2: already-probed this process — instant.
+        if host in cls._FINGERPRINT_CACHE:
+            return True
+        # Tier 3: fingerprint probe — one HTTP GET, then cache result.
+        return cls._fingerprint_probe(url, host)
+
+    @classmethod
+    def _fingerprint_probe(cls, url: str, host: str) -> bool:
+        try:
+            resp = _req.get(url, timeout=_FINGERPRINT_TIMEOUT, headers={
+                "User-Agent": "Mozilla/5.0"
+            })
+            body = resp.text[:64_000]  # first 64 KB is plenty
+            if all(fp in body for fp in _FINGERPRINTS):
+                cls._FINGERPRINT_CACHE.add(host)
+                return True
+        except Exception:
+            pass
+        return False
 
     def download(self, url: str, output_dir: str = "downloads") -> list:
         parsed = urlparse(url)
