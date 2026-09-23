@@ -276,7 +276,10 @@ class DownloadManager:
         msg_id = status_msg.id if hasattr(status_msg, "id") else status_msg.message_id
         cmd_msg_id = getattr(event, 'message', None)
         cmd_msg_id = getattr(cmd_msg_id, 'id', None)
-        adapter = _TaskEvent(self.bot, chat_id, msg_id, command_msg_id=cmd_msg_id)
+        # ponytail: use the sender's client so edits work on user-side handlers;
+        # add when DownloadManager carries a client pool
+        send_client = getattr(event, 'client', self.bot)
+        adapter = _TaskEvent(send_client, chat_id, msg_id, command_msg_id=cmd_msg_id)
 
         task = DownloadTask(
             entry_id=job_id,
@@ -286,7 +289,7 @@ class DownloadManager:
             tier=tier,
             is_admin=is_admin,
             event=adapter,
-            status_msg=_MessageStub(msg_id, self.bot, chat_id),
+            status_msg=_MessageStub(msg_id, send_client, chat_id),
             job_id=job_id,
         )
         self.active_tasks[job_id] = task
