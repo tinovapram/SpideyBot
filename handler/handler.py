@@ -173,7 +173,7 @@ class Handler:
             user = await get_or_create_user(session, user_id, _sender_username(event))
             is_premium = user.is_admin or user.tier in ("pro", "premium")
 
-        status_msg = await event.client.send_message(event.chat_id, "⏳ **SpideyBot:** Queuing download…")
+        status_msg = await event.client.send_message(event.chat_id, "⏳ **SpideyBot:** Queuing download…",reply_to=event.message)
         # add_task returns (status, task) — the id lives on the task.
         _, task = await self.manager.add_task(
             user_id, event, link,
@@ -192,7 +192,7 @@ class Handler:
         """Shared /dl and /dt implementation: parse the URL and enqueue it."""
         args = (event.text or "").split(maxsplit=1)
         if len(args) < 2 or not args[1].strip():
-            await event.client.send_message(event.chat_id, usage)
+            await event.client.send_message(event.chat_id, usage,reply_to=event.message)
             raise events.StopPropagation
         await self._enqueue_download(event, args[1].strip())
         raise events.StopPropagation
@@ -205,12 +205,12 @@ class Handler:
         try:
             parse_tg_range(link) if is_range else parse_tg_link(link)
         except ValueError as exc:
-            await event.client.send_message(event.chat_id, f"⚠️ {exc}")
+            await event.client.send_message(event.chat_id, f"⚠️ {exc}", reply_to=event.message)
             return
 
         label = " (range)" if is_range else ""
         status_msg = await event.client.send_message(event.chat_id, 
-            f"⏳ **SpideyBot:** Downloading from Telegram{label}..."
+            f"⏳ **SpideyBot:** Downloading from Telegram{label}...",reply_to=event.message
         )
         status = StatusMessage(status_msg)
         status.set_header(f"🔄 **SpideyBot:** Downloading from Telegram{label}")

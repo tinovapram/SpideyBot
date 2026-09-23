@@ -215,7 +215,7 @@ async def _pipeline(task, client, downloader, files, output_dir, status) -> tupl
         status.drop("ul")
         sent += await send_album(
             client, task.event.chat_id, batch, captions,
-            reply_to=task.event.message.id, support_streaming=True,
+            reply_to=task.event.message, support_streaming=True,
         )
         refresh()
 
