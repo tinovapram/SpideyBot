@@ -47,8 +47,7 @@ async def run_terabox(task, client, downloader) -> None:
         )
 
     if downloader is None:
-        await status.close(
-            "⚠️ **SpideyBot: TeraBox Downloader is not configured.**\n"
+        await status.cleanup_close(
             "Please set `TERABOX_COOKIES` in the `.env` file."
         )
         return
@@ -61,8 +60,7 @@ async def run_terabox(task, client, downloader) -> None:
         pool_active = False
 
     if not candidates:
-        await status.close(
-            "⚠️ **SpideyBot: TeraBox Downloader is not configured.**\n"
+        await status.cleanup_close(
             "No usable account found."
         )
         return
@@ -112,7 +110,7 @@ async def run_terabox(task, client, downloader) -> None:
 
         if selected is None or result is None:
             suffix = f" across {len(candidates)} account(s)" if pool_active else ""
-            await status.close(
+            await status.cleanup_close(
                 f"❌ **SpideyBot: Failed to resolve link**{suffix}.\n"
                 f"Reason: `{last_error}`"
             )
@@ -123,12 +121,12 @@ async def run_terabox(task, client, downloader) -> None:
             key=lambda f: f.size_bytes,
         )
         if not files:
-            await status.close("ℹ️ **SpideyBot:** No actual files found in this share.")
+            await status.cleanup_close("ℹ️ **SpideyBot:** No actual files found in this share.")
             return
 
         total_bytes = sum(f.size_bytes for f in files)
         if total_bytes > max_size_bytes:
-            await status.close(
+            await status.cleanup_close(
                 f"⚠️ **SpideyBot: Limit Exceeded.** Total share size is "
                 f"`{total_bytes / (1024 * 1024):.2f} MB`, exceeding your limit of `{limit_str}`."
             )
@@ -143,7 +141,7 @@ async def run_terabox(task, client, downloader) -> None:
             shutil.rmtree(output_dir, ignore_errors=True)
 
         if task.is_cancelled:
-            await status.close("❌ **SpideyBot:** Download cancelled.")
+            await status.cleanup_close("❌ **SpideyBot:** Download cancelled.")
         elif sent > 0:
             text = (
                 f"✅ **SpideyBot: Done!** Sent {sent}/{len(files)} files "
@@ -151,12 +149,12 @@ async def run_terabox(task, client, downloader) -> None:
             )
             if failed:
                 text += f"\n⚠️ {len(failed)} file(s) failed."
-            await status.close(text)
+            await status.cleanup_close(text)
         else:
-            await status.close("❌ **SpideyBot:** No files were successfully sent.")
+            await status.cleanup_close("❌ **SpideyBot:** No files were successfully sent.")
     except Exception as exc:
         logger.exception("Error processing TeraBox task", link=task.link, error=str(exc))
-        await status.close(f"❌ **SpideyBot: An error occurred.**\nError: `{exc}`")
+        await status.cleanup_close(f"❌ **SpideyBot: An error occurred.**\nError: `{exc}`")
 
 
 async def _pipeline(task, client, downloader, files, output_dir, status) -> tuple[int, list]:

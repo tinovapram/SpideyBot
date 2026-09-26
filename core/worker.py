@@ -391,18 +391,18 @@ class DownloadManager:
         entry_id = job.id
         task = self.active_tasks.get(entry_id)
         if task is None:
-            adapter = _TaskEvent(self.bot, 0, 0)
-            task = DownloadTask(
-                entry_id=entry_id,
-                user_id=job.user_id,
-                link=job.link,
-                site=job.site or "unknown",
-                tier=job.tier,
-                is_admin=False,
-                event=adapter,
-                job_id=job.id,
-            )
-            self.active_tasks[entry_id] = task
+            # Orphan job (crash recovery, stale retry) — no chat context
+            # to deliver results to.  Fail it without retry.
+            logger.warning("Orphan job — no active task, failing", job_id=entry_id)
+            try:
+                async with session_scope() as session:
+                    db_job = await Q.get_job(session, entry_id)
+                    if db_job is not None:
+                        await Q.fail(session, db_job, retry=False)
+                    await session.commit()
+            except Exception:
+                logger.exception("Failed to record orphan job failure", job_id=entry_id)
+            return
 
         # ── Check cancellation before dispatch ──────────────────
         if task.is_cancelled:

@@ -36,7 +36,7 @@ from core.referral import referral_stats
 from core.tiers import (
     HEAVY_SITES, size_limit,
 )
-from core.worker import DownloadManager
+from core.worker import DownloadManager, _MessageStub
 from downloader.telegram import (
     download_tg_message,
     download_tg_range,
@@ -225,7 +225,11 @@ class Handler:
         status_msg = await event.client.send_message(event.chat_id, 
             f"⏳ **SpideyBot:** Downloading from Telegram{label}...",reply_to=event.message
         )
-        status = StatusMessage(status_msg)
+        async def _resend_dt(text):
+            """Fresh message replying to the original command."""
+            msg = await event.client.send_message(event.chat_id, text, reply_to=event.message.id)
+            return _MessageStub(msg.id if msg else 0, event.client, event.chat_id)
+        status = StatusMessage(status_msg, _resend=_resend_dt)
         status.set_header(f"🔄 **SpideyBot:** Downloading from Telegram{label}")
 
         output_dir = str(DOWNLOADS_DIR / f"tg_{event.sender_id}")
@@ -246,7 +250,7 @@ class Handler:
             result = {"ok": False, "error": str(exc)}
 
         if not result["ok"]:
-            await status.close(f"❌ **SpideyBot:** {result['error']}")
+            await status.cleanup_close(f"❌ **SpideyBot:** {result['error']}")
             return
 
         files = result["files"]
@@ -299,10 +303,10 @@ class Handler:
                 )
             else:
                 final = f"✅ **SpideyBot:** Downloaded {len(files)} file(s) from `{result.get('chat_title', '')}`."
-            await status.close(final)
+            await status.cleanup_close(final)
         except Exception as exc:
             logger.error("Failed to send TG files", error=str(exc))
-            await status.close(f"❌ **SpideyBot:** Failed to send files: `{exc}`")
+            await status.cleanup_close(f"❌ **SpideyBot:** Failed to send files: `{exc}`")
         finally:
             for fp in files:
                 try:

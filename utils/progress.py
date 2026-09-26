@@ -163,6 +163,31 @@ class StatusMessage:
             return True
         return await self._try_resend(text)
 
+    async def cleanup_close(self, text: str) -> bool:
+        """Delete progress message and send *text* as a new message, then stop updates."""
+        self._closed = True
+        with self._lock:
+            future = self._render_future
+        if future is not None and not future.done():
+            try:
+                await asyncio.wait_for(
+                    asyncio.wrap_future(future), timeout=self.PULSE_INTERVAL + 0.5
+                )
+            except asyncio.TimeoutError:
+                future.cancel()
+            except Exception:
+                pass
+        # Try to delete the progress message
+        try:
+            await self._message.delete()
+        except Exception:
+            pass
+        # Send final text as a new message
+        if await self._try_resend(text):
+            return True
+        # Fallback: edit the message (delete failed or _resend unavailable)
+        return await safe_edit(self._message, text)
+
     async def render_now(self) -> None:
         """Force an immediate render of the current header/rows/footer."""
         text = self._compose()
