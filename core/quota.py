@@ -30,7 +30,6 @@ class QuotaSnapshot:
     policy: QuotaPolicy
     downloads_today: int
     bytes_today: int
-    bytes_this_month: int
     active_downloads: int
     referral_bonus: int
 
@@ -47,12 +46,6 @@ class QuotaSnapshot:
         return max(0, self.policy.daily_bytes - self.bytes_today)
 
     @property
-    def monthly_bytes_remaining(self) -> int | None:
-        if self.policy.monthly_bytes is None:
-            return None
-        return max(0, self.policy.monthly_bytes - self.bytes_this_month)
-
-    @property
     def can_download(self) -> bool:
         """True when the user has at least one download and byte remaining."""
         dl = self.downloads_remaining
@@ -60,9 +53,6 @@ class QuotaSnapshot:
             return False
         db = self.daily_bytes_remaining
         if db is not None and db <= 0:
-            return False
-        mb = self.monthly_bytes_remaining
-        if mb is not None and mb <= 0:
             return False
         if self.policy.concurrent <= self.active_downloads:
             return False
@@ -83,11 +73,6 @@ class QuotaExceeded(Exception):
 
 def _today_utc() -> date:
     return datetime.now(timezone.utc).date()
-
-
-def _month_start_utc() -> date:
-    today = _today_utc()
-    return today.replace(day=1)
 
 
 async def _upsert_counter(
@@ -165,10 +150,8 @@ async def get_snapshot(session: AsyncSession, user: User) -> QuotaSnapshot:
     policy = tier_policy(tier)
 
     today = _today_utc()
-    month_start = _month_start_utc()
 
     daily = await session.get(QuotaUsage, (user.id, today, "daily"))
-    monthly = await session.get(QuotaUsage, (user.id, month_start, "monthly"))
 
     # Count active (running) downloads for the user.
     from core.models import DownloadJob
@@ -191,7 +174,6 @@ async def get_snapshot(session: AsyncSession, user: User) -> QuotaSnapshot:
         policy=policy,
         downloads_today=daily.downloads if daily else 0,
         bytes_today=daily.bytes_down if daily else 0,
-        bytes_this_month=monthly.bytes_down if monthly else 0,
         active_downloads=active or 0,
         referral_bonus=bonus,
     )
@@ -200,8 +182,6 @@ async def get_snapshot(session: AsyncSession, user: User) -> QuotaSnapshot:
 async def check_quota(
     session: AsyncSession,
     user: User,
-    *,
-    file_size: int | None = None,
 ) -> QuotaSnapshot:
     """Verify that *user* can start a new download.
 
@@ -209,18 +189,13 @@ async def check_quota(
     """
     snap = await get_snapshot(session, user)
 
-    if user.is_admin:
-        return snap
-
-    # per-file size cap
-    if file_size is not None and file_size > snap.policy.size_limit_bytes:
-        raise QuotaExceeded(
-            f"File size {file_size} exceeds tier limit {snap.policy.size_limit_bytes}",
-            snap,
-        )
-
-    if not snap.can_download:
+    # Admins bypass daily-download and byte limits, but concurrent limit still applies.
+    if not user.is_admin and not snap.can_download:
         raise QuotaExceeded("Daily download, bandwidth, or concurrent limit reached", snap)
+
+    # Admins still hit the hard concurrent ceiling.
+    if snap.policy.concurrent <= snap.active_downloads:
+        raise QuotaExceeded(f"Concurrent download limit reached ({snap.policy.concurrent} slots)", snap)
 
     return snap
 
@@ -231,14 +206,10 @@ async def consume(
     *,
     bytes_downloaded: int = 0,
 ) -> None:
-    """Record a completed download: +1 download, +bytes in daily & monthly."""
+    """Record a completed download: +1 download, +bytes."""
     today = _today_utc()
-    month_start = _month_start_utc()
     await _atomic_increment(
         session, user.id, today, "daily", add_downloads=1, add_bytes=bytes_downloaded
-    )
-    await _atomic_increment(
-        session, user.id, month_start, "monthly", add_downloads=0, add_bytes=bytes_downloaded
     )
 
 

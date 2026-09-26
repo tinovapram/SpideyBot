@@ -87,6 +87,26 @@ class Settings(BaseSettings):
     referral_daily_bonus: int = 10
     referral_bonus_days: int = 30
 
+    # ── Tier: Free ───────────────────────────────────────────────
+    tier_free_link_total_mb: int = 500
+    tier_free_daily_downloads: int = 10
+    tier_free_daily_mb: int = 1024
+    tier_free_concurrent: int = 1
+    tier_free_priority: float = 2.0
+
+    # ── Tier: Pro ────────────────────────────────────────────────
+    tier_pro_link_total_mb: int = 10240
+    tier_pro_daily_downloads: int = 50
+    tier_pro_daily_mb: int = 25600
+    tier_pro_concurrent: int = 3
+    tier_pro_priority: float = 1.0
+
+    # ── Tier: Premium ────────────────────────────────────────────
+    tier_premium_daily_downloads: int = 200
+    tier_premium_daily_mb: int = 102400
+    tier_premium_concurrent: int = 8
+    tier_premium_priority: float = 0.5
+
     def admin_id_list(self) -> list[int]:
         """Parse comma-separated ``admin_ids`` string into a list."""
         if not self.admin_ids:

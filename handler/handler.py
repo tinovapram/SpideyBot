@@ -31,10 +31,10 @@ from core import sessions
 from core.config import get_settings, is_admin
 from core.db import session_scope
 from core.models import User, get_or_create_user
-from core.quota import get_snapshot
+from core.quota import check_quota, get_snapshot, QuotaExceeded
 from core.referral import referral_stats
 from core.tiers import (
-    ALL_SITES, HEAVY_SITES, SOCIAL_SITES, VIDEO_HOST_SITES, size_limit,
+    HEAVY_SITES, size_limit,
 )
 from core.worker import DownloadManager
 from downloader.telegram import (
@@ -172,6 +172,19 @@ class Handler:
         async with session_scope() as session:
             user = await get_or_create_user(session, user_id, _sender_username(event))
             is_premium = user.is_admin or user.tier in ("pro", "premium")
+            try:
+                await check_quota(session, user)
+            except QuotaExceeded as exc:
+                detail = ""
+                snap = exc.snapshot
+                if snap and snap.policy.concurrent <= snap.active_downloads:
+                    detail = f" ({snap.active_downloads}/{snap.policy.concurrent} slots used)"
+                await event.client.send_message(
+                    event.chat_id,
+                    f"🚫 **SpideyBot:** {exc}{detail}\nSend /quota to check limits.",
+                    reply_to=event.message,
+                )
+                return
 
         status_msg = await event.client.send_message(event.chat_id, "⏳ **SpideyBot:** Queuing download…",reply_to=event.message)
         # add_task returns (status, task) — the id lives on the task.
@@ -324,7 +337,7 @@ class Handler:
             f"    Sessions: {session_label}",
             "",
         ]
-        if user.tier == "free":
+        if user.tier == "free" and not is_admin(user_id):
             lines.append(_FREE_NOTE)
         lines.append(_HELP_COMMANDS)
         buttons = [
@@ -342,13 +355,13 @@ class Handler:
             user = await get_or_create_user(session, user_id, _sender_username(event))
 
         tier_label = await self._tier_label(user_id)
-        _, size_label = size_limit(user.tier, is_admin(user_id))
+        _, limit_label = size_limit(user.tier, is_admin(user_id))
         session_label = await self._session_badge(user_id)
 
         lines = [
             _HELP_HEADER,
             f"    Tier: {tier_label}",
-            f"    Per-file limit: {size_label}",
+            f"    Link limit: {limit_label}",
             f"    Sessions: {session_label}",
             "",
             _HELP_COMMANDS,
@@ -497,16 +510,8 @@ class Handler:
         else:
             lines.append(f"  Bandwidth today: {_fmt_bytes(snap.bytes_today)} (∞)")
 
-        if snap.policy.monthly_bytes is not None:
-            lines.append(
-                f"  Bandwidth month: {_fmt_bytes(snap.bytes_this_month)} / "
-                f"{_fmt_bytes(snap.policy.monthly_bytes)}"
-            )
-        else:
-            lines.append(f"  Bandwidth month: {_fmt_bytes(snap.bytes_this_month)} (∞)")
-
         lines.append(f"  Concurrent: {snap.policy.concurrent}")
-        lines.append(f"  Per-file limit: {size_limit(snap.tier, is_admin(user_id))[1]}")
+        lines.append(f"  Link limit: {size_limit(snap.tier, is_admin(user_id))[1]}")
 
         if not snap.can_download:
             lines.append("\n⚠️ **Quota reached** — try again tomorrow.")
@@ -518,20 +523,11 @@ class Handler:
 
     async def sites_handler(self, event) -> None:
         """List supported sites grouped by category."""
-        user_id = event.sender_id
-        async with session_scope() as session:
-            user = await get_or_create_user(session, user_id, _sender_username(event))
-            tier = user.tier if user.tier in ("free", "pro", "premium") else "free"
-
-        def _label(sites: frozenset[str]) -> str:
-            return ", ".join(sorted(sites))
-
         lines = [
             "**Supported Platforms**\n",
-            f"  Your tier: **{tier.title()}**\n",
-            f"  📱 Social & video: {_label(SOCIAL_SITES & ALL_SITES)}",
-            f"  🎬 Video hosting: {_label(VIDEO_HOST_SITES & ALL_SITES)}",
-            f"  📦 Heavy / cloud: {_label(HEAVY_SITES & ALL_SITES)}",
+            f"  📱 Social & video: YouTube, Twitter, TikTok, Reddit, Instagram, ...",
+            f"  🎬 Video hosting: Doodstream, StreamTape, MixDrop, StreamWish, ...",
+            f"  📦 Heavy / cloud: TeraBox",
             "",
             "Send any link with /dl or /dt to download.",
         ]

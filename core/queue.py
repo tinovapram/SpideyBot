@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import get_settings
 from core.metrics import get_metrics
-from core.models import DownloadJob, DownloadHistory
+from core.models import DownloadJob
 from core.tiers import PRIORITY_ADMIN, tier_policy
 
 # ── Status constants ────────────────────────────────────────────
@@ -122,17 +122,6 @@ async def complete(
     job.finished_at = datetime.now(timezone.utc)
     job.total_bytes = bytes_downloaded
 
-    history = DownloadHistory(
-        user_id=job.user_id,
-        job_id=job.id,
-        link=job.link,
-        site=job.site,
-        filename=filename,
-        bytes=bytes_downloaded,
-        status=DONE,
-    )
-    session.add(history)
-
     get_metrics().incr("downloads_completed")
     if bytes_downloaded:
         get_metrics().incr("bytes_downloaded", bytes_downloaded)
@@ -160,14 +149,6 @@ async def fail(
         return True
 
     job.status = FAILED
-    history = DownloadHistory(
-        user_id=job.user_id,
-        job_id=job.id,
-        link=job.link,
-        site=job.site,
-        status=FAILED,
-    )
-    session.add(history)
     get_metrics().incr("downloads_failed")
     return False
 

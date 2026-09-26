@@ -153,51 +153,35 @@ boolean, not a tier.
 | per-link total size | 500 MB | 10 GB | unlimited |
 | daily downloads | 10 | 50 | 200 |
 | daily bandwidth | 1 GB | 25 GB | 100 GB |
-| monthly bandwidth | 20 GB | 500 GB | 2 TB |
 | concurrent downloads | 1 | 3 | 8 |
 | queue priority | 2.0 | 1.0 | 0.5 (admin 0.2) |
-| history retention | 7 days | 30 days | 90 days |
-| site gating | allowlist | allowlist+ | all (denylist) |
+
+All tier parameters are configurable via `SPIDEY_TIER_*` env vars.
 
 ```python
 @dataclass(frozen=True)
 class QuotaPolicy:
-    size_limit_bytes: int
     link_total_limit_bytes: int | None      # None = unlimited
     daily_downloads: int | None             # None = unlimited
-    daily_bytes: int | None
-    monthly_bytes: int | None
+    daily_bytes: int | None                 # None = unlimited
     concurrent: int
     priority: float
-    history_retention_days: int
-    sites: SitePolicy                       # allowlist / denylist
 
 TIERS: dict[str, QuotaPolicy] = { "free": ..., "pro": ..., "premium": ... }
 ```
 
-### Site gating
-
-- `SitePolicy(mode="allowlist" | "all", allow=set, deny=set)`
-- `free` → allowlist of curated sites.
-- `pro` → allowlist + a broader set.
-- `premium` → all sites except a shared deny list (risky/abusive hosts).
-- Admin bypasses gating entirely.
+All users can access all sites — no site gating.
 
 ## 5. Quota flow (per download request)
 
 ```
 request → rate-limit check (429 if exceeded)
-        → load tier + current quota_usage
-        → enforce: daily count · daily bytes · monthly bytes (atomic upsert)
-        → reserve concurrent slot
-        → enqueue job (priority = tier.priority, aging boost)
+        → quota check (daily count · daily bytes · concurrent slots)
+        → enqueue job (priority = tier.priority)
         → worker claims job (SKIP LOCKED)
-        → download → upload → record bytes in history + quota_usage
+        → download → upload → record bytes in quota_usage
         → release slot
 ```
-
-Reservation is **check-then-increment** inside one SQL `INSERT ... ON CONFLICT DO UPDATE`
-with a `WHERE` guard, so concurrent requests can't oversell quota.
 
 ## 6. Persistent queue
 

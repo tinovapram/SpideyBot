@@ -450,24 +450,7 @@ class DownloadManager:
                 self.task_done(entry_id)
                 return
         else:
-            # Standard site gating via tier policy
-            policy = tier_policy(task.tier)
-            if not policy.sites.allows(task.site or ""):
-                if task.status_msg is not None:
-                    try:
-                        await task.status_msg.edit(
-                            f"⚠️ **SpideyBot:** Your tier ({task.tier}) "
-                            f"does not have access to {task.site or 'this site'}."
-                        )
-                    except Exception:
-                        pass
-                async with session_scope() as session:
-                    db_job = await Q.get_job(session, entry_id)
-                    if db_job is not None:
-                        await Q.fail(session, db_job, retry=False)
-                    await session.commit()
-                self.task_done(entry_id)
-                return
+            pass  # site gating removed — all tiers access all sites
 
         # ── Get user client ─────────────────────────────────────
         client = sessions.get_client(job.user_id)
