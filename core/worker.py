@@ -239,7 +239,7 @@ class DownloadManager:
         self._terabox_downloader = terabox_downloader
         self.active_tasks: dict[int, DownloadTask] = {}
         self._running = False
-        self._worker_task: asyncio.Task | None = None
+        self._worker_tasks: list[asyncio.Task] = []
 
     # ── Handler-facing API ──────────────────────────────────────
 
@@ -337,23 +337,27 @@ class DownloadManager:
     # ── Worker lifecycle ────────────────────────────────────────
 
     def start(self) -> None:
-        """Start the background worker loop."""
+        """Start the background worker pool."""
         if self._running:
             return
         self._running = True
-        self._worker_task = asyncio.create_task(self._worker_loop())
-        logger.info("DownloadManager worker started")
+        n = max(1, get_settings().max_concurrent_downloads)
+        self._worker_tasks = [
+            asyncio.create_task(self._worker_loop()) for _ in range(n)
+        ]
+        logger.info("DownloadManager workers started", count=n)
 
     async def stop(self) -> None:
-        """Cancel the worker loop and close the TeraBox pool."""
+        """Cancel all worker loops and close the TeraBox pool."""
         self._running = False
-        if self._worker_task is not None:
-            self._worker_task.cancel()
+        for t in self._worker_tasks:
+            t.cancel()
+        for t in self._worker_tasks:
             try:
-                await self._worker_task
+                await t
             except asyncio.CancelledError:
                 pass
-            self._worker_task = None
+        self._worker_tasks = []
         if self._terabox_downloader is not None:
             try:
                 await self._terabox_downloader.close()
