@@ -13,6 +13,8 @@ from typing import Optional
 
 import structlog
 
+from utils.telethon import safe_upload_file
+
 logger = structlog.get_logger(__name__)
 
 _VIDEO_EXTS = frozenset({".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".wmv", ".m4v"})
@@ -183,7 +185,7 @@ async def prepare_media(
     from telethon import types
     from telethon.utils import get_attributes, is_image
 
-    file_handle = await client.upload_file(file_path, progress_callback=progress_callback)
+    file_handle = await safe_upload_file(client, file_path, progress_callback=progress_callback)
 
     is_img = is_image(file_path)
     if as_image is None:
@@ -205,14 +207,14 @@ async def prepare_media(
     thumb_handle = None
     if thumb and os.path.isfile(thumb):
         try:
-            thumb_handle = await client.upload_file(thumb)
+            thumb_handle = await safe_upload_file(client, thumb)
         except Exception:
             thumb_handle = None
     elif thumb is None:
         auto_thumb = make_video_thumb(file_path)
         if auto_thumb:
             try:
-                thumb_handle = await client.upload_file(auto_thumb)
+                thumb_handle = await safe_upload_file(client, auto_thumb)
             except Exception:
                 thumb_handle = None
             finally:

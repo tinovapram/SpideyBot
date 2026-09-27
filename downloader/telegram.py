@@ -154,7 +154,7 @@ async def download_tg_message(
         if msg.media is None:
             continue
         try:
-            path = await client.download_media(msg, file=output_dir, progress_callback=progress_callback)
+            path = await safe_download_media(client, msg, file=output_dir, progress_callback=progress_callback)
             if path:
                 files.append(path)
                 metadata.append(_tg_media_meta(msg))
@@ -226,7 +226,7 @@ async def download_tg_range(
         if text:
             captions.append(text)
         try:
-            path = await client.download_media(msg, file=output_dir, progress_callback=progress_callback)
+            path = await safe_download_media(client, msg, file=output_dir, progress_callback=progress_callback)
             if path:
                 files.append(path)
                 metadata.append(_tg_media_meta(msg))

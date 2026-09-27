@@ -3,11 +3,15 @@ Telethon helpers that handle Telegram flood-wait and album chunking.
 
 Telegram limits albums to 10 media items and rate-limits rapid edits/sends.
 These wrappers catch ``FloodWaitError``, wait out the cooldown, and retry.
+
+A global rate limiter gates all Telegram API calls to prevent flood warnings
+when many workers run concurrently.
 """
 
 from __future__ import annotations
 
 import asyncio
+import time
 
 import structlog
 from telethon.errors import FloodWaitError, RPCError
@@ -16,9 +20,43 @@ logger = structlog.get_logger(__name__)
 
 ALBUM_LIMIT = 10
 
+# -- Per-client rate limiter + concurrency cap ---------------------
+# Telegram rate-limits rapid API calls per account.  Each client
+# (bot, user session) gets its own lock + timestamp so they don't
+# block each other, plus a semaphore capping concurrent in-flight
+# calls.
+
+_MIN_INTERVAL = 0.3  # seconds between Telegram API calls per client
+_MAX_CONCURRENT = 3  # max concurrent API calls per client
+_rate_locks: dict[int, asyncio.Lock] = {}
+_rate_lasts: dict[int, float] = {}
+_sems: dict[int, asyncio.Semaphore] = {}
+
+
+def _get_sem(client) -> asyncio.Semaphore:
+    cid = id(client)
+    if cid not in _sems:
+        _sems[cid] = asyncio.Semaphore(_MAX_CONCURRENT)
+    return _sems[cid]
+
+
+async def _rate_limit(client) -> None:
+    """Sleep if needed so Telegram API calls per client are spaced out."""
+    cid = id(client)
+    if cid not in _rate_locks:
+        _rate_locks[cid] = asyncio.Lock()
+    async with _rate_locks[cid]:
+        now = time.monotonic()
+        last = _rate_lasts.get(cid, 0.0)
+        wait = _MIN_INTERVAL - (now - last)
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _rate_lasts[cid] = time.monotonic()
+
 
 async def safe_edit(message, text: str, **kwargs) -> bool:
     """Edit *message*, sleeping through flood-waits. Returns success."""
+    await _rate_limit(getattr(message, "client", None))
     try:
         await message.edit(text, **kwargs)
         return True
@@ -34,14 +72,40 @@ async def safe_edit(message, text: str, **kwargs) -> bool:
         return False
 
 
+async def safe_upload_file(client, *args, **kwargs):
+    """upload_file with flood protection."""
+    async with _get_sem(client):
+        await _rate_limit(client)
+        try:
+            return await client.upload_file(*args, **kwargs)
+        except FloodWaitError as exc:
+            logger.warning("Flood wait on upload", seconds=exc.seconds)
+            await asyncio.sleep(exc.seconds)
+            return await client.upload_file(*args, **kwargs)
+
+
+async def safe_download_media(client, *args, **kwargs):
+    """download_media with flood protection."""
+    async with _get_sem(client):
+        await _rate_limit(client)
+        try:
+            return await client.download_media(*args, **kwargs)
+        except FloodWaitError as exc:
+            logger.warning("Flood wait on download", seconds=exc.seconds)
+            await asyncio.sleep(exc.seconds)
+            return await client.download_media(*args, **kwargs)
+
+
 async def safe_send_file(client, *args, **kwargs):
-    """``send_file`` that sleeps through a single flood-wait and retries."""
-    try:
-        return await client.send_file(*args, **kwargs)
-    except FloodWaitError as exc:
-        logger.warning("Flood wait on send", seconds=exc.seconds)
-        await asyncio.sleep(exc.seconds)
-        return await client.send_file(*args, **kwargs)
+    """send_file with flood protection."""
+    async with _get_sem(client):
+        await _rate_limit(client)
+        try:
+            return await client.send_file(*args, **kwargs)
+        except FloodWaitError as exc:
+            logger.warning("Flood wait on send", seconds=exc.seconds)
+            await asyncio.sleep(exc.seconds)
+            return await client.send_file(*args, **kwargs)
 
 
 async def send_album(
@@ -53,7 +117,7 @@ async def send_album(
     **kwargs,
 ) -> int:
     """
-    Send *media* as albums of at most 10, with per-file captions.
+    Send media as albums of at most 10, with per-file captions.
 
     Returns the number of items successfully sent. Falls back to individual
     sends when an album fails.
