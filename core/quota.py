@@ -193,8 +193,8 @@ async def check_quota(
     if not user.is_admin and not snap.can_download:
         raise QuotaExceeded("Daily download, bandwidth, or concurrent limit reached", snap)
 
-    # Admins still hit the hard concurrent ceiling.
-    if snap.policy.concurrent <= snap.active_downloads:
+    # Admins skip concurrent limit — they queue freely.
+    if not user.is_admin and snap.policy.concurrent <= snap.active_downloads:
         raise QuotaExceeded(f"Concurrent download limit reached ({snap.policy.concurrent} slots)", snap)
 
     return snap

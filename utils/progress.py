@@ -163,8 +163,12 @@ class StatusMessage:
             return True
         return await self._try_resend(text)
 
-    async def cleanup_close(self, text: str) -> bool:
-        """Delete progress message and send *text* as a new message, then stop updates."""
+    async def cleanup_close(self, text: str, *, edit_only: bool = False) -> bool:
+        """Delete progress message and send *text* as a new message, then stop updates.
+
+        When *edit_only* is ``True`` (failure paths), keep the progress message
+        and edit it in-place so the user sees the error in context.
+        """
         self._closed = True
         with self._lock:
             future = self._render_future
@@ -177,15 +181,17 @@ class StatusMessage:
                 future.cancel()
             except Exception:
                 pass
-        # Try to delete the progress message
+        if edit_only:
+            if await safe_edit(self._message, text):
+                return True
+            return await self._try_resend(text)
+        # Success path: delete progress, send fresh final message
         try:
             await self._message.delete()
         except Exception:
             pass
-        # Send final text as a new message
         if await self._try_resend(text):
             return True
-        # Fallback: edit the message (delete failed or _resend unavailable)
         return await safe_edit(self._message, text)
 
     async def render_now(self) -> None:

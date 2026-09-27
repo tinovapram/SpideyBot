@@ -57,13 +57,13 @@ async def run_download(task, client) -> None:
             sent = await _run_gallerydl(task, client, status, max_size_bytes)
     except Exception as exc:
         logger.exception("Download failed", link=task.link, error=str(exc))
-        await status.cleanup_close(f"❌ **SpideyBot: Failed to download media.**\nReason: `{exc}`")
+        await status.cleanup_close(f"❌ **SpideyBot: Failed to download media.**\nReason: `{exc}`", edit_only=True)
         return
 
     if sent > 0:
         await status.cleanup_close(f"✅ **SpideyBot: Done!** Sent {sent} file(s).")
     else:
-        await status.cleanup_close("❌ **SpideyBot:** No files were successfully sent.")
+        await status.cleanup_close("❌ **SpideyBot:** No files were successfully sent.", edit_only=True)
 
 
 def _staging_dir(task, site: str) -> str:
@@ -122,7 +122,7 @@ async def _run_gallerydl(task, client, status, max_size_bytes) -> int:
         downloaded = await _try_cyberdrop_dl(task, staging, max_size_bytes, status)
 
     if not downloaded:
-        await status.cleanup_close("❌ **SpideyBot: No files downloaded from the link.**")
+        await status.cleanup_close("❌ **SpideyBot: No files downloaded from the link.**", edit_only=True)
         return 0
 
     sent = await _send_all_at_once(task, client, downloaded, status)

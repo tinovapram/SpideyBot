@@ -250,7 +250,7 @@ class Handler:
             result = {"ok": False, "error": str(exc)}
 
         if not result["ok"]:
-            await status.cleanup_close(f"❌ **SpideyBot:** {result['error']}")
+            await status.cleanup_close(f"❌ **SpideyBot:** {result['error']}", edit_only=True)
             return
 
         files = result["files"]
@@ -306,7 +306,7 @@ class Handler:
             await status.cleanup_close(final)
         except Exception as exc:
             logger.error("Failed to send TG files", error=str(exc))
-            await status.cleanup_close(f"❌ **SpideyBot:** Failed to send files: `{exc}`")
+            await status.cleanup_close(f"❌ **SpideyBot:** Failed to send files: `{exc}`", edit_only=True)
         finally:
             for fp in files:
                 try:
