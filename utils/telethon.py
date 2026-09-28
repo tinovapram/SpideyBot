@@ -20,24 +20,14 @@ logger = structlog.get_logger(__name__)
 
 ALBUM_LIMIT = 10
 
-# -- Per-client rate limiter + concurrency cap ---------------------
+# -- Per-client rate limiter -------------------------------------------
 # Telegram rate-limits rapid API calls per account.  Each client
 # (bot, user session) gets its own lock + timestamp so they don't
-# block each other, plus a semaphore capping concurrent in-flight
-# calls.
+# block each other.  0.3s floor prevents burst floods.
 
 _MIN_INTERVAL = 0.3  # seconds between Telegram API calls per client
-_MAX_CONCURRENT = 3  # max concurrent API calls per client
 _rate_locks: dict[int, asyncio.Lock] = {}
 _rate_lasts: dict[int, float] = {}
-_sems: dict[int, asyncio.Semaphore] = {}
-
-
-def _get_sem(client) -> asyncio.Semaphore:
-    cid = id(client)
-    if cid not in _sems:
-        _sems[cid] = asyncio.Semaphore(_MAX_CONCURRENT)
-    return _sems[cid]
 
 
 async def _rate_limit(client) -> None:
@@ -73,39 +63,35 @@ async def safe_edit(message, text: str, **kwargs) -> bool:
 
 
 async def safe_upload_file(client, *args, **kwargs):
-    """upload_file with flood protection."""
-    async with _get_sem(client):
-        await _rate_limit(client)
-        try:
-            return await client.upload_file(*args, **kwargs)
-        except FloodWaitError as exc:
-            logger.warning("Flood wait on upload", seconds=exc.seconds)
-            await asyncio.sleep(exc.seconds)
-            return await client.upload_file(*args, **kwargs)
+    """upload_file — rate-limited with flood-wait retry."""
+    await _rate_limit(client)
+    try:
+        return await client.upload_file(*args, **kwargs)
+    except FloodWaitError as exc:
+        logger.warning("Flood wait on upload", seconds=exc.seconds)
+        await asyncio.sleep(exc.seconds)
+        return await client.upload_file(*args, **kwargs)
 
 
 async def safe_download_media(client, *args, **kwargs):
-    """download_media with flood protection."""
-    async with _get_sem(client):
-        await _rate_limit(client)
-        try:
-            return await client.download_media(*args, **kwargs)
-        except FloodWaitError as exc:
-            logger.warning("Flood wait on download", seconds=exc.seconds)
-            await asyncio.sleep(exc.seconds)
-            return await client.download_media(*args, **kwargs)
+    """download_media — no rate-limit (downloads don't trigger floods)."""
+    try:
+        return await client.download_media(*args, **kwargs)
+    except FloodWaitError as exc:
+        logger.warning("Flood wait on download", seconds=exc.seconds)
+        await asyncio.sleep(exc.seconds)
+        return await client.download_media(*args, **kwargs)
 
 
 async def safe_send_file(client, *args, **kwargs):
-    """send_file with flood protection."""
-    async with _get_sem(client):
-        await _rate_limit(client)
-        try:
-            return await client.send_file(*args, **kwargs)
-        except FloodWaitError as exc:
-            logger.warning("Flood wait on send", seconds=exc.seconds)
-            await asyncio.sleep(exc.seconds)
-            return await client.send_file(*args, **kwargs)
+    """send_file — rate-limited with flood-wait retry."""
+    await _rate_limit(client)
+    try:
+        return await client.send_file(*args, **kwargs)
+    except FloodWaitError as exc:
+        logger.warning("Flood wait on send", seconds=exc.seconds)
+        await asyncio.sleep(exc.seconds)
+        return await client.send_file(*args, **kwargs)
 
 
 async def send_album(

@@ -98,13 +98,13 @@ class Settings(BaseSettings):
     tier_pro_link_total_mb: int = 10240
     tier_pro_daily_downloads: int = 50
     tier_pro_daily_mb: int = 25600
-    tier_pro_concurrent: int = 3
+    tier_pro_concurrent: int = 2
     tier_pro_priority: float = 1.0
 
     # ── Tier: Premium ────────────────────────────────────────────
     tier_premium_daily_downloads: int = 200
     tier_premium_daily_mb: int = 102400
-    tier_premium_concurrent: int = 5
+    tier_premium_concurrent: int = 3
     tier_premium_priority: float = 0.5
 
     def admin_id_list(self) -> list[int]:

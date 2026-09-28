@@ -213,22 +213,22 @@ class Handler:
     async def _download_tg(self, event, link: str) -> None:
         """Download from Telegram message link using the user's own client."""
         from telethon.errors import RPCError as TelethonRPCError
-
+        client: TelegramClient=event.client
         is_range = is_tg_range_url(link)
         try:
             parse_tg_range(link) if is_range else parse_tg_link(link)
         except ValueError as exc:
-            await event.client.send_message(event.chat_id, f"⚠️ {exc}", reply_to=event.message)
+            await client.send_message(event.chat_id, f"⚠️ {exc}", reply_to=event.message)
             return
 
         label = " (range)" if is_range else ""
-        status_msg = await event.client.send_message(event.chat_id, 
+        status_msg = await client.send_message(event.chat_id, 
             f"⏳ **SpideyBot:** Downloading from Telegram{label}...",reply_to=event.message
         )
         async def _resend_dt(text):
             """Fresh message replying to the original command."""
-            msg = await event.client.send_message(event.chat_id, text, reply_to=event.message.id)
-            return _MessageStub(msg.id if msg else 0, event.client, event.chat_id)
+            msg = await client.send_message(event.chat_id, text, reply_to=event.message.id)
+            return _MessageStub(msg.id if msg else 0, client, event.chat_id)
         status = StatusMessage(status_msg, _resend=_resend_dt)
         status.set_header(f"🔄 **SpideyBot:** Downloading from Telegram{label}")
 
@@ -237,12 +237,12 @@ class Handler:
         try:
             if is_range:
                 result = await download_tg_range(
-                    self.client, link, output_dir=output_dir,
+                    client, link, output_dir=output_dir,
                     progress_callback=dl_cb,
                 )
             else:
                 result = await download_tg_message(
-                    self.client, link, output_dir=output_dir,
+                    client, link, output_dir=output_dir,
                     progress_callback=dl_cb,
                 )
         except Exception as exc:
@@ -279,7 +279,7 @@ class Handler:
                             kwargs["force_document"] = True
                     media.append(
                         await prepare_media(
-                            self.client, fp,
+                            client, fp,
                             progress_callback=up_cb, **kwargs,
                         )
                     )
@@ -287,13 +287,13 @@ class Handler:
                     logger.warning("Failed to prepare TG file", file=fp, error=str(exc))
 
             if media:
-                await self.client.send_file(
+                await client.send_file(
                     event.chat_id, media,
                     caption=f"✅ **SpideyBot:** Downloaded {len(media)} file(s) from Telegram{label}.",
                     reply_to=event.message,
                 )
             else:
-                await event.client.send_message(event.chat_id, "✅ **SpideyBot:** Downloaded but nothing to send.")
+                await client.send_message(event.chat_id, "✅ **SpideyBot:** Downloaded but nothing to send.")
 
             if is_range:
                 final = (
