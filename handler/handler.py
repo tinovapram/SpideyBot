@@ -255,6 +255,7 @@ class Handler:
 
         files = result["files"]
         metadata = result.get("file_metadata") or [None] * len(files)
+        original_caption = (result.get("caption") or "").strip()
 
         import os
         try:
@@ -287,9 +288,13 @@ class Handler:
                     logger.warning("Failed to prepare TG file", file=fp, error=str(exc))
 
             if media:
+                if original_caption:
+                    cap = original_caption
+                else:
+                    cap = f"✅ **SpideyBot:** Downloaded {len(media)} file(s) from Telegram{label}."
                 await client.send_file(
                     event.chat_id, media,
-                    caption=f"✅ **SpideyBot:** Downloaded {len(media)} file(s) from Telegram{label}.",
+                    caption=cap,
                     reply_to=event.message,
                 )
             else:
