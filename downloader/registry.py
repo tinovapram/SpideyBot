@@ -66,6 +66,7 @@ def _build_entries():
     from downloader.site.tumblr import TumblrDownloader
     from downloader.site.twitter import TwitterDownloader
     from downloader.site.vidara import VidaraDownloader
+    from downloader.site.vidmonstr import VidmonstrDownloader
     from downloader.site.youtube import YouTubeDownloader
     from downloader.site.mega import MegaDownloader
     from downloader.site.cyberdrop import CyberdropDLDownloader
@@ -89,6 +90,7 @@ def _build_entries():
         _LazyEntry("doodstream", DoodstreamDownloader, DoodstreamDownloader.matches),
         _LazyEntry("streamtape", StreamtapeDownloader, StreamtapeDownloader.matches),
         _LazyEntry("vidara", VidaraDownloader, VidaraDownloader.matches),
+        _LazyEntry("vidmonstr", VidmonstrDownloader, VidmonstrDownloader.matches),
         _LazyEntry("mixdrop", MixDropDownloader, MixDropDownloader.matches),
         _LazyEntry("streamwish", StreamWishDownloader, StreamWishDownloader.matches),
         _LazyEntry("luluvdoo", LuluvdooDownloader, LuluvdooDownloader.matches),

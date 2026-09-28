@@ -15,6 +15,8 @@ from dataclasses import dataclass
 import structlog
 from telethon import types as tg_types
 
+from utils.telethon import safe_download_media
+
 logger = structlog.get_logger(__name__)
 
 _TG_LINK_RE = re.compile(
