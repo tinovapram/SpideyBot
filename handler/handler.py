@@ -402,17 +402,10 @@ class Handler:
         if len(args) < 2 or not args[1].strip():
             await event.client.send_message(event.chat_id, _USAGE_DT)
             raise events.StopPropagation
-        link = args[1].strip()
-        if not _is_telegram_link(link):
-            await event.client.send_message(event.chat_id, 
-                "⚠️ **/dt is for Telegram links only.**\n"
-                "Use `/dl <URL>` for other sites, or `/dt <t.me link>` for Telegram."
-            )
-            raise events.StopPropagation
         # No active session — tell user to start one.
         await event.client.send_message(event.chat_id, 
             "⚠️ **Telegram downloads need your session.**\n"
-            "Send /start or /login first, then use /dt again."
+            "Send /start or /login first, then use /dt again.",reply_to=event.message
         )
         raise events.StopPropagation
 
@@ -625,10 +618,10 @@ class Handler:
             result = await event.client.download_media(msg, file=output_dir, progress_callback=dl_cb)
         except Exception as exc:
             logger.error("TG WOW download failed", error=str(exc))
-            result = {"ok": False, "error": str(exc)}
+            result = None
 
-        if not result["ok"]:
-            await status.close(f"❌ **SpideyBot:** {result['error']}")
+        if not result:
+            await status.close("❌ **SpideyBot:** Failed to download media.")
             return
 
         try:

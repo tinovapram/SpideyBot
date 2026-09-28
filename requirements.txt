@@ -1,5 +1,5 @@
 # ── Telegram client ──────────────────────────────────────────────
-telethon[speedup]>=1.35.0
+telethon>=1.35.0
 cryptg
 hachoir
 pillow
