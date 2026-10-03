@@ -417,35 +417,39 @@ class Handler:
     # ── /cancel ───────────────────────────────────────────────────────────────
 
     async def cancel_handler(self, event) -> None:
+        if self._handled_by_user_session(event):
+            return
         args = (event.text or "").split(maxsplit=1)
         if len(args) < 2 or not args[1].strip():
-            await event.client.send_message(event.chat_id, _USAGE_CANCEL)
+            await event.client.send_message(event.chat_id, _USAGE_CANCEL,reply_to=event.message)
             raise events.StopPropagation
 
         raw = args[1].strip()
         if not raw.isdigit():
             await event.client.send_message(event.chat_id, 
-                "⚠️ **Invalid ID** — pass the number shown by /status."
+                "⚠️ **Invalid ID** — pass the number shown by /status.",reply_to=event.message
             )
             raise events.StopPropagation
 
         entry_id = int(raw)
         task = self.manager.get_task(entry_id)
         if task is None:
-            await event.client.send_message(event.chat_id, f"⚠️ No active download with ID `{entry_id}`.")
+            await event.client.send_message(event.chat_id, f"⚠️ No active download with ID `{entry_id}`.",reply_to=event.message)
         elif task.user_id != event.sender_id:
-            await event.client.send_message(event.chat_id, "⚠️ That download belongs to another user.")
+            await event.client.send_message(event.chat_id, "⚠️ That download belongs to another user.",reply_to=event.message)
         else:
             await self.manager.cancel_task(entry_id)
-            await event.client.send_message(event.chat_id, f"❌ Cancelled download **{entry_id}**.")
+            await event.client.send_message(event.chat_id, f"❌ Cancelled download **{entry_id}**.",reply_to=event.message)
         raise events.StopPropagation
 
     # ── /status ───────────────────────────────────────────────────────────────
 
     async def status_handler(self, event) -> None:
+        if self._handled_by_user_session(event):
+            return
         tasks = self.manager.user_tasks(event.sender_id)
         if not tasks:
-            await event.client.send_message(event.chat_id, "✅ No active downloads.")
+            await event.client.send_message(event.chat_id, "✅ No active downloads.",reply_to=event.message)
             raise events.StopPropagation
 
         lines = ["**Active downloads:**\n"]
@@ -453,7 +457,7 @@ class Handler:
             state = "❌ Cancelled" if task.is_cancelled else "🔄 Running"
             link = task.link if len(task.link) <= 50 else task.link[:50] + "…"
             lines.append(f"  `{task.entry_id}` — {link} — {state}")
-        await event.client.send_message(event.chat_id, "\n".join(lines))
+        await event.client.send_message(event.chat_id, "\n".join(lines),reply_to=event.message)
         raise events.StopPropagation
 
     # ── /account ──────────────────────────────────────────────────────────────
@@ -466,7 +470,7 @@ class Handler:
             "To log in to Terabox, use /login.",
             "To log out, use /logout.",
         ]
-        await event.client.send_message(event.chat_id, "\n".join(lines))
+        await event.client.send_message(event.chat_id, "\n".join(lines),reply_to=event.message)
         raise events.StopPropagation
 
     # ── /quota ────────────────────────────────────────────────────────────────

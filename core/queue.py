@@ -70,6 +70,9 @@ async def claim_next(session: AsyncSession) -> DownloadJob | None:
     settings = get_settings()
     lease_seconds = settings.job_lease_seconds
 
+    # ponytail: per-user slot cap at claim time (best-effort — two workers
+    # racing on the same user can overshoot by one; add pg_advisory_xact_lock
+    # if exactness matters).
     stmt = text(
         """
         UPDATE download_jobs SET
@@ -82,6 +85,15 @@ async def claim_next(session: AsyncSession) -> DownloadJob | None:
             SELECT id FROM download_jobs
              WHERE status = 'queued'
                AND (lease_expires IS NULL OR lease_expires < now())
+               AND (
+                    SELECT count(*) FROM download_jobs j2
+                     WHERE j2.user_id = download_jobs.user_id
+                       AND j2.status = 'running'
+               ) < CASE download_jobs.tier
+                        WHEN 'pro'     THEN :pro
+                        WHEN 'premium' THEN :prem
+                        ELSE :free
+                    END
              ORDER BY priority, created_at
              FOR UPDATE SKIP LOCKED
              LIMIT 1
@@ -89,7 +101,13 @@ async def claim_next(session: AsyncSession) -> DownloadJob | None:
         RETURNING id, user_id, link, site, tier, priority, status, attempts,
                   claim_token, lease_expires, created_at, started_at, finished_at
         """
-    ).bindparams(token=uuid.uuid4(), lease=lease_seconds)
+    ).bindparams(
+        token=uuid.uuid4(),
+        lease=lease_seconds,
+        free=settings.tier_free_concurrent,
+        pro=settings.tier_pro_concurrent,
+        prem=settings.tier_premium_concurrent,
+    )
 
     result = await session.execute(stmt)
     row = result.first()

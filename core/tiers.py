@@ -22,6 +22,7 @@ class QuotaPolicy:
     daily_bytes: int | None                # bandwidth per day
     concurrent: int                        # simultaneous downloads per user
     priority: float                        # queue priority (lower = sooner)
+    concurrent_mode: str = "reject"        # "reject" or "queue" when slots full
 
 # -- Canonical site names (must match downloader registry keys) -----
 
@@ -42,6 +43,7 @@ def _load_tiers() -> dict[str, QuotaPolicy]:
             daily_bytes=s.tier_free_daily_mb * _MB,
             concurrent=s.tier_free_concurrent,
             priority=s.tier_free_priority,
+            concurrent_mode=s.tier_free_concurrent_mode,
         ),
         "pro": QuotaPolicy(
             link_total_limit_bytes=s.tier_pro_link_total_mb * _MB,
@@ -49,6 +51,7 @@ def _load_tiers() -> dict[str, QuotaPolicy]:
             daily_bytes=s.tier_pro_daily_mb * _MB,
             concurrent=s.tier_pro_concurrent,
             priority=s.tier_pro_priority,
+            concurrent_mode=s.tier_pro_concurrent_mode,
         ),
         "premium": QuotaPolicy(
             link_total_limit_bytes=None,
@@ -56,6 +59,7 @@ def _load_tiers() -> dict[str, QuotaPolicy]:
             daily_bytes=s.tier_premium_daily_mb * _MB,
             concurrent=s.tier_premium_concurrent,
             priority=s.tier_premium_priority,
+            concurrent_mode=s.tier_premium_concurrent_mode,
         ),
     }
 
