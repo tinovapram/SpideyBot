@@ -156,13 +156,15 @@ async def get_snapshot(session: AsyncSession, user: User) -> QuotaSnapshot:
 
     daily = await session.get(QuotaUsage, (user.id, today, "daily"))
 
-    # Count active (running) downloads for the user.
+    # Count active (running) downloads for the user.  Expired leases are
+    # dead jobs (worker crashed / bot restarted) — don't hold slots for them.
     from core.models import DownloadJob
 
     active = await session.scalar(
         select(func.count()).select_from(DownloadJob).where(
             DownloadJob.user_id == user.id,
             DownloadJob.status == "running",
+            (DownloadJob.lease_expires.is_(None)) | (DownloadJob.lease_expires > datetime.now(timezone.utc)),
         )
     )
 

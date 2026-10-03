@@ -89,6 +89,7 @@ async def claim_next(session: AsyncSession) -> DownloadJob | None:
                     SELECT count(*) FROM download_jobs j2
                      WHERE j2.user_id = download_jobs.user_id
                        AND j2.status = 'running'
+                       AND (j2.lease_expires IS NULL OR j2.lease_expires > now())
                ) < CASE download_jobs.tier
                         WHEN 'pro'     THEN :pro
                         WHEN 'premium' THEN :prem
