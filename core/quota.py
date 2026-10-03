@@ -54,6 +54,9 @@ class QuotaSnapshot:
         db = self.daily_bytes_remaining
         if db is not None and db <= 0:
             return False
+        # Queue-mode tiers never block at enqueue time.
+        if self.policy.concurrent_mode == "queue":
+            return True
         if self.policy.concurrent <= self.active_downloads:
             return False
         return True
@@ -189,12 +192,23 @@ async def check_quota(
     """
     snap = await get_snapshot(session, user)
 
-    # Admins bypass daily-download and byte limits, but concurrent limit still applies.
-    if not user.is_admin and not snap.can_download:
-        raise QuotaExceeded("Daily download, bandwidth, or concurrent limit reached", snap)
+    # Admins bypass daily-download and byte limits.
+    if not user.is_admin:
+        dl = snap.downloads_remaining
+        if dl is not None and dl <= 0:
+            raise QuotaExceeded("Daily download limit reached", snap)
+        db = snap.daily_bytes_remaining
+        if db is not None and db <= 0:
+            raise QuotaExceeded("Daily bandwidth limit reached", snap)
 
-    # Admins skip concurrent limit — they queue freely.
-    if not user.is_admin and snap.policy.concurrent <= snap.active_downloads:
+    # Concurrent limit: admins always queue freely (slots still capped at
+    # premium's, enforced at claim time).  Others queue only when the tier
+    # mode is "queue"; default "reject" raises here.
+    if (
+        not user.is_admin
+        and snap.policy.concurrent_mode != "queue"
+        and snap.policy.concurrent <= snap.active_downloads
+    ):
         raise QuotaExceeded(f"Concurrent download limit reached ({snap.policy.concurrent} slots)", snap)
 
     return snap
