@@ -415,10 +415,13 @@ class Handler:
         raise events.StopPropagation
 
     # ── /cancel ───────────────────────────────────────────────────────────────
-
-    async def cancel_handler(self, event) -> None:
+    async def bot_cancel_handler(self, event) -> None:
+        """Bot-side /cancel — stands down when the user's own session has it."""
         if self._handled_by_user_session(event):
             return
+        await self.cancel_handler(event)
+
+    async def cancel_handler(self, event) -> None:
         args = (event.text or "").split(maxsplit=1)
         if len(args) < 2 or not args[1].strip():
             await event.client.send_message(event.chat_id, _USAGE_CANCEL,reply_to=event.message)
@@ -443,10 +446,13 @@ class Handler:
         raise events.StopPropagation
 
     # ── /status ───────────────────────────────────────────────────────────────
-
-    async def status_handler(self, event) -> None:
+    async def bot_status_handler(self, event) -> None:
+        """Bot-side /status — stands down when the user's own session has it."""
         if self._handled_by_user_session(event):
             return
+        await self.status_handler(event)
+        
+    async def status_handler(self, event) -> None:  
         tasks = self.manager.user_tasks(event.sender_id)
         if not tasks:
             await event.client.send_message(event.chat_id, "✅ No active downloads.",reply_to=event.message)
@@ -516,7 +522,12 @@ class Handler:
         else:
             lines.append(f"  Bandwidth today: {_fmt_bytes(snap.bytes_today)} (∞)")
 
-        lines.append(f"  Concurrent: {snap.policy.concurrent}")
+        conc_note = " (admin — same as premium)" if is_admin(user_id) else ""
+        mode_note = ", queues when full" if snap.policy.concurrent_mode == "queue" else ""
+        lines.append(
+            f"  Concurrent: {snap.active_downloads}/{snap.policy.concurrent} slots"
+            f"{conc_note}{mode_note}"
+        )
         lines.append(f"  Link limit: {size_limit(snap.tier, is_admin(user_id))[1]}")
 
         if not snap.can_download:
@@ -687,8 +698,8 @@ class Handler:
         add(self.help_handler, events.NewMessage(pattern=r"^\s*/help\b"))
         add(self.dl_handler, events.NewMessage(pattern=r"^\s*/dl\b"))
         add(self.dt_handler, events.NewMessage(pattern=r"^\s*/dt\b"))
-        add(self.cancel_handler, events.NewMessage(pattern=r"^\s*/cancel\b"))
-        add(self.status_handler, events.NewMessage(pattern=r"^\s*/status\b"))
+        add(self.bot_cancel_handler, events.NewMessage(pattern=r"^\s*/cancel\b"))
+        add(self.bot_status_handler, events.NewMessage(pattern=r"^\s*/status\b"))
         add(self.account_handler, events.NewMessage(pattern=r"^\s*/account\b"))
         add(self.quota_handler, events.NewMessage(pattern=r"^\s*/quota\b"))
         add(self.sites_handler, events.NewMessage(pattern=r"^\s*/sites\b"))
