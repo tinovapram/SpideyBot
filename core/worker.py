@@ -464,6 +464,8 @@ class DownloadManager:
         # ── Resolve TeraBox downloader (with shared cookies) ────
         terabox = self._terabox_downloader
 
+        flow_task: asyncio.Task | None = None
+        lease_task: asyncio.Task | None = None
         try:
             if task.site == "terabox":
                 if terabox is not None:
@@ -471,11 +473,26 @@ class DownloadManager:
                         terabox = await _append_shared_cookies(terabox, session)
                 from downloader.terabox_flow import run_terabox
 
-                await run_terabox(task, client, terabox)
+                flow_task = asyncio.create_task(run_terabox(task, client, terabox))
             else:
                 from downloader.flow import run_download
 
-                await run_download(task, client)
+                flow_task = asyncio.create_task(run_download(task, client))
+
+            # Keep the lease alive while the flow runs — without this the
+            # scheduler re-queues long jobs mid-upload and a second worker
+            # re-runs them (duplicate uploads → flood).
+            lease_task = asyncio.create_task(
+                self._renew_lease_loop(job.id, job.claim_token, flow_task)
+            )
+            await flow_task
+        except asyncio.CancelledError:
+            if flow_task is not None and flow_task.cancelled():
+                # Lease stolen after a long stall — job already re-queued,
+                # owner is someone else now.  Stand down without DB writes.
+                logger.warning("Job aborted after lease loss", job_id=entry_id)
+                return
+            raise
         except Exception:
             logger.exception(
                 "Download failed",
@@ -505,4 +522,28 @@ class DownloadManager:
                 await session.commit()
         except Exception:
             logger.exception("Failed to record job completion", job_id=entry_id)
+        finally:
+            if lease_task is not None:
+                lease_task.cancel()
         self.task_done(entry_id)
+
+    async def _renew_lease_loop(
+        self, job_id: int, token: str | None, flow_task: asyncio.Task
+    ) -> None:
+        """Renew the job lease until the flow finishes or renewal fails."""
+        settings = get_settings()
+        interval = max(30, settings.job_lease_seconds // 3)
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                async with session_scope() as session:
+                    ok = await Q.renew_lease(session, job_id, token)
+                    await session.commit()
+                if not ok:
+                    logger.warning("Lease lost — aborting job", job_id=job_id)
+                    flow_task.cancel()
+                    return
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Lease renewal error", job_id=job_id)

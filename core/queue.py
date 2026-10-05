@@ -11,7 +11,7 @@ with no code changes.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -222,6 +222,23 @@ async def reclaim_expired(session: AsyncSession) -> int:
     if count:
         get_metrics().incr("queue_reclaims", count)
     return count
+
+async def renew_lease(session: AsyncSession, job_id: int, claim_token: str | None) -> bool:
+    """Extend the lease on a running job.  False when the job was reclaimed."""
+    settings = get_settings()
+    result = await session.execute(
+        update(DownloadJob)
+        .where(
+            DownloadJob.id == job_id,
+            DownloadJob.status == RUNNING,
+            DownloadJob.claim_token == claim_token,
+        )
+        .values(
+            lease_expires=datetime.now(timezone.utc)
+            + timedelta(seconds=settings.job_lease_seconds)
+        )
+    )
+    return (result.rowcount or 0) > 0
 
 
 # ── Queries ─────────────────────────────────────────────────────

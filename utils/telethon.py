@@ -31,7 +31,13 @@ _rate_lasts: dict[int, float] = {}
 
 
 async def _rate_limit(client) -> None:
-    """Sleep if needed so Telegram API calls per client are spaced out."""
+    """Sleep if needed so Telegram API calls per client are spaced out.
+
+    Only user clients are throttled (tagged ``_spidey_user`` at handler
+    registration).  The shared bot client passes through instantly.
+    """
+    if not getattr(client, "_spidey_user", False):
+        return
     cid = id(client)
     if cid not in _rate_locks:
         _rate_locks[cid] = asyncio.Lock()

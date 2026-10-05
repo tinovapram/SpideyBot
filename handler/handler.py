@@ -47,6 +47,7 @@ from downloader.telegram import (
 from utils.files import prepare_media
 from utils.paths import DOWNLOADS_DIR
 from utils.progress import StatusMessage
+from utils.telethon import safe_send_file
 
 logger = structlog.get_logger(__name__)
 
@@ -292,8 +293,8 @@ class Handler:
                     cap = original_caption
                 else:
                     cap = f"✅ **SpideyBot:** Downloaded {len(media)} file(s) from Telegram{label}."
-                await client.send_file(
-                    event.chat_id, media,
+                await safe_send_file(
+                    client, event.chat_id, media,
                     caption=cap,
                     reply_to=event.message,
                 )
@@ -646,7 +647,7 @@ class Handler:
 
         try:
             media = await prepare_media(event.client, result, progress_callback=dl_cb)
-            await event.client.send_file('me', media, caption="✅ **SpideyBot:** Downloaded media from replied message.")
+            await safe_send_file(event.client, 'me', media, caption="✅ **SpideyBot:** Downloaded media from replied message.")
             await status.close("✅ **SpideyBot:** Downloaded media from replied message.")
         except Exception as exc:
             logger.error("Failed to send TG WOW media", error=str(exc))
@@ -713,6 +714,9 @@ class Handler:
         client only exists while the session is live, and the bot side stands
         down for exactly that window.
         """
+        # Tag as a user client so utils.telethon rate-limits its API calls
+        # (the shared bot client is never throttled).
+        client._spidey_user = True
         client.add_event_handler(
             self.dl_user_handler, events.NewMessage(outgoing=True, pattern=r"^\s*/dl\b")
         )
