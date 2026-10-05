@@ -106,14 +106,17 @@ class StatusMessage:
         self._rows.pop(name, None)
         self._kick()
 
-    def bytes_cb(self, name: str, icon: str, label: str) -> Callable[[int, int], None]:
+    def bytes_cb(self, name: str, icon: str, label: str | Callable[[], str]) -> Callable[[int, int], None]:
         """Return a ``cb(current, total)`` callback for a byte-progress phase.
 
         Works unchanged for Telethon ``upload_file`` / ``send_file``, Telethon
         ``download_media``, and HTTP site downloaders (thread or event loop).
+        *label* may also be a callable returning the label at call time
+        (e.g. a live file number).
         """
         def _cb(current, total) -> None:
-            self.row(name, bytes_line(icon, label, current, total or 0))
+            text = label() if callable(label) else label
+            self.row(name, bytes_line(icon, text, current, total or 0))
         return _cb
 
     def file_bytes_cb(self, name: str, icon: str) -> Callable[[str, int, int], None]:

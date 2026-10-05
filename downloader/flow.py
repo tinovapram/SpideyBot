@@ -82,6 +82,10 @@ async def _run_streaming(task, client, site, downloader, status, max_size_bytes)
         )
         sent = await _stream_upload(task, client, source, status)
     except Exception as exc:
+        if getattr(task, "files_sent", 0):
+            # Files already reached Telegram — re-downloading via gallery-dl
+            # would duplicate them. Fail the run instead.
+            raise
         logger.warning("Streaming download failed, falling back to gallery-dl", error=str(exc))
         status.set_header("⚠️ **SpideyBot:** Primary download failed, trying gallery-dl")
         status.drop("dl")
@@ -162,7 +166,8 @@ async def _stream_upload(task, client, source, status) -> int:
     loop = asyncio.get_running_loop()
     sent = 0
     uploaded = 0
-    upload_cb = status.bytes_cb("ul", "📤", "Uploading")
+    upload_index = 0
+    upload_cb = status.bytes_cb("ul", "📤", lambda: f"Uploading (file {upload_index})")
     # Shared state: producer writes downloaded count, consumer reads it.
     state = {"downloaded": 0, "total": None}
 
@@ -186,7 +191,7 @@ async def _stream_upload(task, client, source, status) -> int:
         await queue.put(None)
 
     async def consume() -> None:
-        nonlocal sent, uploaded
+        nonlocal sent, uploaded, upload_index
         pending_media: list = []
         pending_captions: list[str] = []
         # Native post caption captured from a metadata sidecar; applied to the
@@ -206,6 +211,7 @@ async def _stream_upload(task, client, source, status) -> int:
                 client, task.event.chat_id, media, captions,
                 reply_to=task.event.command_msg_id,
             )
+            task.files_sent = sent  # gates streaming→gallery-dl fallback
 
         while True:
             file_path = await queue.get()
@@ -220,6 +226,7 @@ async def _stream_upload(task, client, source, status) -> int:
                 continue
 
             try:
+                upload_index += 1
                 media = await prepare_media(client, clean, progress_callback=upload_cb)
                 pending_media.append(media)
                 native = native_text if (native_text and not native_used) else None
@@ -260,10 +267,12 @@ async def _send_all_at_once(task, client, downloaded_files, status) -> int:
         return 0
 
     media, captions = [], []
-    upload_cb = status.bytes_cb("ul", "📤", "Uploading")
+    cur = {"n": 0}
+    upload_cb = status.bytes_cb("ul", "📤", lambda: f"Uploading (file {cur['n']})")
     uploaded = 0
     native_used = False
-    for fp in media_files:
+    for idx, fp in enumerate(media_files, 1):
+        cur["n"] = idx
         try:
             media.append(await prepare_media(client, fp, progress_callback=upload_cb))
             native = native_text if (native_text and not native_used) else None
