@@ -168,15 +168,20 @@ async def _pipeline(task, client, downloader, files, output_dir, status) -> tupl
     """
     total = len(files)
     sent = 0
+    uploaded = 0  # files uploaded to Telegram — ticks per file, not per album
+    upload_index = 0  # file currently being uploaded
     failed: list[tuple[str, str]] = []
     downloaded = 0
     ready: asyncio.Queue = asyncio.Queue(maxsize=2)
-    upload_cb = status.bytes_cb("ul", "📤", "Uploading")
+    upload_cb = status.bytes_cb(
+        "ul", "📤", lambda: f"Uploading (file {upload_index}/{total})"
+    )
     dl_cb = status.file_bytes_cb("cur", "📥")
     status.set_header("📥 **SpideyBot:** Downloading & uploading")
 
     def refresh() -> None:
         status.row("dl", count_line("📥", "Downloaded", downloaded, total))
+        status.row("up_count", count_line("📤", "Uploaded", uploaded, total))
         status.row("up", count_line("📤", "Sent", sent, total))
         if failed:
             status.row("fail", f"⚠️ Failed: {len(failed)} file(s)")
@@ -223,15 +228,19 @@ async def _pipeline(task, client, downloader, files, output_dir, status) -> tupl
         refresh()
 
     async def consumer() -> None:
+        nonlocal uploaded, upload_index
         while True:
             item = await ready.get()
             if item is None:
                 break
             path, filename = item
             try:
+                upload_index += 1
                 media = await prepare_media(client, path, progress_callback=upload_cb)
                 pending_media.append(media)
                 pending_captions.append(build_caption(filename, task.link))
+                uploaded += 1
+                status.row("up_count", count_line("📤", "Uploaded", uploaded, total))
                 if len(pending_media) >= _ALBUM_LIMIT:
                     await flush()
             except Exception as exc:

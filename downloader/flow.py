@@ -167,9 +167,17 @@ async def _stream_upload(task, client, source, status) -> int:
     sent = 0
     uploaded = 0
     upload_index = 0
-    upload_cb = status.bytes_cb("ul", "📤", lambda: f"Uploading (file {upload_index})")
     # Shared state: producer writes downloaded count, consumer reads it.
     state = {"downloaded": 0, "total": None}
+
+    def _upload_label() -> str:
+        # Real count of the file being uploaded — the total only becomes known
+        # once the site downloader has yielded every file.
+        known = state.get("total")
+        suffix = f"/{known}" if known else ""
+        return f"Uploading (file {upload_index}{suffix})"
+
+    upload_cb = status.bytes_cb("ul", "📤", _upload_label)
 
     async def produce() -> None:
         def pull():
@@ -267,8 +275,11 @@ async def _send_all_at_once(task, client, downloaded_files, status) -> int:
         return 0
 
     media, captions = [], []
+    total_files = len(media_files)
     cur = {"n": 0}
-    upload_cb = status.bytes_cb("ul", "📤", lambda: f"Uploading (file {cur['n']})")
+    upload_cb = status.bytes_cb(
+        "ul", "📤", lambda: f"Uploading (file {cur['n']}/{total_files})"
+    )
     uploaded = 0
     native_used = False
     for idx, fp in enumerate(media_files, 1):
@@ -280,7 +291,7 @@ async def _send_all_at_once(task, client, downloaded_files, status) -> int:
                 native_used = True
             captions.append(build_caption(os.path.basename(fp), task.link, native=native))
             uploaded += 1
-            status.row("up", count_line("📤", "Uploaded", uploaded))
+            status.row("up", count_line("📤", "Uploaded", uploaded, total_files))
         except Exception as exc:
             logger.warning("Upload failed", file=fp, error=str(exc))
         finally:

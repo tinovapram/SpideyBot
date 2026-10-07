@@ -261,11 +261,16 @@ class Handler:
         try:
             status.drop("tgdl")
             status.set_header("📤 **SpideyBot:** Uploading to Telegram")
-            up_cb = status.bytes_cb("ul", "📤", "Uploading")
+            total_files = len(files)
+            cur_upload = {"n": 0}
+            up_cb = status.bytes_cb(
+                "ul", "📤", lambda: f"Uploading (file {cur_upload['n']}/{total_files})"
+            )
             media = []
             for fp, meta in zip(files, metadata):
                 if not os.path.isfile(fp):
                     continue
+                cur_upload["n"] += 1
                 try:
                     kwargs = {}
                     if meta:
