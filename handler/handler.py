@@ -716,6 +716,13 @@ class Handler:
         """
         # Tag as a user client so utils.telethon rate-limits its API calls
         # (the shared bot client is never throttled).
+        #
+        # Registration must be idempotent: a second call would stack a
+        # duplicate handler on the same client and every matching message
+        # would then be processed twice → duplicate uploads.
+        if getattr(client, "_spidey_handlers_registered", False):
+            return
+        setattr(client, "_spidey_handlers_registered", True)
         client._spidey_user = True
         client.add_event_handler(
             self.dl_user_handler, events.NewMessage(outgoing=True, pattern=r"^\s*/dl\b")

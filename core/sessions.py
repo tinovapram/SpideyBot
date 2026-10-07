@@ -158,8 +158,18 @@ async def start_client(user_id: int) -> bool:
     Returns True when the client is running (started or already active).
     """
     existing = _active_clients.get(user_id)
-    if existing is not None and existing.is_connected():
-        return True
+    if existing is not None:
+        if existing.is_connected():
+            return True
+        # Stale handle: a half-dead client may still be connected (or
+        # reconnecting) with its handlers registered, so the same message
+        # could be handled twice → duplicate uploads.  Evict it before
+        # building a replacement.
+        _active_clients.pop(user_id, None)
+        try:
+            await existing.disconnect()
+        except Exception:
+            logger.warning("Failed to disconnect stale client", user_id=user_id)
 
     if len(_active_clients) >= MAX_ACTIVE_CLIENTS:
         logger.warning("Active client limit reached", limit=MAX_ACTIVE_CLIENTS)

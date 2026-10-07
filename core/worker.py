@@ -500,13 +500,22 @@ class DownloadManager:
                 link=job.link,
                 site=task.site,
             )
+            # Files already reached the chat — re-running the whole job would
+            # upload them again.  Only retry when nothing was delivered.
+            delivered = getattr(task, "files_sent", 0)
             try:
                 async with session_scope() as session:
                     db_job = await Q.get_job(session, entry_id)
                     if db_job is not None:
-                        retried = await Q.fail(session, db_job, retry=True)
+                        retried = await Q.fail(session, db_job, retry=not delivered)
                         if retried:
                             logger.info("Job re-queued for retry", job_id=entry_id)
+                        elif delivered:
+                            logger.warning(
+                                "Job partially delivered — not retrying",
+                                job_id=entry_id,
+                                files_sent=delivered,
+                            )
                 await session.commit()
             except Exception:
                 logger.exception("Failed to record job failure", job_id=entry_id)

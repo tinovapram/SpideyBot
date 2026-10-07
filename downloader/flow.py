@@ -290,10 +290,12 @@ async def _send_all_at_once(task, client, downloaded_files, status) -> int:
     if not media:
         return 0
 
-    return await send_album(
+    sent = await send_album(
         client, task.event.chat_id, media, captions,
         reply_to=task.event.command_msg_id,
     )
+    task.files_sent = getattr(task, "files_sent", 0) + sent
+    return sent
 
 
 def _sanitize_path(file_path: str) -> str:

@@ -216,10 +216,13 @@ async def _pipeline(task, client, downloader, files, output_dir, status) -> tupl
         pending_media = []
         pending_captions = []
         status.drop("ul")
-        sent += await send_album(
+        delivered = await send_album(
             client, task.event.chat_id, batch, captions,
             reply_to=task.event.command_msg_id, support_streaming=True,
         )
+        sent += delivered
+        # Tracked so the worker never re-runs a job that already delivered.
+        task.files_sent = getattr(task, "files_sent", 0) + delivered
         refresh()
 
     async def consumer() -> None:
