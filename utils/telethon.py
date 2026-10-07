@@ -44,6 +44,16 @@ async def safe_send_file(client, *args, **kwargs):
         return await client.send_file(*args, **kwargs)
 
 
+async def safe_download_media(client, *args, **kwargs):
+    """``download_media`` that sleeps through a single flood-wait and retries."""
+    try:
+        return await client.download_media(*args, **kwargs)
+    except FloodWaitError as exc:
+        logger.warning("Flood wait on download", seconds=exc.seconds)
+        await asyncio.sleep(exc.seconds)
+        return await client.download_media(*args, **kwargs)
+
+
 async def send_album(
     client,
     chat_id,
