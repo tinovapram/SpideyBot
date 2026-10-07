@@ -1,6 +1,6 @@
-﻿# SpideyBot V4 — Telegram Media Downloader Bot
+﻿# SpideyBot V5 — Telegram Media Downloader Bot
 
-Download media from **TeraBox**, **Twitter/X**, **Instagram**, **TikTok**,
+Download media from **TeraBox**, **Vidmonstr**, **Twitter/X**, **Instagram**, **TikTok**,
 **YouTube**, **Reddit**, **Bluesky**, **Pinterest**, **Spotify**, and 28+
 platforms — all from a single Telegram bot. Send a link, get the files in chat.
 
@@ -10,7 +10,10 @@ platforms — all from a single Telegram bot. Send a link, get the files in chat
 - **Telegram-native downloads** — `/dt` pulls files directly from Telegram messages via your own session
 - **Tiered access** — Free, Pro, and Premium tiers with configurable limits
 - **Persistent queue** — PostgreSQL-backed job queue with priority scheduling
-- **Rate limiting** — Per-user rate limits to prevent abuse
+- **Concurrency control** — per-tier slot limits (1/2/3); extra links wait in the queue
+- **Per-file progress** — live counts such as `Uploading (file 7/25)` while a job runs
+- **Named failure reports** — any file that fails to download or upload is listed in the
+  final message with its filename and the reason
 - **Referral system** — Earn bonus downloads by inviting friends
 - **Per-user cookies** — Encrypted per-user TeraBox session cookies
 - **User sessions** — On-demand Telegram account sessions with automatic lifecycle
@@ -80,13 +83,15 @@ All settings use the `SPIDEY_` env prefix. Copy `.env.example` to `.env` and fil
 
 ## User tiers
 
-| Tier | Files/day | Size limit | Daily bandwidth | Monthly | Concurrency | Sites |
-|------|-----------|------------|-----------------|---------|-------------|-------|
-| Free | 10 | 100 MB | 1 GB | 20 GB | 1 | Social |
-| Pro | 50 | 2 GB | 25 GB | 500 GB | 3 | Social + Video |
-| Premium | 200 | 10 GB | 100 GB | 2 TB | 8 | All |
+| Tier | Files/day | Max link size | Daily bandwidth | Concurrency |
+|------|-----------|---------------|-----------------|-------------|
+| Free | 10 | 500 MB | 1 GB | 1 |
+| Pro | 50 | 10 GB | 25 GB | 2 |
+| Premium | 200 | Unlimited | 100 GB | 3 |
 
-Admins bypass all limits.
+A download that would exceed the concurrency limit waits in the queue and starts as
+soon as a slot frees up. Admins run with the Premium slot count but are never
+rejected at submission — their extra links always queue.
 
 ## Commands
 

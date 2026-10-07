@@ -27,6 +27,7 @@ from telethon import TelegramClient, events
 from telethon.tl.custom import Button
 
 import structlog
+from core import queue as Q
 from core import sessions
 from core.config import get_settings, is_admin
 from core.db import session_scope
@@ -52,7 +53,7 @@ logger = structlog.get_logger(__name__)
 
 # ── pricing / copy ────────────────────────────────────────────────────────────
 
-_FREE_NOTE = "🆓 Free tier: one file at a time, size limit per download."
+_FREE_NOTE = "🆓 Free tier: 1 download at a time, size limit per download."
 _PRO_NOTE = (
     "✨ Pro — ⬆️ higher limits + faster queues.\n"
     "    💰 Upgrade: /upgrade"
@@ -73,7 +74,7 @@ _HELP_COMMANDS = """
     /start  — Sign up or refresh your status
     /help   — Show this help guide
     /dl *URL*  — Download a file
-    /dt *URL*  — Download and auto-split into 1 GB chunks
+    /dt *t.me link*  — Download from a Telegram message
     /cancel *ID*  — Cancel a queued download
     /status — View your active downloads
     /account — Account & session status
@@ -85,7 +86,9 @@ _HELP_COMMANDS = """
 _HELP_NOTES = """
 **Notes**
 
-    • One file at a time. Large files are split automatically if needed.
+    • Your tier sets how many downloads run at once (1/2/3) — extra links wait in the queue. See /quota.
+    • A finished job replaces the progress message with the result; files that
+      failed to download or upload are listed there by name.
     • Terabox links require a logged-in account — use /account to manage sessions.
     • Reply to media and send your magic word (default: `WOW`) to download it.
     • Private photos/videos are auto-saved — manage via /setting.
@@ -472,9 +475,25 @@ class Handler:
             await event.client.send_message(event.chat_id, "✅ No active downloads.",reply_to=event.message)
             raise events.StopPropagation
 
+        states: dict[int, str | None] = {}
+        try:
+            async with session_scope() as session:
+                for task in tasks:
+                    job = await Q.get_job(session, task.entry_id)
+                    states[task.entry_id] = job.status if job is not None else None
+        except Exception:
+            # /status must still list the tasks when the queue is unreachable;
+            # the state simply falls back to "running".
+            logger.warning("Status: could not read job states", user_id=event.sender_id)
+
         lines = ["**Active downloads:**\n"]
         for task in tasks:
-            state = "❌ Cancelled" if task.is_cancelled else "🔄 Running"
+            if task.is_cancelled:
+                state = "❌ Cancelled"
+            elif states.get(task.entry_id) == Q.QUEUED:
+                state = "⏳ Waiting for a slot"
+            else:
+                state = "🔄 Running"
             link = task.link if len(task.link) <= 50 else task.link[:50] + "…"
             lines.append(f"  `{task.entry_id}` — {link} — {state}")
         await event.client.send_message(event.chat_id, "\n".join(lines),reply_to=event.message)
@@ -501,6 +520,9 @@ class Handler:
         async with session_scope() as session:
             user = await get_or_create_user(session, user_id, _sender_username(event))
             snap = await get_snapshot(session, user)
+            awaiting = max(
+                0, await Q.user_active_count(session, user_id) - snap.active_downloads
+            )
 
         tier_label = await self._tier_label(user_id)
 
@@ -537,11 +559,17 @@ class Handler:
             lines.append(f"  Bandwidth today: {_fmt_bytes(snap.bytes_today)} (∞)")
 
         conc_note = " (admin — same as premium)" if is_admin(user_id) else ""
-        mode_note = ", queues when full" if snap.policy.concurrent_mode == "queue" else ""
+        mode_note = (
+            ", queues when full"
+            if is_admin(user_id) or snap.policy.concurrent_mode == "queue"
+            else ""
+        )
         lines.append(
             f"  Concurrent: {snap.active_downloads}/{snap.policy.concurrent} slots"
             f"{conc_note}{mode_note}"
         )
+        if awaiting:
+            lines.append(f"  Queued: {awaiting} waiting for a slot")
         lines.append(f"  Link limit: {size_limit(snap.tier, is_admin(user_id))[1]}")
 
         if not snap.can_download:
@@ -557,7 +585,7 @@ class Handler:
         lines = [
             "**Supported Platforms**\n",
             f"  📱 Social & video: YouTube, Twitter, TikTok, Reddit, Instagram, ...",
-            f"  🎬 Video hosting: Doodstream, StreamTape, MixDrop, StreamWish, ...",
+            f"  🎬 Video hosting: Doodstream, StreamTape, MixDrop, StreamWish, Vidmonstr, ...",
             f"  📦 Heavy / cloud: TeraBox",
             "",
             "Send any link with /dl or /dt to download.",
