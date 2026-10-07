@@ -11,7 +11,7 @@ with no code changes.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -205,6 +205,33 @@ async def cancel_user_queued(session: AsyncSession, user_id: int) -> int:
     if count:
         get_metrics().incr("downloads_cancelled", count)
     return count
+
+
+# ── Lease renewal ───────────────────────────────────────────────
+
+
+async def renew_lease(
+    session: AsyncSession, job_id: int, claim_token: str | None
+) -> bool:
+    """Extend the lease on a running job.  False when the job was reclaimed.
+
+    Called periodically by the worker so a long download keeps its slots and
+    is not re-queued (and re-run, duplicating uploads) by the scheduler.
+    """
+    settings = get_settings()
+    result = await session.execute(
+        update(DownloadJob)
+        .where(
+            DownloadJob.id == job_id,
+            DownloadJob.status == RUNNING,
+            DownloadJob.claim_token == claim_token,
+        )
+        .values(
+            lease_expires=datetime.now(timezone.utc)
+            + timedelta(seconds=settings.job_lease_seconds)
+        )
+    )
+    return (result.rowcount or 0) > 0
 
 
 # ── Reclaim (scheduler) ─────────────────────────────────────────
