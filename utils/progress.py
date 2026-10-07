@@ -48,6 +48,50 @@ def count_line(icon: str, label: str, current: int, total: Optional[int] = None)
     return f"{icon} **{label}:** {current}"
 
 
+def _md_safe(text: str) -> str:
+    """Strip characters that would break a Telegram markdown link or code span."""
+    return str(text).replace("[", "(").replace("]", ")").replace("`", "'")
+
+
+def failure_list(failed, limit: int = 10, name_limit: int = 60) -> str:
+    """Render failed files as ``• name — reason`` bullets.
+
+    Each entry is ``(name, reason)`` or ``(name, reason, url)``.  When a *url*
+    is present the name becomes a clickable link, otherwise a code span.  At
+    most *limit* entries are listed, with the remainder summarised.
+    """
+    entries = list(failed or [])
+    if not entries:
+        return ""
+
+    lines: list[str] = []
+    for item in entries[:limit]:
+        name = item[0] if len(item) > 0 else "unknown"
+        reason = item[1] if len(item) > 1 else ""
+        url = item[2] if len(item) > 2 else None
+
+        safe_name = _md_safe(name)
+        if len(safe_name) > name_limit:
+            safe_name = f"{safe_name[:name_limit - 1]}…"
+        label = f"[{safe_name}]({url})" if url else f"`{safe_name}`"
+
+        safe_reason = _md_safe(reason).strip()
+        lines.append(f"• {label} — {safe_reason}" if safe_reason else f"• {label}")
+
+    remaining = len(entries) - limit
+    if remaining > 0:
+        lines.append(f"• …and {remaining} more")
+    return "\n".join(lines)
+
+
+def failure_block(failed, limit: int = 10) -> str:
+    """Header plus :func:`failure_list`, for appending to a final message."""
+    entries = list(failed or [])
+    if not entries:
+        return ""
+    return f"\n⚠️ **{len(entries)} file(s) failed:**\n{failure_list(entries, limit)}"
+
+
 class StatusMessage:
     """One live Telegram status message with unified, rate-limited rendering.
 
@@ -166,11 +210,13 @@ class StatusMessage:
             return True
         return await self._try_resend(text)
 
-    async def cleanup_close(self, text: str, *, edit_only: bool = False) -> bool:
-        """Delete progress message and send *text* as a new message, then stop updates.
+    async def cleanup_close(self, text: str) -> bool:
+        """Delete the progress message, send *text* as a fresh final message.
 
-        When *edit_only* is ``True`` (failure paths), keep the progress message
-        and edit it in-place so the user sees the error in context.
+        Every finished job reports through a new response message, so the live
+        progress message is removed.  When there is no way to send a
+        replacement (no ``_resend`` callback) the text is edited in place
+        instead, so the result is never lost.
         """
         self._closed = True
         with self._lock:
@@ -184,15 +230,11 @@ class StatusMessage:
                 future.cancel()
             except Exception:
                 pass
-        if edit_only:
-            if await safe_edit(self._message, text):
-                return True
-            return await self._try_resend(text)
-        # Success path: delete progress, send fresh final message
-        try:
-            await self._message.delete()
-        except Exception:
-            pass
+        if self._resend is not None:
+            try:
+                await self._message.delete()
+            except Exception:
+                pass
         if await self._try_resend(text):
             return True
         return await safe_edit(self._message, text)

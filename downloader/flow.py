@@ -23,7 +23,7 @@ from core.tiers import size_limit
 from downloader.registry import get_registry
 from utils import paths
 from utils.files import build_caption, extract_native_text, prepare_media, sanitize_filename
-from utils.progress import StatusMessage, count_line
+from utils.progress import StatusMessage, count_line, failure_block
 from utils.telethon import send_album
 
 logger = structlog.get_logger(__name__)
@@ -57,13 +57,21 @@ async def run_download(task, client) -> None:
             sent = await _run_gallerydl(task, client, status, max_size_bytes)
     except Exception as exc:
         logger.exception("Download failed", link=task.link, error=str(exc))
-        await status.cleanup_close(f"❌ **SpideyBot: Failed to download media.**\nReason: `{exc}`", edit_only=True)
+        await status.cleanup_close(
+            f"❌ **SpideyBot: Failed to download media.**\nReason: `{exc}`"
+            + failure_block(getattr(task, "failed_files", []))
+        )
         return
 
+    failed = getattr(task, "failed_files", [])
     if sent > 0:
-        await status.cleanup_close(f"✅ **SpideyBot: Done!** Sent {sent} file(s).")
+        await status.cleanup_close(
+            f"✅ **SpideyBot: Done!** Sent {sent} file(s)." + failure_block(failed)
+        )
     else:
-        await status.cleanup_close("❌ **SpideyBot:** No files were successfully sent.", edit_only=True)
+        await status.cleanup_close(
+            "❌ **SpideyBot:** No files were successfully sent." + failure_block(failed)
+        )
 
 
 def _staging_dir(task, site: str) -> str:
@@ -126,7 +134,7 @@ async def _run_gallerydl(task, client, status, max_size_bytes) -> int:
         downloaded = await _try_cyberdrop_dl(task, staging, max_size_bytes, status)
 
     if not downloaded:
-        await status.cleanup_close("❌ **SpideyBot: No files downloaded from the link.**", edit_only=True)
+        await status.cleanup_close("❌ **SpideyBot: No files downloaded from the link.**")
         return 0
 
     sent = await _send_all_at_once(task, client, downloaded, status)
@@ -167,6 +175,7 @@ async def _stream_upload(task, client, source, status) -> int:
     sent = 0
     uploaded = 0
     upload_index = 0
+    failed: list[tuple[str, str, str | None]] = []
     # Shared state: producer writes downloaded count, consumer reads it.
     state = {"downloaded": 0, "total": None}
 
@@ -250,12 +259,18 @@ async def _stream_upload(task, client, source, status) -> int:
                     await flush()
             except Exception as exc:
                 logger.warning("Upload failed", file=clean, error=str(exc))
+                failed.append(
+                    (os.path.basename(clean), str(exc) or type(exc).__name__, None)
+                )
+                status.row("fail", f"⚠️ Failed: {len(failed)} file(s)")
             finally:
                 _remove(clean)
 
         await flush()
 
     await asyncio.gather(produce(), consume())
+    if failed:
+        task.failed_files = getattr(task, "failed_files", []) + failed
     return sent
 
 
@@ -282,6 +297,7 @@ async def _send_all_at_once(task, client, downloaded_files, status) -> int:
     )
     uploaded = 0
     native_used = False
+    failed: list[tuple[str, str, str | None]] = []
     for idx, fp in enumerate(media_files, 1):
         cur["n"] = idx
         try:
@@ -294,10 +310,14 @@ async def _send_all_at_once(task, client, downloaded_files, status) -> int:
             status.row("up", count_line("📤", "Uploaded", uploaded, total_files))
         except Exception as exc:
             logger.warning("Upload failed", file=fp, error=str(exc))
+            failed.append((os.path.basename(fp), str(exc) or type(exc).__name__, None))
+            status.row("fail", f"⚠️ Failed: {len(failed)} file(s)")
         finally:
             _remove(fp)
 
     status.drop("ul")
+    if failed:
+        task.failed_files = getattr(task, "failed_files", []) + failed
     if not media:
         return 0
 

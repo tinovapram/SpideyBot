@@ -19,7 +19,7 @@ from core.tiers import size_limit
 from downloader.terabox import TeraBoxAccountPool, download_file_async
 from utils import paths
 from utils.files import build_caption, prepare_media
-from utils.progress import StatusMessage, count_line
+from utils.progress import StatusMessage, count_line, failure_block
 from utils.telethon import send_album
 
 logger = structlog.get_logger(__name__)
@@ -112,8 +112,7 @@ async def run_terabox(task, client, downloader) -> None:
             suffix = f" across {len(candidates)} account(s)" if pool_active else ""
             await status.cleanup_close(
                 f"❌ **SpideyBot: Failed to resolve link**{suffix}.\n"
-                f"Reason: `{last_error}`",
-                edit_only=True,
+                f"Reason: `{last_error}`"
             )
             return
 
@@ -122,15 +121,14 @@ async def run_terabox(task, client, downloader) -> None:
             key=lambda f: f.size_bytes,
         )
         if not files:
-            await status.cleanup_close("ℹ️ **SpideyBot:** No actual files found in this share.", edit_only=True)
+            await status.cleanup_close("ℹ️ **SpideyBot:** No actual files found in this share.")
             return
 
         total_bytes = sum(f.size_bytes for f in files)
         if total_bytes > max_size_bytes:
             await status.cleanup_close(
                 f"⚠️ **SpideyBot: Limit Exceeded.** Total share size is "
-                f"`{total_bytes / (1024 * 1024):.2f} MB`, exceeding your limit of `{limit_str}`.",
-                edit_only=True,
+                f"`{total_bytes / (1024 * 1024):.2f} MB`, exceeding your limit of `{limit_str}`."
             )
             return
 
@@ -143,21 +141,21 @@ async def run_terabox(task, client, downloader) -> None:
             shutil.rmtree(output_dir, ignore_errors=True)
 
         if task.is_cancelled:
-            await status.cleanup_close("❌ **SpideyBot:** Download cancelled.", edit_only=True)
+            await status.cleanup_close("❌ **SpideyBot:** Download cancelled.")
         elif sent > 0:
-            has_failures = len(failed) > 0
             text = (
                 f"✅ **SpideyBot: Done!** Sent {sent}/{len(files)} files "
                 f"({total_bytes / (1024 * 1024):.2f} MB)."
             )
-            if has_failures:
-                text += f"\n⚠️ {len(failed)} file(s) failed."
-            await status.cleanup_close(text, edit_only=has_failures)
+            text += failure_block(failed)
+            await status.cleanup_close(text)
         else:
-            await status.cleanup_close("❌ **SpideyBot:** No files were successfully sent.", edit_only=True)
+            await status.cleanup_close(
+                "❌ **SpideyBot:** No files were successfully sent." + failure_block(failed)
+            )
     except Exception as exc:
         logger.exception("Error processing TeraBox task", link=task.link, error=str(exc))
-        await status.cleanup_close(f"❌ **SpideyBot: An error occurred.**\nError: `{exc}`", edit_only=True)
+        await status.cleanup_close(f"❌ **SpideyBot: An error occurred.**\nError: `{exc}`")
 
 
 async def _pipeline(task, client, downloader, files, output_dir, status) -> tuple[int, list]:
@@ -170,7 +168,7 @@ async def _pipeline(task, client, downloader, files, output_dir, status) -> tupl
     sent = 0
     uploaded = 0  # files uploaded to Telegram — ticks per file, not per album
     upload_index = 0  # file currently being uploaded
-    failed: list[tuple[str, str]] = []
+    failed: list[tuple[str, str, str | None]] = []
     downloaded = 0
     ready: asyncio.Queue = asyncio.Queue(maxsize=2)
     upload_cb = status.bytes_cb(
@@ -198,12 +196,16 @@ async def _pipeline(task, client, downloader, files, output_dir, status) -> tupl
                     downloader, tb_file, output_dir, progress_callback=dl_cb
                 )
                 if not path or not os.path.exists(path) or os.path.getsize(path) == 0:
-                    failed.append((tb_file.filename, "empty file (0 bytes)"))
+                    failed.append(
+                        (tb_file.filename, "empty file (0 bytes)", tb_file.dlink)
+                    )
                 else:
                     await ready.put((path, tb_file.filename))
                     downloaded += 1
             except Exception as exc:
-                failed.append((tb_file.filename, str(exc) or type(exc).__name__))
+                failed.append(
+                    (tb_file.filename, str(exc) or type(exc).__name__, tb_file.dlink)
+                )
             finally:
                 status.drop("cur")
                 refresh()
@@ -245,6 +247,8 @@ async def _pipeline(task, client, downloader, files, output_dir, status) -> tupl
                     await flush()
             except Exception as exc:
                 logger.warning("File send failed", file=path, error=str(exc))
+                failed.append((filename, str(exc) or type(exc).__name__, None))
+                refresh()
             finally:
                 try:
                     os.remove(path)

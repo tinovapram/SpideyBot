@@ -46,7 +46,7 @@ from downloader.telegram import (
 )
 from utils.files import prepare_media
 from utils.paths import DOWNLOADS_DIR
-from utils.progress import StatusMessage
+from utils.progress import StatusMessage, failure_block
 
 logger = structlog.get_logger(__name__)
 
@@ -250,12 +250,16 @@ class Handler:
             result = {"ok": False, "error": str(exc)}
 
         if not result["ok"]:
-            await status.cleanup_close(f"❌ **SpideyBot:** {result['error']}", edit_only=True)
+            await status.cleanup_close(
+                f"❌ **SpideyBot:** {result['error']}"
+                + failure_block(result.get("failed"))
+            )
             return
 
         files = result["files"]
         metadata = result.get("file_metadata") or [None] * len(files)
         original_caption = (result.get("caption") or "").strip()
+        failed = list(result.get("failed") or [])
 
         import os
         try:
@@ -291,6 +295,9 @@ class Handler:
                     )
                 except Exception as exc:
                     logger.warning("Failed to prepare TG file", file=fp, error=str(exc))
+                    failed.append(
+                        (os.path.basename(fp), str(exc) or type(exc).__name__, None)
+                    )
 
             if media:
                 if original_caption:
@@ -313,10 +320,12 @@ class Handler:
                 )
             else:
                 final = f"✅ **SpideyBot:** Downloaded {len(files)} file(s) from `{result.get('chat_title', '')}`."
-            await status.cleanup_close(final)
+            await status.cleanup_close(final + failure_block(failed))
         except Exception as exc:
             logger.error("Failed to send TG files", error=str(exc))
-            await status.cleanup_close(f"❌ **SpideyBot:** Failed to send files: `{exc}`", edit_only=True)
+            await status.cleanup_close(
+                f"❌ **SpideyBot:** Failed to send files: `{exc}`" + failure_block(failed)
+            )
         finally:
             for fp in files:
                 try:

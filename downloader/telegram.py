@@ -152,6 +152,7 @@ async def download_tg_message(
         )
 
     files, metadata = [], []
+    failed: list[tuple[str, str, str | None]] = []
     for msg in group_messages:
         if msg.media is None:
             continue
@@ -162,6 +163,8 @@ async def download_tg_message(
                 metadata.append(_tg_media_meta(msg))
         except Exception as exc:
             logger.error("Failed to download TG media", msg_id=msg.id, error=str(exc))
+            name = getattr(getattr(msg, "file", None), "name", None) or f"message {msg.id}"
+            failed.append((name, str(exc) or type(exc).__name__, None))
 
     if not files:
         return {
@@ -169,11 +172,13 @@ async def download_tg_message(
             "error": "No downloadable media found in this message.",
             "files": [], "file_metadata": [],
             "caption": caption, "chat_title": chat_title,
+            "failed": failed,
         }
 
     return {
         "ok": True, "error": "", "files": files, "file_metadata": metadata,
         "caption": caption, "chat_title": chat_title,
+        "failed": failed,
     }
 
 
@@ -213,6 +218,7 @@ async def download_tg_range(
 
     os.makedirs(output_dir, exist_ok=True)
     files, metadata, captions = [], [], []
+    failed: list[tuple[str, str, str | None]] = []
     seen_groups: set = set()
 
     for msg in valid:
@@ -234,6 +240,8 @@ async def download_tg_range(
                 metadata.append(_tg_media_meta(msg))
         except Exception as exc:
             logger.error("Failed to download TG range media", msg_id=msg.id, error=str(exc))
+            name = getattr(getattr(msg, "file", None), "name", None) or f"message {msg.id}"
+            failed.append((name, str(exc) or type(exc).__name__, None))
 
     if not files:
         return {
@@ -242,10 +250,12 @@ async def download_tg_range(
             "files": [], "file_metadata": [],
             "caption": "\n\n".join(captions), "chat_title": chat_title,
             "total_messages": len(valid), "downloaded_messages": 0,
+            "failed": failed,
         }
 
     return {
         "ok": True, "error": "", "files": files, "file_metadata": metadata,
         "caption": "\n\n".join(captions), "chat_title": chat_title,
         "total_messages": len(valid), "downloaded_messages": len(files),
+        "failed": failed,
     }
