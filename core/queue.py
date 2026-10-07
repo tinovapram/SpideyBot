@@ -29,6 +29,10 @@ DONE = "done"
 FAILED = "failed"
 CANCELLED = "cancelled"
 
+# Arbitrary but stable key ("SPIDEY") for the claim lock.  Any int64 works;
+# it only has to be the same constant in every worker process.
+_CLAIM_LOCK_KEY = 0x535049444559
+
 
 # ── Enqueue ────────────────────────────────────────────────────
 
@@ -70,9 +74,15 @@ async def claim_next(session: AsyncSession) -> DownloadJob | None:
     settings = get_settings()
     lease_seconds = settings.job_lease_seconds
 
-    # ponytail: per-user slot cap at claim time (best-effort — two workers
-    # racing on the same user can overshoot by one; add pg_advisory_xact_lock
-    # if exactness matters).
+    # Serialise claims so the per-user slot cap below is exact.  Two workers
+    # evaluating the count subquery at the same moment both see "2 < 3" and
+    # both claim, letting a user run limit+1 jobs — visible for admins, who
+    # queue freely instead of being rejected at submission time.  The lock is
+    # transaction-scoped and released when the claim commits.
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(:key)"), {"key": _CLAIM_LOCK_KEY}
+    )
+
     stmt = text(
         """
         UPDATE download_jobs SET
