@@ -111,8 +111,16 @@ class Selection:
         return self.audio is not None
 
     @property
-    def approx_bytes(self) -> int:
-        return sum(stream.filesize or 0 for stream in self.streams)
+    def approx_bytes(self) -> int | None:
+        """The size of the result, or ``None`` unless every stream reported one.
+
+        All-or-nothing on purpose: a partial sum looks like a precise number and could pass a size
+        gate the real download would fail (AC-3).
+        """
+        sizes = [stream.filesize for stream in self.streams]
+        if not sizes or any(size is None for size in sizes):
+            return None
+        return sum(size for size in sizes if size is not None)
 
 
 def from_formats(raw: Iterable[Mapping[str, Any]]) -> list[Stream]:

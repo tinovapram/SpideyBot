@@ -78,6 +78,7 @@ the automatic fallback.
 | D27 | Required capabilities | `tgcrypto`, `ffmpeg` and `ffprobe` are **required capabilities**: probed at startup (a missing one is logged at ERROR), exposed by `spideybot check` (non-zero exit), and consulted by the code that needs them so a job fails with a reason rather than degrading | Starting silently is exactly what makes a 291× slowdown, or a download with no audio, hard to diagnose. Chosen over refusing to start because hosts that need neither still work |
 | D28 | Media selection | Compatibility-first: prefer H.264 + AAC in MP4, using the best available stream (AV1/Opus) only when nothing compatible exists. **Settled 2026-10 as A+C: compatibility-first by default, with the choice exposed as `[download] video_preference = "compatible" \| "quality"`.** Chosen while the user was unavailable, on the grounds that it satisfies the spec's "use AV1/Opus only when nothing compatible exists", keeps the tier table about limits rather than quality, and is reversible by changing one config value | A file that will not play is not a successful download: AV1 in Telegram is client-dependent, while H.264/AAC in MP4 is universally playable and merges by stream copy (no transcode). Measured on the probed video: compat `299+140` = **1080p, ~255 MB**; yt-dlp's own default `401+251` = **2160p, ~689 MB**. The size is the stronger argument — the daily bandwidth cap, not the download count, is what really limits a free user (~4 downloads/day at 255 MB against ~1.5 at 689 MB), and 689 MB exceeds a free user's 500 MB link limit outright. A stream we cannot play is still delivered, as a document with the reason in the caption, rather than failed |
 | D29 | Upgrade button | `[ux] upgrade_url` is operator-supplied and empty by default; while it is unset the button is omitted rather than pointing somewhere invented | AC-1 requires the button but no destination appears anywhere in the spec. Validated at startup to be a link Telegram accepts (http/https/tg) so a typo fails immediately instead of as an API error on the first `/start`. A button-free welcome still satisfies the rest of AC-1 |
+| D30 | Resolver output | **A file to deliver is one *or more* transfers**, and sizes are all-or-nothing: a total is reported only when every stream reported one | Every YouTube format is a merge (measured: 0 of 53 carry audio), so "one file = one URL" cannot express what a job actually does — and the fetcher needs per-stream URLs to report byte progress, while the size gate needs the size of the *result* rather than of whichever stream was counted first. All-or-nothing exists because a partial sum looks precise: `None` for an unknown size must never read as `0`, or the gate waves through a download it cannot measure (E3/AC-3), while a reported `0` is a real measurement and E6 has a specific message for it |
 
 ---
 
@@ -384,8 +385,17 @@ plan assumed, so these are requirements rather than notes (details in R13):**
       a POST to `api.vidssave.com` with a hardcoded token (`auth: 20250901majwlqo`) and a
       `Referer` from someone else's site — an expiring third-party dependency that would sit in the
       middle of every YouTube download, for a resolve we can do ourselves
-- [ ] `downloader/contracts`, `registry`, `probe`, `flow`; host → engine by default, native override only
-      for TeraBox, the Cyberdrop family and the ad-gated hosts
+- [x] `downloader/contracts.py` + `downloader/probe.py`: the resolver contract and the engines' output
+      (D30). Two engines, two shapes, one contract: gallery-dl's typed records (`[3, url, meta]`,
+      `[-1, error]`) and yt-dlp's single info dict are both translated into files and transfers.
+      Guards that exist because the probes contradicted the plan: the `-o extractor.ytdl.enabled=true`
+      flag is asserted present (without it YouTube is "Unsupported URL", exit 64), a `ytdl:` marker is
+      **never** fetched as media but re-resolved from the metadata's formats, and no code path reads
+      the exit code as a success signal. Both guards were mutation-checked — disabling the marker rule
+      produces a file whose only transfer is the marker itself, which is R13's trap exactly
+- [ ] `downloader/registry.py` + `downloader/flow.py`: host → engine, native overrides, and the
+      chain native → gallery-dl → `cyberdrop-dl` last
+- [ ] Engines: yt-dlp, gallery-dl, cyberdrop-dl, generic HTTP (`curl_cffi`)
 - [ ] Engines: yt-dlp, gallery-dl, cyberdrop-dl, generic HTTP (`curl_cffi`)
 - [ ] Native adapters: TeraBox (account pool + per-user cookie), Cyberdrop family, Doodstream,
       StreamTape, MixDrop, StreamWish, Vidmonstr, Vidara, Luluvdoo, Bysejikuar, MEGA
