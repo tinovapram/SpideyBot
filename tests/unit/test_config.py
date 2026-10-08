@@ -42,6 +42,13 @@ def test_default_toml_is_loaded(fake_secrets: dict[str, str]) -> None:
     assert settings.admin.priority < settings.tier.premium.priority
     assert settings.ux.album_size == 10
     assert settings.db.port == 55432  # non-default, so a real Postgres can coexist
+    assert settings.download.video_preference == "compatible", "D28's default comes from the TOML"
+
+
+def test_an_unknown_video_preference_is_a_startup_error(fake_secrets: dict[str, str]) -> None:
+    """D28's knob is a `Literal`, so a typo cannot silently mean 'compatible'."""
+    with pytest.raises(ValidationError):
+        build_settings(**fake_secrets, download={"video_preference": "best"})
 
 
 def test_missing_secrets_fail_startup() -> None:

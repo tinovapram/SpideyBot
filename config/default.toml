@@ -89,3 +89,13 @@ user = "spideybot"
 
 [download]
 retention_days = 14          # how long finished job history is kept; 0 prunes it all
+# Which streams to pick when a video needs a video+audio merge (D28). Every YouTube
+# format is now a merge, so this decides what users actually receive.
+#   compatible — H.264 + AAC in MP4: plays in every client, ~2.7x smaller than the
+#                best available, so it fits tier size limits and spends less of the
+#                daily bandwidth cap (which, not the download count, is what limits
+#                a free user). Costs resolution: 1080p where 4K AV1 exists.
+#   quality    — best resolution whatever the codec (AV1/VP9 + Opus). Larger, and
+#                risks a file that will not play inline, so it is delivered as a
+#                document instead of a video.
+video_preference = "compatible"

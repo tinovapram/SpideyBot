@@ -178,6 +178,9 @@ class DbSettings(_Section):
 
 class DownloadSettings(_Section):
     retention_days: int = Field(default=14, ge=0)
+    #: D28. A `Literal` rather than a string with a comment, so a typo is a startup error like
+    #: every other unknown value here, instead of silently meaning "compatible".
+    video_preference: Literal["compatible", "quality"] = "compatible"
 
 
 # ── settings sources ───────────────────────────────────────────────────
