@@ -76,7 +76,7 @@ the automatic fallback.
 | D25 | Byte transfer | **We fetch the bytes ourselves** (`curl_cffi`/`aiohttp`) from the media URLs gallery-dl resolves, rather than letting gallery-dl's downloader do it | Uniform byte-level progress for FR-7, our own size accounting for the quota, and the E3 pre-download size gate operates on resolved sizes. Costs are tracked in R13 |
 | D26 | Extraction config | A committed `config/gallery-dl.json` enables `extractor.ytdl` and pins `extractor.ytdl.websites` as an allowlist, so the generic yt-dlp fallback cannot swallow URLs our native adapters should own | Enabling ytdl makes the generic extractor match *any* otherwise-unhandled URL; the allowlist keeps that from pre-empting TeraBox and the ad-gated hosts |
 | D27 | Required capabilities | `tgcrypto`, `ffmpeg` and `ffprobe` are **required capabilities**: probed at startup (a missing one is logged at ERROR), exposed by `spideybot check` (non-zero exit), and consulted by the code that needs them so a job fails with a reason rather than degrading | Starting silently is exactly what makes a 291× slowdown, or a download with no audio, hard to diagnose. Chosen over refusing to start because hosts that need neither still work |
-| D28 | Media selection | Compatibility-first: prefer H.264 + AAC in MP4, using the best available stream (AV1/Opus) only when nothing compatible exists. **Proposed — confirm at batch 3a** | YouTube's own default was AV1 video + Opus audio; Telegram playback of AV1 is inconsistent, and a file that will not play is not a successful download |
+| D28 | Media selection | Compatibility-first: prefer H.264 + AAC in MP4, using the best available stream (AV1/Opus) only when nothing compatible exists. **Proposed — confirm at batch 3a.** The merge case is now confirmed by observation, not inferred: a live `yt-dlp -j` on a YouTube link returned `protocol: https+https` with `requested_formats` of length 2 and **no top-level `url`**, so a selected pair is the normal path rather than an edge case, and the chosen pair is what determines whether the result plays | YouTube's own default was AV1 video + Opus audio; Telegram playback of AV1 is inconsistent, and a file that will not play is not a successful download |
 | D29 | Upgrade button | `[ux] upgrade_url` is operator-supplied and empty by default; while it is unset the button is omitted rather than pointing somewhere invented | AC-1 requires the button but no destination appears anywhere in the spec. Validated at startup to be a link Telegram accepts (http/https/tg) so a typo fails immediately instead of as an API error on the first `/start`. A button-free welcome still satisfies the rest of AC-1 |
 
 ---
@@ -338,6 +338,29 @@ covered by tests, and the live startup proved both handlers load.
 **Done when:** AC-4, AC-5, AC-6 pass, including kill-and-restart with no re-delivery.
 
 ### P3 — Download pipeline & delivery (engine-first, D6)
+
+**Probed 2026-10 with gallery-dl 1.32.15 / yt-dlp 2026.08.19 — the engine output is not what the
+plan assumed, so these are requirements rather than notes (details in R13):**
+
+- `gallery-dl -j --simulate <url>` prints **one pretty-printed JSON array**, not one object per
+  line. The whole stdout is a single `json.loads`, and it is ~47 KB for a one-file page.
+- Every record is **typed and positional**: `[2, {metadata}]` is a directory/header,
+  `[3, "<url>", {metadata}]` carries the file URL in slot 1, and `[-1, {error, message}]` is a
+  failure. There is no `url` key to read — the URL is not a dict field.
+- **`gallery-dl` exits 0 even when it resolved nothing**: a 404 came back as exit 0 plus a `[-1]`
+  record. Exit code alone is not a success signal, so the fetcher must scan for negative codes.
+- **`gallery-dl` does not handle YouTube** ("Unsupported URL", exit 64) — video sites are yt-dlp's
+  job, which is what the registry must route.
+- `yt-dlp -j` prints **one JSON object** (single document, 79 keys here) — a different shape from
+  gallery-dl, so the two engines need separate parsers rather than one shared "JSON lines" reader.
+- `yt-dlp`'s top-level dict can have **no `url` at all**: this video resolved to a merge
+  (`protocol: https+https`, `requested_formats` of length 2), with the URLs only inside
+  `requested_formats`. So D25's "fetch the resolved URL ourselves" needs an explicit rule for the
+  merge case — either two fetches plus an ffmpeg merge, or a delegated download — and must never
+  read `webpage_url` as if it were media (R13's warning, now confirmed by observation).
+- Resolved URLs may carry tracking parameters (`?utm_source=…`); they are kept verbatim, since
+  stripping query strings would break signed URLs.
+
 - [ ] `download/contracts`, `registry`, `probe`, `flow`; host → engine by default, native override only
       for TeraBox, the Cyberdrop family and the ad-gated hosts
 - [ ] Engines: yt-dlp, gallery-dl, cyberdrop-dl, generic HTTP (`curl_cffi`)
@@ -581,7 +604,7 @@ DB password is never embedded in a URL — the DSN is assembled at runtime from 
 | R10 | **Plaintext session/cookie files** (D7–D9) | A copied file is a logged-in device, no password needed | Credential directories are created **0700** (verified in the container: `0o700` on sessions, cookies and the bot's own session, with `insecure_secret_dirs()` returning `[]`), and a startup warning still fires if one is ever loosened; one file per user; never logged or exported; gitignored; accepted deliberately by the operator |
 | R11 | File-based sessions pin the bot to one host | A future multi-worker deployment cannot share sessions | Accepted for v1 (single process); revisit with shared storage or a DB-backed store if scaling out |
 | R12 | Legal/ToS of user-mediated downloads | Reputational | README states users may only download content they are entitled to; no moderation policy (spec §14) |
-| R13 | Downloading resolved URLs ourselves (D25) | Sites that need a `Referer`, a specific `User-Agent` or per-site cookies will return 403 when we fetch directly; and a yt-dlp-backed item can resolve to a `webpage_url` or a DASH/HLS *manifest* rather than a fetchable media URL | Per-host header/cookie map; an explicit item-level rule — a manifest or non-media URL is either delegated to gallery-dl's own downloader or reported as a failure with a reason, never silently mangled. **Verify with a live `gallery-dl -j --simulate` run before writing the fetcher**, since gallery-dl falls back to `webpage_url` when the info dict has no direct `url` |
+| R13 | Downloading resolved URLs ourselves (D25) | Sites that need a `Referer`, a specific `User-Agent` or per-site cookies will return 403 when we fetch directly; and a yt-dlp-backed item can resolve to a `webpage_url` or a DASH/HLS *manifest* rather than a fetchable media URL | **Probed 2026-10 with gallery-dl 1.32.15 and yt-dlp 2026.08.19; the plan's assumption was wrong in a way that would have produced a broken parser.** `gallery-dl -j` emits one pretty-printed JSON *array* whose records are typed and positional — `[3, "<url>", {meta}]` for a file, `[2, {meta}]` for a directory, `[-1, {error, message}]` for a failure — so the URL is **not** a dict key, and it is **exit 0 on failure**, which means the exit code cannot be the success signal. `gallery-dl` also does not handle YouTube at all (exit 64, "Unsupported URL"), so video sites are yt-dlp's job. `yt-dlp -j` emits **one JSON object** (a different shape, needing its own parser) and its top-level dict can have **no `url`**: the probed video resolved to a merge (`protocol: https+https`, `requested_formats` length 2) with the URLs only inside `requested_formats`. So the fetcher needs an explicit merge rule (two fetches + ffmpeg, or delegate) and must never treat `webpage_url` as media. Per-host header/cookie map still required |
 | R14 | **`.env` quoting was read differently by `python-dotenv` and Docker's `--env-file`** | A value quoted the way `.env.example` recommends loaded correctly on the host but arrived **still quoted** in a container, so startup failed validation — a failure that never reproduces locally | **Fixed.** `load_env_file` normalises `SPIDEY_*` values in the environment (`strip_env_quotes`), so one `.env` behaves identically in both places. Verified by re-running the container with the real `.env`, which previously failed with `invalid literal for int()`. `.env.example` now documents only what `--env-file` also supports, marking `${VAR}` expansion and inline comments as host-only |
 
 ---
