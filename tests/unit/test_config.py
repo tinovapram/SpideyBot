@@ -63,6 +63,29 @@ def test_db_password_is_optional(fake_secrets: dict[str, str]) -> None:
     assert settings.db_password is None
 
 
+def test_upgrade_url_is_optional(fake_secrets: dict[str, str]) -> None:
+    """AC-1 wants the button, but the spec names no destination, so empty is valid."""
+    assert build_settings(**fake_secrets).ux.upgrade_url == ""
+
+
+def test_upgrade_url_must_be_a_link_telegram_accepts(
+    fake_secrets: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SPIDEY_UX__UPGRADE_URL", "example.com/upgrade")
+
+    with pytest.raises(ValidationError, match="upgrade_url"):
+        build_settings(**fake_secrets)
+
+
+@pytest.mark.parametrize("url", ["https://example.com/upgrade", "tg://resolve?domain=spideybot"])
+def test_upgrade_url_accepts_links(
+    fake_secrets: dict[str, str], monkeypatch: pytest.MonkeyPatch, url: str
+) -> None:
+    monkeypatch.setenv("SPIDEY_UX__UPGRADE_URL", url)
+
+    assert build_settings(**fake_secrets).ux.upgrade_url == url
+
+
 def test_secrets_are_not_leaked_by_repr(fake_secrets: dict[str, str]) -> None:
     settings = build_settings(**fake_secrets)
     password = fake_secrets["db_password"]

@@ -123,6 +123,25 @@ class UxSettings(_Section):
     default_magic_word: str = "WOW"
     timer_media_default: bool = True
 
+    # AC-1 requires an Upgrade button on the first /start, but the spec never names a
+    # destination. Empty omits the button, so no URL is invented on the operator's behalf;
+    # set it and the button appears.
+    upgrade_url: str = ""
+
+    @field_validator("upgrade_url")
+    @classmethod
+    def _upgrade_url_is_a_link(cls, value: str) -> str:
+        """Telegram accepts only http(s) and tg:// for URL buttons.
+
+        Checked at startup so a typo fails with a clear message, rather than surfacing as
+        an API error when the first user sends /start.
+        """
+        if not value:
+            return value
+        if not value.startswith(("https://", "http://", "tg://")):
+            raise ValueError("upgrade_url must start with https://, http:// or tg://")
+        return value
+
     @field_validator("default_magic_word")
     @classmethod
     def _single_token(cls, value: str) -> str:

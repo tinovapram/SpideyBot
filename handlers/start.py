@@ -3,9 +3,20 @@
 from __future__ import annotations
 
 from pyrogram import Client, filters
-from pyrogram.types import Message
+from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app import catalog, config, paths, tiers
+
+
+def upgrade_keyboard(url: str) -> InlineKeyboardMarkup | None:
+    """The Upgrade button for a first welcome, when the operator has set a destination.
+
+    AC-1 requires the button but never says where it points, so an unset URL omits it
+    rather than sending users somewhere nobody chose (plan D29).
+    """
+    if not url:
+        return None
+    return InlineKeyboardMarkup([[InlineKeyboardButton("✨ Upgrade", url=url)]])
 
 
 @Client.on_message(filters.command("start") & filters.private)
@@ -36,5 +47,6 @@ async def start_command(client: Client, message: Message) -> None:
             has_session=has_session,
             # No session manager exists yet, so a stored file can never be live.
             is_live=False,
-        )
+        ),
+        reply_markup=upgrade_keyboard(settings.ux.upgrade_url),
     )

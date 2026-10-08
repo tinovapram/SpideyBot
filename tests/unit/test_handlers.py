@@ -9,11 +9,12 @@ catalog rendering — and leaves only Telegram's routing unverified.
 from __future__ import annotations
 
 import pytest
+from pyrogram.types import InlineKeyboardMarkup
 
 from app import catalog, config, paths
 from app.config import build_settings
 from handlers.help import help_command
-from handlers.start import start_command
+from handlers.start import start_command, upgrade_keyboard
 
 
 class FakeUser:
@@ -28,9 +29,11 @@ class FakeMessage:
     def __init__(self, user: FakeUser | None) -> None:
         self.from_user = user
         self.replies: list[str] = []
+        self.reply_markups: list[object] = []
 
-    async def reply_text(self, text: str, **_kwargs: object) -> None:
+    async def reply_text(self, text: str, reply_markup: object = None, **_kwargs: object) -> None:
         self.replies.append(text)
+        self.reply_markups.append(reply_markup)
 
 
 @pytest.fixture
@@ -126,6 +129,46 @@ async def test_start_replies_exactly_once(using) -> None:
     await start_command(None, message)
 
     assert len(message.replies) == 1
+
+
+# ── the Upgrade button (AC-1, plan D29) ─────────────────────────────────
+
+
+def test_upgrade_keyboard_is_absent_without_a_url() -> None:
+    """No destination is specified anywhere in the spec, so nothing is invented."""
+    assert upgrade_keyboard("") is None
+
+
+def test_upgrade_keyboard_builds_a_labelled_url_button() -> None:
+    markup = upgrade_keyboard("https://example.invalid/upgrade")
+
+    assert markup is not None
+    button = markup.inline_keyboard[0][0]
+    assert button.url == "https://example.invalid/upgrade"
+    assert button.text
+
+
+async def test_start_attaches_the_upgrade_button_when_a_url_is_set(settings, using) -> None:
+    ux = settings.ux.model_copy(update={"upgrade_url": "https://example.invalid/upgrade"})
+    using(settings.model_copy(update={"ux": ux}))
+    message = FakeMessage(FakeUser(1))
+
+    await start_command(None, message)
+
+    markup = message.reply_markups[0]
+    assert isinstance(markup, InlineKeyboardMarkup)
+    assert markup.inline_keyboard[0][0].url == "https://example.invalid/upgrade"
+
+
+async def test_start_omits_the_button_when_no_url_is_set(settings, using) -> None:
+    """No destination is specified anywhere in the spec, so nothing is invented."""
+    using(settings)
+    message = FakeMessage(FakeUser(1))
+
+    await start_command(None, message)
+
+    assert settings.ux.upgrade_url == ""
+    assert message.reply_markups[0] is None
 
 
 # ── /help ───────────────────────────────────────────────────────────────

@@ -63,6 +63,10 @@ render_interval = 3.0        # min seconds between status content edits
 anim_interval = 1.2          # min seconds between liveness-only edits
 default_magic_word = "WOW"
 timer_media_default = true
+# AC-1 wants an Upgrade button on the first /start, but the spec never says where it
+# points. Leave this empty and the button is omitted rather than sending users somewhere
+# arbitrary; set it to a URL Telegram accepts and the button appears.
+upgrade_url = ""
 
 [referral]
 daily_bonus = 10             # extra downloads/day per credited invite
