@@ -24,6 +24,28 @@ from app.models import ReferralBonus, UsageDaily
 
 BYTES_PER_MB = 1024 * 1024
 
+_SIZE_UNITS = ("KB", "MB", "GB", "TB")
+
+
+def human_bytes(count: int) -> str:
+    """A byte count as the usage copy expects it: ``0 B``, ``512 B``, ``1.5 KB``, ``2 GB``.
+
+    Binary units, because the caps it is measured against are binary — ``daily_mb`` means 1024
+    KiB, and printing a decimal MB would show a user over the cap they are being held to.
+    """
+    value = float(max(count, 0))
+    if value < 1024:
+        return f"{int(value)} B"
+
+    # Each iteration renders the value in the current unit and returns as soon as it fits;
+    # the value only ever shrinks, so the first unit that fits is the right one.
+    for unit in _SIZE_UNITS:
+        value /= 1024
+        rendered = f"{value:.1f} {unit}" if value < 10 else f"{value:.0f} {unit}"
+        if value < 1024:
+            return rendered
+    return rendered
+
 
 def today(now: datetime | None = None) -> date:
     """The current usage day.

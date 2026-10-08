@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 from app import catalog
 from app.config import build_settings
+from app.quota import BYTES_PER_MB, Usage, human_bytes
 from app.tiers import resolve
 
 
@@ -147,3 +150,124 @@ def test_usage_cancel_points_at_status() -> None:
 
 def test_usage_dt_mentions_the_session_requirement() -> None:
     assert "/login" in catalog.USAGE_DT
+
+
+# ── /quota (FR-15, spec 7.6) ────────────────────────────────────────────
+
+
+@pytest.fixture
+def free_user(settings):
+    return resolve(settings, tier="free")
+
+
+def test_quota_reports_tier_usage_and_limits(free_user) -> None:
+    text = catalog.quota_message(free_user, Usage(downloads=3))
+
+    assert "**Quota Status**" in text
+    assert "Tier: 👤 Free" in text
+    assert "Downloads today: 3  — 7 left" in text
+    assert "Concurrent: 0/1 slots" in text
+    assert "Link limit: 500 MB" in text
+    assert "{" not in text
+
+
+def test_quota_hides_the_bonus_and_queue_lines_when_there_are_none(free_user) -> None:
+    """FR-15.2 and FR-15.5 ask for both conditionally, so a quiet user sees no zero rows."""
+    text = catalog.quota_message(free_user, Usage())
+
+    assert "bonus" not in text
+    assert "Queued" not in text
+
+
+def test_quota_shows_referral_headroom_separately(free_user) -> None:
+    """FR-17.7: the bonus is extra headroom, so both the label and the total move."""
+    text = catalog.quota_message(free_user, Usage(downloads=1), bonus=20)
+
+    assert "Downloads today: 1 (+20 bonus)  — 29 left" in text
+
+
+def test_quota_shows_a_waiting_job(free_user) -> None:
+    text = catalog.quota_message(free_user, Usage(), slots_active=1, queued=2)
+
+    assert "Queued: 2 waiting for a slot" in text
+    assert "Concurrent: 1/1 slots" in text
+
+
+def test_quota_reports_bandwidth_against_the_cap(free_user) -> None:
+    text = catalog.quota_message(free_user, Usage(bytes_in=BYTES_PER_MB))
+
+    assert "Bandwidth today: 1.0 MB / 1.0 GB" in text
+
+
+def test_unlimited_dimensions_read_as_infinity(settings) -> None:
+    """No shipped tier is uncapped for bandwidth, so the case is built explicitly.
+
+    Spec 13 says 0 means unlimited for a size, and rendering that as a zero-byte allowance
+    would tell a user they cannot download at all.
+    """
+    tier = resolve(settings, tier="premium")
+    uncapped = dataclasses.replace(
+        tier,
+        limits=tier.limits.model_copy(update={"daily_mb": 0, "link_total_mb": 0}),
+    )
+
+    text = catalog.quota_message(uncapped, Usage(bytes_in=1234))
+
+    assert "Bandwidth today: 1.2 KB / ∞" in text
+    assert "Link limit: ∞" in text
+
+
+def test_quota_warns_once_the_downloads_are_spent(free_user) -> None:
+    text = catalog.quota_message(free_user, Usage(downloads=10))
+
+    assert "Downloads today: 10  — 0 left" in text
+    assert catalog.QUOTA_BLOCKED in text
+
+
+def test_quota_warns_when_the_bandwidth_is_spent(free_user) -> None:
+    text = catalog.quota_message(free_user, Usage(downloads=1, bytes_in=1024 * BYTES_PER_MB))
+
+    assert "0 left" not in text
+    assert catalog.QUOTA_BLOCKED in text
+
+
+def test_admin_is_labelled_and_noted(settings) -> None:
+    text = catalog.quota_message(resolve(settings, is_admin=True), Usage())
+
+    assert "Tier: 👑 Admin" in text
+    assert "admin priority" in text
+    assert "Concurrent: 0/3 slots" in text, "admin keeps the premium slot count (spec 2.1)"
+
+
+def test_a_zero_download_count_is_no_allowance_not_unlimited(settings) -> None:
+    """A count and a size read 0 differently: this must agree with reserve_download."""
+    no_allowance = dataclasses.replace(
+        resolve(settings, tier="free"),
+        limits=resolve(settings, tier="free").limits.model_copy(update={"daily_downloads": 0}),
+    )
+
+    text = catalog.quota_message(no_allowance, Usage())
+
+    assert "0 left" in text
+    assert catalog.QUOTA_BLOCKED in text
+
+
+@pytest.mark.parametrize(
+    ("count", "expected"),
+    [
+        (0, "0 B"),
+        (512, "512 B"),
+        (1024, "1.0 KB"),
+        (1536, "1.5 KB"),
+        (1048576, "1.0 MB"),
+        (15 * 1048576, "15 MB"),
+        (10 * 1024**3, "10 GB"),
+    ],
+)
+def test_byte_counts_read_the_way_the_cap_is_measured(count: int, expected: str) -> None:
+    assert human_bytes(count) == expected
+
+
+def test_negative_byte_counts_are_clamped() -> None:
+    """A counter that went backwards must not render as a negative size."""
+    assert human_bytes(-1) == "0 B"

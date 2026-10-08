@@ -288,12 +288,18 @@ the handler was not exercised, because that needs a human to message the bot. Ev
 covered by tests, and the live startup proved both handlers load.
 
 ### P1 — Identity, tiers, quota gates
-- [ ] Onboarding state machine: registration, silent referral capture, first-vs-repeat `/start` (FR-1)
-- [ ] Tier resolution with expiry revert; admin precedence (FR-2)
-- [ ] Quota check / reserve / commit / release; daily boundary (FR-3.2, FR-15, §8.5)
-- [ ] `/quota` with `∞` rendering; submission rate limiter (D22)
+- [x] Onboarding state machine: registration, silent referral capture, first-vs-repeat `/start` (FR-1)
+- [x] Tier resolution with expiry revert; admin precedence (FR-2)
+- [x] Quota check / reserve / commit / release; daily boundary (FR-3.2, FR-15, §8.5). The reservation
+      is one `INSERT … ON CONFLICT DO UPDATE … WHERE` statement, so a check and an increment cannot be
+      interleaved; a ten-way concurrent test proves the allowance cannot be oversold
+- [x] `/quota` with `∞` rendering (FR-15, AC-10). Reads the same rows the gates read rather than
+      recomputing them, so the display cannot drift from the enforcement. `0` deliberately means
+      different things for a count (`no allowance`, matching `reserve_download`) and a size
+      (`unlimited`, spec 13), and both are exercised
+- [ ] Submission rate limiter (D22)
 
-**Done when:** AC-1 and AC-10 pass.
+**Done when:** AC-1 and AC-10 pass. — **Both met**; AC-1 and AC-10 are covered in `tests/acceptance`.
 
 ### P2 — Queue, jobs, cancellation
 - [x] `app/queue.py`: priority + submission order, lease claim/renew/requeue (FR-10).

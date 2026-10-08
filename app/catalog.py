@@ -10,6 +10,7 @@ reviewed as a whole, and a test can assert the placeholders that must survive.
 
 from __future__ import annotations
 
+from app.quota import BYTES_PER_MB, Usage, bandwidth_exhausted, human_bytes
 from app.tiers import EffectiveTier, format_limit_mb
 
 # Spec 2.2 / FR-13: the three states a session can be in.
@@ -142,3 +143,71 @@ def welcome_message(
         blocks.append(FREE_TIER_NOTE)
     blocks.append(WELCOME_NAMED.format(first_name=first_name))
     return "\n\n".join(blocks)
+
+
+# ── /quota (FR-15, spec 7.6) ────────────────────────────────────────────
+#
+# Note the deliberate asymmetry: 0 means *unlimited* for a size (spec 13), but for a download
+# count it means no allowance at all -- which is what app.quota.reserve_download enforces. The
+# two are rendered differently for that reason, and neither is a special case of the other.
+
+QUOTA_TEMPLATE = """**Quota Status**
+
+  Tier: {tier_label}
+  Downloads today: {downloads}{bonus}  — {remaining}
+  Bandwidth today: {bandwidth}
+  Concurrent: {active}/{total} slots{slot_note}
+  Link limit: {link_limit}{queued}"""
+
+QUOTA_BONUS = " (+{bonus} bonus)"
+QUOTA_QUEUED = "\n  Queued: {count} waiting for a slot"
+QUOTA_BLOCKED = "⚠️ **Quota reached** — try again tomorrow."
+QUOTA_UNLIMITED = "∞"
+
+
+def _bandwidth_line(usage: Usage, daily_mb: int) -> str:
+    """``used / cap``, or ``used / ∞`` when the tier has no bandwidth cap."""
+    used = human_bytes(usage.bytes_in)
+    if daily_mb <= 0:
+        return f"{used} / {QUOTA_UNLIMITED}"
+    return f"{used} / {human_bytes(daily_mb * BYTES_PER_MB)}"
+
+
+def quota_message(
+    tier: EffectiveTier,
+    usage: Usage,
+    *,
+    bonus: int = 0,
+    slots_active: int = 0,
+    queued: int = 0,
+) -> str:
+    """The `/quota` body (FR-15).
+
+    ``bonus`` is extra daily headroom from referral credits, shown only when there is some, and
+    ``queued`` only when a job is actually waiting — both per FR-15.2 and FR-15.5, which ask for
+    those lines conditionally so a user with neither is not shown a row of zeros.
+    """
+    limits = tier.limits
+    allowance = limits.daily_downloads + bonus
+    remaining = max(0, allowance - usage.downloads)
+
+    note = " (extra links wait in the queue)"
+    if tier.is_admin:
+        note = " (admin priority; extra links wait in the queue)"
+
+    body = QUOTA_TEMPLATE.format(
+        tier_label=tier.label,
+        downloads=usage.downloads,
+        bonus=QUOTA_BONUS.format(bonus=bonus) if bonus > 0 else "",
+        remaining=f"{remaining} left",
+        bandwidth=_bandwidth_line(usage, limits.daily_mb),
+        active=slots_active,
+        total=limits.concurrent,
+        slot_note=note,
+        link_limit=format_limit_mb(limits.link_total_mb),
+        queued=QUOTA_QUEUED.format(count=queued) if queued > 0 else "",
+    )
+
+    if remaining == 0 or bandwidth_exhausted(usage, limits.daily_mb):
+        return f"{body}\n\n{QUOTA_BLOCKED}"
+    return body

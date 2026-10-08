@@ -93,12 +93,17 @@ def test_constructing_the_bot_does_not_connect(bot_client) -> None:
     assert not bot_client.is_connected
 
 
-async def test_both_commands_register_as_message_handlers(settings, tmp_path, monkeypatch) -> None:
+async def test_every_command_module_registers_as_a_message_handler(
+    settings, tmp_path, monkeypatch
+) -> None:
     """Kurigram loads plugins from ``start()``, so drive the loader directly and stay offline.
 
     Handlers are added through ``loop.create_task``, so they appear a tick later — which
     is also why the client is built inside this coroutine: Kurigram captures whichever
     loop is current, and a loop that never runs would silently register nothing.
+
+    Listed per module rather than counted, so a handler file that fails to import shows up
+    here as a missing command instead of passing on the strength of the other two.
     """
     monkeypatch.setattr(paths, "BOT_DIR", tmp_path)
     client = clients.build_bot(settings)
@@ -109,5 +114,5 @@ async def test_both_commands_register_as_message_handlers(settings, tmp_path, mo
     handlers = [h for group in client.dispatcher.groups.values() for h in group]
     registered = {getattr(handler.callback, "__name__", "") for handler in handlers}
 
-    assert {"start_command", "help_command"} <= registered
+    assert {"start_command", "help_command", "quota_command"} <= registered
     assert all(isinstance(handler, MessageHandler) for handler in handlers)
