@@ -14,10 +14,15 @@ Two deliberate departures from stock pydantic-settings:
   than being read ad hoc, so an OS keyring or Docker secrets can be added later
   without touching callers. Today the provider is the environment, which is also
   where ``.env`` lands after :func:`load_env_file`.
+* Environment values are normalised before they are read, so one ``.env`` behaves the
+  same on a host and in a container. Docker's ``--env-file`` does not strip quotes and
+  ``python-dotenv`` does, which would otherwise make quoting a host-only feature that
+  fails only once deployed (see R14 in the plan).
 """
 
 from __future__ import annotations
 
+import os
 import tomllib
 from collections.abc import Mapping, Sequence
 from functools import lru_cache
@@ -44,6 +49,9 @@ from app import paths
 from app.secrets import EnvSecretsProvider, SecretsProvider
 
 ENV_PREFIX = "SPIDEY_"
+
+# Both quote styles, because either is valid in a `.env` file.
+QUOTE_CHARS = ("'", '"')
 
 
 class _Section(BaseModel):
@@ -398,15 +406,57 @@ class Settings(BaseSettings):
         return [value for value in values if value]
 
 
-def load_env_file() -> bool:
-    """Load ``.env`` into the process environment.
+def strip_env_quotes(value: str) -> str:
+    """Drop one layer of matching surrounding quotes.
 
-    Called by the entry points rather than at import, so importing this module in
-    a test does not silently pick up the developer's real credentials.
+    ``python-dotenv`` strips quotes while parsing a file; Docker's ``--env-file`` and
+    ``docker run -e`` do not. Without this, a value quoted the way `.env.example`
+    recommends loads correctly on the host and arrives still quoted in a container,
+    where it fails validation at startup — a failure that never reproduces locally.
+
+    Only a matching pair wrapping the *whole* value is removed, and nothing inside is
+    interpreted, so a value such as 'it's here' keeps every character.
+    """
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in QUOTE_CHARS:
+        return value[1:-1]
+    return value
+
+
+def normalise_env_quotes(prefix: str = ENV_PREFIX) -> int:
+    """Strip stray quotes from ``SPIDEY_*`` environment values, in place.
+
+    Applied to the environment rather than to each settings source, so flat values,
+    nested ones (``SPIDEY_UX__ALBUM_SIZE``) and secrets all behave identically without
+    depending on how pydantic-settings happens to assemble them.
+
+    Returns how many values changed, for callers and tests to assert on.
+    """
+    changed = 0
+    for key, raw in list(os.environ.items()):
+        if not key.upper().startswith(prefix):
+            continue
+        stripped = strip_env_quotes(raw)
+        if stripped != raw:
+            os.environ[key] = stripped
+            changed += 1
+    return changed
+
+
+def load_env_file() -> bool:
+    """Prepare the process environment: load ``.env``, then normalise quoting.
+
+    Called by the entry points rather than at import, so importing this module in a
+    test does not silently pick up the developer's real credentials.
+
+    Normalisation runs whether or not a file was found. In a container the values come
+    from Docker and never pass through ``python-dotenv`` at all, so the presence of a
+    file cannot be what triggers it.
     """
     from dotenv import load_dotenv
 
-    return bool(load_dotenv(paths.ENV_FILE))
+    found = bool(load_dotenv(paths.ENV_FILE))
+    normalise_env_quotes()
+    return found
 
 
 @lru_cache(maxsize=1)
