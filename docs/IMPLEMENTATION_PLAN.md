@@ -53,7 +53,7 @@ the automatic fallback.
 | D2 | Persistence | **PostgreSQL** — SQLAlchemy 2.0 async + `asyncpg` + Alembic | Enables `FOR UPDATE SKIP LOCKED` leases (FR-10.5) and atomic quota upserts (FR-3.2) |
 | D3 | Provisioning | **Bring-your-own-Postgres.** The app never knows where Postgres lives: `[db]` host/port/name/user + `SPIDEY_DB_PASSWORD` is the only coupling. Three equally documented providers — bundled binaries, compose, existing/remote | Direct run without Docker is first-class; Docker is one provider, not a dependency |
 | D4 | **No SQLite backend** | Postgres only | The queue depends on `FOR UPDATE SKIP LOCKED`; SQLite would silently change concurrency semantics and break "exactly once" (§8.2/E26) in the environment where it would go unnoticed |
-| D5 | Extraction | **gallery-dl is the general extractor**, and yt-dlp is invoked **as a library, for resolution only**, on native video sites (the YouTube family). Native adapters still run first; everything else goes to gallery-dl with `extractor.ytdl.enabled = true`. yt-dlp never transfers bytes for us — resolution hands back per-stream URLs and we fetch them (D25) | **Amended 2026-10 after probing; the original "our code never invokes yt-dlp" was already hollow.** gallery-dl imports yt-dlp lazily, so it is on the path either way, and its `ytdl` extractor hands back a `ytdl:https://…` **marker** in the URL slot (`extension: None`) rather than media — so for exactly those sites the single-surface claim bought nothing and cost clarity. Using `yt_dlp.YoutubeDL(...).extract_info(url, download=False)` directly is the most direct, best-maintained resolution route for YouTube, and the previous implementation already did this (`downloader/site/youtube.py::_fetch_ytdlp_fallback`, branch `V5`). Verified: the resolved pair's per-stream URLs are all present, so D25 still holds. Cross-check — handing D28 to yt-dlp as a format string (`bv*[vcodec^=avc1]+ba[ext=m4a]/bv*[vcodec^=avc1]+ba`) selects `299+140` at 1080p, the same pair `download/selection.py` chooses |
+| D5 | Extraction | **gallery-dl is the general extractor**, and yt-dlp is invoked **as a library, for resolution only**, on native video sites (the YouTube family). Native adapters still run first; everything else goes to gallery-dl with `extractor.ytdl.enabled = true`. yt-dlp never transfers bytes for us — resolution hands back per-stream URLs and we fetch them (D25) | **Amended 2026-10 after probing; the original "our code never invokes yt-dlp" was already hollow.** gallery-dl imports yt-dlp lazily, so it is on the path either way, and its `ytdl` extractor hands back a `ytdl:https://…` **marker** in the URL slot (`extension: None`) rather than media — so for exactly those sites the single-surface claim bought nothing and cost clarity. Using `yt_dlp.YoutubeDL(...).extract_info(url, download=False)` directly is the most direct, best-maintained resolution route for YouTube, and the previous implementation already did this (`downloader/site/youtube.py::_fetch_ytdlp_fallback`, branch `V5`). Verified: the resolved pair's per-stream URLs are all present, so D25 still holds. Cross-check — handing D28 to yt-dlp as a format string (`bv*[vcodec^=avc1]+ba[ext=m4a]/bv*[vcodec^=avc1]+ba`) selects `299+140` at 1080p, the same pair `downloader/selection.py` chooses |
 | D6 | Adapter scope | **Engine-first.** Engines cover the broad platform list; native adapters only where they fail: **TeraBox**, **Cyberdrop family**, the **YouTube family**, and the **ad-gated hosts** (Doodstream, StreamTape, MixDrop, StreamWish, Vidmonstr, Vidara, Luluvdoo, Bysejikuar, MEGA) | Each native adapter is a module + smoke test + a standing breakage surface (R4); breadth is free from the engines, so reliability is bought only where needed. **Chain order (user decision, 2026-10): native adapter → engine → `cyberdrop-dl` LAST**, only once every other method has failed — it is a heavyweight application with its own state rather than a peer engine, so it is a rescue path. TeraBox keeps its own path. This matches the previous implementation's `downloader/flow.py` (branch `V5`), which falls back native → gallery-dl → cyberdrop-dl, and its `downloader/site/*.py` is the reference for per-site behaviour. YouTube joins the native list because the *engine* cannot satisfy D25 there (it returns a `ytdl:` marker), which is exactly D6's stated test for buying a native adapter |
 | D7 | **Sessions storage** | Kurigram native **File Storage**, **plaintext**: `data/sessions/<user_id>.session` | Operator decision. Simplest and self-healing; no key management. Accepted risk documented in §8/R10 |
 | D8 | **Cookie storage** | Plaintext file: `data/cookies/<user_id>` | Mirrors D7 for consistency |
@@ -61,7 +61,7 @@ the automatic fallback.
 | D10 | Revocation | `/logout` calls `log_out()` **(server-side)** and *then* deletes the file | Deleting only the file leaves the auth key valid and the session listed in Active Sessions — the spec requires genuine revocation |
 | D11 | Config layering | Committed `config/default.toml` (all §13 defaults as a reviewable `[tier.*]` table) → optional gitignored `config/local.toml` → `SPIDEY_*` env vars (highest) | Defaults become reviewable in a diff; TOML sources can be validated with `extra="forbid"` so a typo fails loudly instead of silently defaulting |
 | D12 | Secrets | Bootstrap secrets only (bot token, API hash, DB password, TeraBox/Reddit creds) via a `SecretsProvider` seam; env today, keyring/Docker secrets later | Keeps non-secret config separable and makes an OS secret store a drop-in |
-| D13 | Structure | **Shallow layers**: `main.py`, `app/`, `handlers/`, `download/`, `telegram/`; nothing deeper than two levels, no `src/` nesting | Operator decision |
+| D13 | Structure | **Shallow layers**: `main.py`, `app/`, `handlers/`, `downloader/`, `telegram/`; nothing deeper than two levels, no `src/` nesting | Operator decision. The package is `downloader/`, not `download/`, so the code that *downloads* is never confused with `data/downloads/`, where the bytes land — and it matches the previous implementation's naming |
 | D14 | Handler registration | Kurigram **smart plugins** — `plugins=dict(root="handlers", include=[...])` with `@Client.on_message` decorators | Removes the manual registration layer entirely. Caveat: one handler per group per update, so commands, the magic word and TimerMedia need separate groups |
 | D15 | Queue / workers | Single process; Postgres priority queue with leases, written for `SKIP LOCKED` from day one | Multi-worker later becomes a config change, not a rewrite |
 | D16 | Client identity | Configurable `[client] profile = "desktop" \| "android" \| "custom"` for **user clients** (`device_model`, `system_version`, `app_version`, `lang_pack`, `lang_code`, `client_platform`) | Account-safety, not cosmetics: a "CPython / Kurigram" identity in a user's Active Sessions raises the odds of their account being actioned |
@@ -99,8 +99,8 @@ the automatic fallback.
                  │  user clients (session files) ◀── workers (N asyncio tasks)              │
                  │      ▲   ▲                │                                             │
                  │      │   │                ▼                                             │
-                 │  handlers/  │        download/flow ──▶ download/engines + download/sites │
-                 │  magic_word │             │              + download/bypass               │
+                 │  handlers/  │  downloader/flow ──▶ engines + sites + bypass             │
+                 │  magic_word │             │                                             │
                  │  timer_media│             │                                             │
                  │             └─────────────┴──▶ telegram/delivery → albums → user chat    │
                  │                                                                         │
@@ -128,8 +128,8 @@ SpideyBot/
     start.py  help.py  download.py  tg_download.py  cancel.py  job_status.py
     account.py  login.py  setting.py  quota_info.py  sites.py  referral.py
     bypass.py  admin.py  magic_word.py  timer_media.py
-  download/
-    engines.py  flow.py  probe.py  registry.py
+  downloader/              # the code that downloads; the bytes land in data/downloads/
+    engines.py  flow.py  probe.py  registry.py  selection.py
     sites/                 # native adapters only: terabox.py, cyberdrop_family.py, ad-gated hosts
     bypass/                # FR-18 shortener families
   telegram/
@@ -371,20 +371,20 @@ plan assumed, so these are requirements rather than notes (details in R13):**
   grounded in the previous implementation: `downloader/site/*.py` and `downloader/flow.py` on
   branch `V5`, which is also where the native → gallery-dl → cyberdrop-dl ordering comes from.
 
-- [x] `download/selection.py`: which streams to fetch, and whether the result will play (D28).
+- [x] `downloader/selection.py`: which streams to fetch, and whether the result will play (D28).
       Written against the *real* format lists, so the traps it closes were observed rather than
       imagined: `formats` contains storyboard entries (`protocol: mhtml`) a naive largest-pick can
       select, and a stream with no URL is not a candidate at all — which is what stops a
       `ytdl:`-marked item being "fetched" as though its marker were media (R13)
 - [ ] Native YouTube adapter: resolve with `yt_dlp.YoutubeDL(...).extract_info(url, download=False)`,
-      choose with `download/selection.py`, fetch and merge ourselves. This is a *native* adapter under
+      choose with `downloader/selection.py`, fetch and merge ourselves. This is a *native* adapter under
       D6's rule because the engine fails D25 here, not because YouTube needs special handling —
       gallery-dl's `ytdl` route yields a marker rather than media. Carried over from `V5`'s
       `_fetch_ytdlp_fallback`, which proved the library call. **Not** carried over: V5's primary path,
       a POST to `api.vidssave.com` with a hardcoded token (`auth: 20250901majwlqo`) and a
       `Referer` from someone else's site — an expiring third-party dependency that would sit in the
       middle of every YouTube download, for a resolve we can do ourselves
-- [ ] `download/contracts`, `registry`, `probe`, `flow`; host → engine by default, native override only
+- [ ] `downloader/contracts`, `registry`, `probe`, `flow`; host → engine by default, native override only
       for TeraBox, the Cyberdrop family and the ad-gated hosts
 - [ ] Engines: yt-dlp, gallery-dl, cyberdrop-dl, generic HTTP (`curl_cffi`)
 - [ ] Native adapters: TeraBox (account pool + per-user cookie), Cyberdrop family, Doodstream,
@@ -589,12 +589,12 @@ DB password is never embedded in a URL — the DSN is assembled at runtime from 
 | FR-1 onboarding, referral capture, already-started | P1 | `app/` onboarding + `handlers/start.py` | AC-1 |
 | FR-2 help | P0 | `handlers/help.py` | AC-1 |
 | FR-3 `/dl` + quota validation | P1, P3 | `app/quota.py`, `handlers/download.py` | AC-2, AC-3, AC-10 |
-| FR-4 `/dt` | P5 | `download/telegram_source` + `handlers/tg_download.py` | AC-7 |
+| FR-4 `/dt` | P5 | `downloader/telegram_source` + `handlers/tg_download.py` | AC-7 |
 | FR-5 magic word | P6 | `handlers/magic_word.py` | AC-8 |
 | FR-6 TimerMedia | P6 | `handlers/timer_media.py` | AC-9 |
 | FR-7 progress/status | P4 | `telegram/status.py` | AC-2, E7, E8 |
 | FR-8 delivery format | P3 | `telegram/delivery.py` | AC-2 |
-| FR-9 failure reporting | P3 | `download/flow.py` + catalog | AC-15, E27 |
+| FR-9 failure reporting | P3 | `downloader/flow.py` + catalog | AC-15, E27 |
 | FR-10 queue & concurrency | P2 | `app/queue.py` | AC-4 |
 | FR-11 cancellation | P2 | `handlers/cancel.py` | AC-5 |
 | FR-12 `/status` | P2 | `handlers/job_status.py` | AC-6 |
@@ -603,7 +603,7 @@ DB password is never embedded in a URL — the DSN is assembled at runtime from 
 | FR-15 `/quota` | P1 | `handlers/quota_info.py` | AC-10 |
 | FR-16 `/sites` | P7 | `handlers/sites.py` | — |
 | FR-17 referrals | P7 | `app/referral.py`, `handlers/referral.py` | AC-11 |
-| FR-18 bypass | P7 | `download/bypass/` | AC-13 |
+| FR-18 bypass | P7 | `downloader/bypass/` | AC-13 |
 | FR-19 admin tools | P8 | `handlers/admin.py` | AC-14 |
 | §8 state, idempotency | P2, P3 | `app/models.py`, `app/queue.py` | AC-2, E26 |
 | §9 edge cases | all | distributed | E1–E28 |

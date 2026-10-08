@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 
 from app.config import build_settings
-from download.selection import (
+from downloader.selection import (
     CONTAINER_MKV,
     CONTAINER_MP4,
     Selection,
