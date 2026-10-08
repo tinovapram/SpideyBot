@@ -318,7 +318,15 @@ covered by tests, and the live startup proved both handlers load.
       refusals cannot be raced. A requested cancellation already reads as `❌ Cancelled`, since
       showing `🔄 Running` while the worker unwinds would look like `/cancel` did nothing
 - [ ] Restart recovery gated on `files_sent`; delivered jobs never re-run (§8.2, E26)
-- [ ] Scheduler: lease sweep, daily reset (D18)
+- [x] Scheduler: lease sweep, retention, orphan sweep (D18, D21). **Not yet started by `run`**: a
+      worker with no job handler would claim jobs and fail them, so the pool and the scheduler are
+      wired up with the pipeline in P3. The claim/lease/recovery path itself is verified here
+
+      Deliberately **no daily reset job**: usage is one row per user per day, so a new day *is* an
+      empty allowance. A scheduled reset would be a second implementation of the same rule, and the
+      wrong one whenever the process was down at midnight; `tests/integration/test_scheduler.py`
+      tests the boundary instead. The injected clock (D18) is what makes "retention is due"
+      testable without waiting an hour
 
 **Done when:** AC-4, AC-5, AC-6 pass, including kill-and-restart with no re-delivery.
 

@@ -88,4 +88,4 @@ user = "spideybot"
 # The password is a secret: SPIDEY_DB_PASSWORD
 
 [download]
-retention_days = 14          # how long finished job history is kept
+retention_days = 14          # how long finished job history is kept; 0 prunes it all
