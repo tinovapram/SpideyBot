@@ -1,0 +1,48 @@
+# Nothing here may reach an image layer.
+#
+# `COPY . .` would otherwise bake `.env` — the bot token, API hash and TeraBox
+# cookies — into a layer that `docker save`, a pushed tag, or anyone who can pull
+# the image would then hold. `.env` is gitignored; this file is what keeps the
+# same promise for Docker.
+.env
+.env.*
+!.env.example
+config/local.toml
+config/runtime/
+
+# Runtime state: the Postgres cluster, the generated database password, plaintext
+# sessions and cookies, and downloaded media. All of it is per-host, and none of
+# it belongs in an image.
+data/
+
+# Sessions written beside the code during a local run.
+*.session
+*.session-journal
+
+# Version control and virtual environments.
+.git
+.gitattributes
+.venv/
+venv/
+env/
+
+# Caches and build output.
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Editor and OS noise.
+.vscode/
+.idea/
+*.swp
+*~
+Thumbs.db
+graphify-out/

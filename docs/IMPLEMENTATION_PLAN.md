@@ -347,7 +347,10 @@ covered by tests, and the live startup proved both handlers load.
 - [ ] `/stats`, `/addpremium`, `/removepremium`, `/checkpremium` + admin-only refusal (FR-19, AC-14)
 - [ ] Structured logs with redaction; temp/orphan cleanup and retention (NFR-6, D21)
 - [ ] Full AC-1…AC-15 suite in CI; `pytest -m live` suite (D19)
-- [ ] Multi-stage Docker image (tgcrypto build stage); README with the three-provider Postgres table
+- [ ] Multi-stage Docker image (tgcrypto build stage); README with the three-provider Postgres table —
+      **the image half is done and verified** (`Dockerfile` + `.dockerignore`: `tgcrypto` compiles in the
+      builder, `spideybot check` reports `ok` in the container, and no `.env`/`data/` reaches a layer).
+      Still open: a compose service and the README's provider table
 
 **Done when:** every AC in spec §11 has a named automated test and `docker compose up` runs the bot.
 
@@ -525,7 +528,7 @@ DB password is never embedded in a URL — the DSN is assembled at runtime from 
 
 | # | Risk | Impact | Mitigation |
 |---|---|---|---|
-| R1 | `tgcrypto` has no cp312+ wheel, so fast AES must be **compiled from the sdist** (last release 2022-11-11: plain hand-written C, not Cython) | Installs need a C toolchain, and a future CPython could break the 2022 C | **Compiled from source and required, not optional** — the source build is verified on 3.14 (MSVC `cl`/`link`, import, IGE+CTR round-trip) and the live connection confirms Kurigram selects it. The `pyaes` fallback is 291× slower (0.59 vs 171.4 MiB/s), so it is not a safety net. Mitigations: MSVC Build Tools on Windows, a `gcc` build stage in Docker, a **startup check** that reports a missing accelerator, and a pin plus smoke test whenever CPython moves |
+| R1 | `tgcrypto` has no cp312+ wheel, so fast AES must be **compiled from the sdist** (last release 2022-11-11: plain hand-written C, not Cython) | Installs need a C toolchain, and a future CPython could break the 2022 C | **Compiled from source and required, not optional** — the source build is verified on 3.14 (MSVC `cl`/`link`, import, IGE+CTR round-trip) and the live connection confirms Kurigram selects it. The `pyaes` fallback is 291× slower (0.59 vs 171.4 MiB/s), so it is not a safety net. Mitigations: MSVC Build Tools on Windows, a `gcc` builder stage in Docker (**verified** — the image compiles it and `spideybot check` reports `ok` inside the container), a **startup check** that reports a missing accelerator, and a pin plus smoke test whenever CPython moves |
 | R2 | Telegram flood limits on frequent status edits | Status errors, stalled jobs | Coalesced editor + `FloodWait` sleep/retry; the final result is always sent (FR-7.7, E8) |
 | R3 | Per-user clients are expensive (socket + crypto state each) | Memory/connection exhaustion | Live cap + idle reaping + LRU (D21); sessions live on disk, clients start on demand |
 | R4 | Third-party hosts drift or add anti-bot gates | Downloads break silently over time | Registry + layered fallback (D5); per-engine end-to-end tests; camoufox for gated hosts |
