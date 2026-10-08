@@ -261,7 +261,8 @@ the queue in batch 2, since there is nothing to integrate until then.
 
 ### P0 — Foundations
 - [x] Recreate `.gitignore` **first** (`.env` is currently unignored — see §0)
-- [x] Fresh Python 3.14 venv via `uv`; `uv pip install -r requirements.txt`, plus `ruff`.
+- [x] Fresh Python 3.14 venv via `uv`; `uv pip install -r requirements-dev.txt` (runtime dependencies plus
+      pytest and ruff — split so the image installs neither).
       `cryptography` is absent because D9 encrypts nothing, and `camoufox` is deferred to batch 5 per
       §12. `tgcrypto` compiles from the sdist (verified) and is now a **required** capability (D27)
 - [x] `config/default.toml`, `config/local.toml.example`, `.env.example`; `git check-ignore` confirms both
@@ -350,7 +351,10 @@ covered by tests, and the live startup proved both handlers load.
 - [ ] Multi-stage Docker image (tgcrypto build stage); README with the three-provider Postgres table —
       **the image half is done and verified** (`Dockerfile` + `.dockerignore`: `tgcrypto` compiles in the
       builder, `spideybot check` reports `ok` in the container, and no `.env`/`data/` reaches a layer).
-      Still open: a compose service and the README's provider table
+      Measured layers: ffmpeg 457 MB, pip install 331 MB, Python base 88 MB. Two cheap wins are applied —
+      the 77 MB wheels layer is gone (mounted, not copied) and dev tooling no longer ships
+      (`requirements-dev.txt`). Still open: a **static ffmpeg build would save a further ~380 MB**, plus
+      a compose service and the README's provider table
 
 **Done when:** every AC in spec §11 has a named automated test and `docker compose up` runs the bot.
 
@@ -541,6 +545,7 @@ DB password is never embedded in a URL — the DSN is assembled at runtime from 
 | R11 | File-based sessions pin the bot to one host | A future multi-worker deployment cannot share sessions | Accepted for v1 (single process); revisit with shared storage or a DB-backed store if scaling out |
 | R12 | Legal/ToS of user-mediated downloads | Reputational | README states users may only download content they are entitled to; no moderation policy (spec §14) |
 | R13 | Downloading resolved URLs ourselves (D25) | Sites that need a `Referer`, a specific `User-Agent` or per-site cookies will return 403 when we fetch directly; and a yt-dlp-backed item can resolve to a `webpage_url` or a DASH/HLS *manifest* rather than a fetchable media URL | Per-host header/cookie map; an explicit item-level rule — a manifest or non-media URL is either delegated to gallery-dl's own downloader or reported as a failure with a reason, never silently mangled. **Verify with a live `gallery-dl -j --simulate` run before writing the fetcher**, since gallery-dl falls back to `webpage_url` when the info dict has no direct `url` |
+| R14 | **`.env` quoting is read differently by `python-dotenv` and Docker's `--env-file`** | A value quoted the way `.env.example` recommends (`SPIDEY_ADMIN_IDS="1,2"`) loads correctly on the host but arrives **still quoted** in a container, so startup fails validation. Found while verifying the image: `Value error, invalid literal for int() with base 10: '"72363538'` | **Unfixed.** Either strip surrounding quotes when reading `.env` ourselves, or document that container deployments must use unquoted values — `.env.example`'s current quoting advice is a trap for Docker. Needs a test either way |
 
 ---
 

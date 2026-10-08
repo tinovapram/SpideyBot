@@ -34,10 +34,5 @@ cyberdrop-dl-patched>=10.0
 # ── Reddit ──────────────────────────────────────────────────────────
 praw>=7.7
 
-# ── Testing ─────────────────────────────────────────────────────────
-pytest>=8.0
-pytest-asyncio>=0.24
-
-# ── Linting ─────────────────────────────────────────────────────────
-# Configured in pyproject.toml under [tool.ruff].
-ruff>=0.16
+# Test and lint tooling is deliberately not here: it lives in requirements-dev.txt so
+# that the runtime image does not ship pytest or ruff (a ~30 MB binary).

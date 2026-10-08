@@ -1,0 +1,16 @@
+# Development and test tooling.
+#
+#     uv pip install -r requirements-dev.txt
+#
+# Kept separate from requirements.txt so the runtime image installs neither pytest nor
+# ruff: a production container has no use for either, and ruff alone is a ~30 MB binary.
+
+-r requirements.txt
+
+# ── Testing ─────────────────────────────────────────────────────────
+pytest>=8.0
+pytest-asyncio>=0.24
+
+# ── Linting ─────────────────────────────────────────────────────────
+# Configured in pyproject.toml under [tool.ruff].
+ruff>=0.16

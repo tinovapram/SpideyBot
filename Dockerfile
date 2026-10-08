@@ -43,10 +43,13 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends ffmpeg \
  && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /wheels /wheels
 COPY requirements.txt ./
-RUN pip install --no-index --find-links=/wheels --requirement requirements.txt \
- && rm -rf /wheels
+# The wheels are mounted rather than copied. A `COPY --from=builder` creates its own
+# layer, and no later cleanup can remove the wheels from it — they would ship inside
+# the image despite pip having already installed them. Measured at 77 MB. A BuildKit
+# mount leaves nothing behind.
+RUN --mount=from=builder,source=/wheels,target=/wheels \
+    pip install --no-index --find-links=/wheels --requirement requirements.txt
 
 # The session and cookie files are plaintext by design (D7-D9), so the service
 # account's ownership of them is the only thing protecting them. Nothing runs as root.
