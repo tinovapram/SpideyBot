@@ -97,9 +97,7 @@ async def test_a_database_admin_flag_also_counts(session, settings) -> None:
 async def test_granting_a_tier_records_the_audit_row(session) -> None:
     expires = datetime.now(UTC) + timedelta(days=30)
 
-    user = await users.grant_tier(
-        session, user_id=9, tier="pro", expires_at=expires, granted_by=1
-    )
+    user = await users.grant_tier(session, user_id=9, tier="pro", expires_at=expires, granted_by=1)
 
     assert user.tier == "pro"
     assert user.tier_expiry == expires

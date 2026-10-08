@@ -269,7 +269,10 @@ the queue in batch 2, since there is nothing to integrate until then.
 - [x] `config/default.toml`, `config/local.toml.example`, `.env.example`; `git check-ignore` confirms both
       `.env` and `data/`
 - [x] `app/config.py` — 4-layer chain, `extra="forbid"` on TOML, `SecretStr`, `SecretsProvider`
-- [x] `app/logging.py` (secret redaction), `app/models.py`, Alembic baseline (nine tables, applied)
+- [x] `app/logging.py` (secret redaction), `app/models.py`, Alembic baseline (nine tables, applied).
+      Alembic autogenerate emits single-quoted, 79-column code, so **any regenerated or new migration
+      needs `ruff format migrations/` afterwards** — otherwise `ruff format --check` fails and the next
+      `ruff format .` re-churns the file
 - [x] `data/sessions/` and `data/cookies/` created service-account-only + startup world-readable warning
 - [ ] Message catalog seeded from spec §7 — §7.1/§7.2 (onboarding, help, usage) live in `app/catalog.py`;
       §7.3–§7.8 land with the features that print them

@@ -89,9 +89,7 @@ def _run(
         "stdin": subprocess.DEVNULL,
     }
     if capture:
-        result = subprocess.run(
-            [str(a) for a in args], capture_output=True, text=True, **common
-        )
+        result = subprocess.run([str(a) for a in args], capture_output=True, text=True, **common)
     else:
         result = subprocess.run(
             [str(a) for a in args],
@@ -148,9 +146,7 @@ def is_running() -> bool:
 
 
 def is_ready(port: int) -> bool:
-    result = _run(
-        [_exe("pg_isready"), "-h", "127.0.0.1", "-p", str(port), "-q"], check=False
-    )
+    result = _run([_exe("pg_isready"), "-h", "127.0.0.1", "-p", str(port), "-q"], check=False)
     return result.returncode == 0
 
 
@@ -213,9 +209,12 @@ def init_cluster(settings: Settings, *, force: bool = False) -> str:
         _run(
             [
                 _exe("initdb"),
-                "-D", paths.PGDATA_DIR,
-                "-U", settings.db.user,
-                "-E", "UTF8",
+                "-D",
+                paths.PGDATA_DIR,
+                "-U",
+                settings.db.user,
+                "-E",
+                "UTF8",
                 "--locale=C",
                 "--auth-local=trust",
                 "--auth-host=scram-sha-256",
@@ -263,9 +262,7 @@ def start(settings: Settings, *, timeout: float = _STARTUP_TIMEOUT_SECONDS) -> C
             return status(settings.db.port)
         time.sleep(0.25)
 
-    raise DbProviderError(
-        f"server did not become ready within {timeout:.0f}s; see {LOG_FILE}"
-    )
+    raise DbProviderError(f"server did not become ready within {timeout:.0f}s; see {LOG_FILE}")
 
 
 def stop() -> None:
@@ -289,7 +286,11 @@ def _ensure_database(settings: Settings) -> None:
     base = ["-h", "127.0.0.1", "-p", str(settings.db.port), "-U", settings.db.user]
     exists = _run(
         [
-            _exe("psql"), *base, "-d", "postgres", "-tAc",
+            _exe("psql"),
+            *base,
+            "-d",
+            "postgres",
+            "-tAc",
             f"SELECT 1 FROM pg_database WHERE datname = '{settings.db.name}'",
         ],
         password=password,

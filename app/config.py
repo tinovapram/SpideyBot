@@ -193,9 +193,7 @@ def _model_of(annotation: Any) -> type[BaseModel] | None:
     return None
 
 
-def _unknown_keys(
-    data: Mapping[str, Any], model: type[BaseModel], prefix: str = ""
-) -> list[str]:
+def _unknown_keys(data: Mapping[str, Any], model: type[BaseModel], prefix: str = "") -> list[str]:
     """Dotted paths of keys in ``data`` that ``model`` does not define."""
     unknown: list[str] = []
     for key, value in data.items():

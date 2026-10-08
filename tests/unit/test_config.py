@@ -247,9 +247,7 @@ def test_terabox_accounts_split_on_pipe_not_semicolon(
     fake_secrets: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # ';' separates pairs *within* one cookie, so it cannot separate accounts.
-    monkeypatch.setenv(
-        "SPIDEY_TERABOX_COOKIES", "ndus=a; lang=en|ndus=b; lang=fr"
-    )
+    monkeypatch.setenv("SPIDEY_TERABOX_COOKIES", "ndus=a; lang=en|ndus=b; lang=fr")
 
     settings = build_settings(**fake_secrets)
 

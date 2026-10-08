@@ -1,7 +1,7 @@
 """Command-line entry points.
 
-    python main.py db init|start|stop|status|migrate|reset
-    python main.py run
+python main.py db init|start|stop|status|migrate|reset
+python main.py run
 """
 
 from __future__ import annotations
