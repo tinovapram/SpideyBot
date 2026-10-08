@@ -114,5 +114,11 @@ async def test_every_command_module_registers_as_a_message_handler(
     handlers = [h for group in client.dispatcher.groups.values() for h in group]
     registered = {getattr(handler.callback, "__name__", "") for handler in handlers}
 
-    assert {"start_command", "help_command", "quota_command"} <= registered
+    assert {
+        "start_command",
+        "help_command",
+        "quota_command",
+        "cancel_command",
+        "status_command",
+    } <= registered
     assert all(isinstance(handler, MessageHandler) for handler in handlers)

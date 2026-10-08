@@ -312,7 +312,11 @@ covered by tests, and the live startup proved both handlers load.
       a lease-renewal task keeps a long download from being handed to a second worker, and a run
       that lost its lease discards its result instead of overwriting the new owner's. Cancellation
       reaches a running job through the keeper, which is how FR-11.6 is achievable at all
-- [ ] `/cancel` and `/status` with ownership/unknown-id refusals (FR-11, FR-12)
+- [x] `/cancel` and `/status` with ownership/unknown-id refusals (FR-11, FR-12). The command only
+      *asks*: whether a job stops at once (it was still waiting) or a request is recorded for the
+      worker to act on (it was mid-transfer) is decided in `app/queue` with the row in hand, so the
+      refusals cannot be raced. A requested cancellation already reads as `❌ Cancelled`, since
+      showing `🔄 Running` while the worker unwinds would look like `/cancel` did nothing
 - [ ] Restart recovery gated on `files_sent`; delivered jobs never re-run (§8.2, E26)
 - [ ] Scheduler: lease sweep, daily reset (D18)
 

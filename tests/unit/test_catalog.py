@@ -271,3 +271,84 @@ def test_byte_counts_read_the_way_the_cap_is_measured(count: int, expected: str)
 def test_negative_byte_counts_are_clamped() -> None:
     """A counter that went backwards must not render as a negative size."""
     assert human_bytes(-1) == "0 B"
+
+
+# ── /status and /cancel (FR-11, FR-12, spec 7.4) ────────────────────────
+
+
+def test_status_with_nothing_running_says_so() -> None:
+    assert catalog.status_message([]) == "✅ No active downloads."
+
+
+def test_status_lists_id_link_and_state() -> None:
+    text = catalog.status_message(
+        [catalog.JobLine(id=42, link="https://example.test/a", state=catalog.STATE_RUNNING)]
+    )
+
+    assert "**Active downloads:**" in text
+    assert "  `42` — https://example.test/a — 🔄 Running" in text
+
+
+def test_status_lists_every_job_in_the_order_given() -> None:
+    text = catalog.status_message(
+        [
+            catalog.JobLine(id=1, link="one", state=catalog.STATE_RUNNING),
+            catalog.JobLine(id=2, link="two", state=catalog.STATE_WAITING),
+        ]
+    )
+
+    assert text.index("`1`") < text.index("`2`")
+    assert "⏳ Waiting for a slot" in text
+
+
+def test_a_waiting_job_is_distinguished_from_a_running_one() -> None:
+    """FR-10.6: this distinction is the reason /status exists rather than a job count."""
+    assert catalog.job_state(status="queued") == catalog.STATE_WAITING
+    assert catalog.job_state(status="running") == catalog.STATE_RUNNING
+
+
+def test_a_requested_cancellation_reads_as_cancelled() -> None:
+    """Otherwise /cancel looks like it did nothing for as long as the worker takes to stop."""
+    state = catalog.job_state(status="running", cancel_requested=True)
+
+    assert state == catalog.STATE_CANCELLED
+
+
+def test_an_unreadable_state_degrades_to_running() -> None:
+    """FR-12.3: a job must never be hidden because its state could not be made sense of."""
+    assert catalog.job_state(status="something-new") == catalog.STATE_RUNNING
+
+
+def test_short_links_are_left_whole() -> None:
+    assert catalog.truncate_link("https://example.test/a") == "https://example.test/a"
+
+
+def test_long_links_are_truncated_to_the_limit() -> None:
+    link = "https://example.test/" + "x" * 200
+
+    shortened = catalog.truncate_link(link, limit=20)
+
+    assert shortened == "https://example.tes…"
+    assert len(shortened) == 20
+
+
+def test_cancel_confirms_both_an_immediate_and_a_requested_cancellation() -> None:
+    assert catalog.cancel_message(kind="cancelled", job_id=7) == "❌ Cancelled download **7**."
+    assert catalog.cancel_message(kind="requested", job_id=7) == "❌ Cancelled download **7**."
+
+
+def test_cancel_reports_an_unknown_or_finished_job_as_no_active_download() -> None:
+    """A delivered job is not "cancelled": there is simply nothing left to cancel (FR-11.3)."""
+    for kind in ("unknown", "finished"):
+        assert catalog.cancel_message(kind=kind, job_id=7) == ("⚠️ No active download with ID `7`.")
+
+
+def test_cancel_refuses_someone_elses_job_without_naming_the_owner() -> None:
+    assert catalog.cancel_message(kind="not_owned", job_id=7) == (
+        "⚠️ That download belongs to another user."
+    )
+
+
+def test_cancel_usage_and_invalid_id_copy_exist() -> None:
+    assert "/cancel *ID*" in catalog.USAGE_CANCEL
+    assert "/status" in catalog.CANCEL_INVALID_ID

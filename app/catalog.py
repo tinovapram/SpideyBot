@@ -10,6 +10,10 @@ reviewed as a whole, and a test can assert the placeholders that must survive.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from dataclasses import dataclass
+
+from app.queue import QUEUED, CancelKind
 from app.quota import BYTES_PER_MB, Usage, bandwidth_exhausted, human_bytes
 from app.tiers import EffectiveTier, format_limit_mb
 
@@ -211,3 +215,75 @@ def quota_message(
     if remaining == 0 or bandwidth_exhausted(usage, limits.daily_mb):
         return f"{body}\n\n{QUOTA_BLOCKED}"
     return body
+
+
+# ── /status and /cancel (FR-11, FR-12, spec 7.4) ────────────────────────
+
+STATUS_EMPTY = "✅ No active downloads."
+STATUS_HEADER = "**Active downloads:**"
+STATUS_LINE = "  `{id}` — {link} — {state}"
+
+STATE_RUNNING = "🔄 Running"
+STATE_WAITING = "⏳ Waiting for a slot"
+STATE_CANCELLED = "❌ Cancelled"
+
+CANCEL_INVALID_ID = "⚠️ **Invalid ID** — pass the number shown by /status."
+CANCEL_UNKNOWN = "⚠️ No active download with ID `{id}`."
+CANCEL_NOT_OWNED = "⚠️ That download belongs to another user."
+CANCEL_CONFIRMED = "❌ Cancelled download **{id}**."
+
+#: Long links would push the state off the edge of a phone screen, and the id and state are
+#: what the user came for.
+LINK_DISPLAY_LIMIT = 60
+
+
+def truncate_link(link: str, *, limit: int = LINK_DISPLAY_LIMIT) -> str:
+    """A link short enough to keep a status line readable."""
+    if len(link) <= limit:
+        return link
+    return f"{link[: limit - 1]}…"
+
+
+def job_state(*, status: str, cancel_requested: bool = False) -> str:
+    """The state a user sees for one job (FR-12.2).
+
+    A cancellation that has been *requested* already reads as cancelled. The user asked for it
+    and the worker is winding the job down, so reporting "Running" for those seconds would look
+    like `/cancel` had done nothing. Anything unrecognised degrades to Running rather than
+    raising: FR-12.3 asks that a job never be hidden because its state could not be read.
+    """
+    if cancel_requested:
+        return STATE_CANCELLED
+    if status == QUEUED:
+        return STATE_WAITING
+    return STATE_RUNNING
+
+
+@dataclass(frozen=True)
+class JobLine:
+    """One row of `/status`, reduced to the three things it shows."""
+
+    id: int
+    link: str
+    state: str
+
+
+def status_message(jobs: Sequence[JobLine]) -> str:
+    """The `/status` body: nothing, or one line per live job (FR-12.1, FR-12.2)."""
+    if not jobs:
+        return STATUS_EMPTY
+    rows = "\n".join(STATUS_LINE.format(id=job.id, link=job.link, state=job.state) for job in jobs)
+    return f"{STATUS_HEADER}\n\n{rows}"
+
+
+def cancel_message(*, kind: CancelKind, job_id: int) -> str:
+    """What `/cancel` answers, given what the queue decided (FR-11.3, FR-11.4, FR-11.5).
+
+    A job that already finished is reported as unknown, because that is what it is from here:
+    there is no active download with that id to cancel.
+    """
+    if kind in ("cancelled", "requested"):
+        return CANCEL_CONFIRMED.format(id=job_id)
+    if kind == "not_owned":
+        return CANCEL_NOT_OWNED
+    return CANCEL_UNKNOWN.format(id=job_id)
