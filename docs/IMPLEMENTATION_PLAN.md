@@ -297,7 +297,10 @@ covered by tests, and the live startup proved both handlers load.
       recomputing them, so the display cannot drift from the enforcement. `0` deliberately means
       different things for a count (`no allowance`, matching `reserve_download`) and a size
       (`unlimited`, spec 13), and both are exercised
-- [ ] Submission rate limiter (D22)
+- [x] Submission rate limiter (D22): per-user token bucket, injected clock. A fixed window would let
+      a user spend the whole allowance at 11:59:59 and the next at 12:00:00, so it refills
+      continuously instead. Buckets are swept out once they refill, and `check` sweeps idle ones
+      itself past a threshold, so the dictionary cannot grow with every user ever seen
 
 **Done when:** AC-1 and AC-10 pass. — **Both met**; AC-1 and AC-10 are covered in `tests/acceptance`.
 
