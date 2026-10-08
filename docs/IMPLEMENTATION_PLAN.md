@@ -296,7 +296,11 @@ covered by tests, and the live startup proved both handlers load.
 **Done when:** AC-1 and AC-10 pass.
 
 ### P2 — Queue, jobs, cancellation
-- [ ] `app/queue.py`: priority + submission order, lease claim/renew/requeue (FR-10)
+- [x] `app/queue.py`: priority + submission order, lease claim/renew/requeue (FR-10).
+      Verified against Postgres, because these are database properties: four concurrent claimers
+      never share a job (`FOR UPDATE SKIP LOCKED`), the slot count travels inside the claiming
+      statement so it cannot oversell a tier, a stale claim cannot renew its way back in, and a
+      job that already finished cannot be terminated a second time (E26)
 - [ ] Workers: per-tier slots, release on terminal state
 - [ ] `/cancel` and `/status` with ownership/unknown-id refusals (FR-11, FR-12)
 - [ ] Restart recovery gated on `files_sent`; delivered jobs never re-run (§8.2, E26)
