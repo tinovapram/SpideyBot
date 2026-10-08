@@ -50,6 +50,11 @@ class JobOutcome:
 
     ok: bool
     reason: str | None = None
+    #: Whether a failure is worth another attempt. False for a decision that cannot change: a link
+    #: over the tier's limit stays over it (AC-3), and a share with no media stays empty (E4).
+    #: Retrying those would spend two more attempts, two more downloads from the allowance and two
+    #: more messages to tell the user the same thing.
+    retry: bool = True
 
 
 def failure(reason: str) -> JobOutcome:
@@ -169,7 +174,7 @@ async def execute(job_id: int, settings: Settings, handler: JobHandler) -> Job |
             await queue.terminate(session, current, queue.CANCELLED)
         elif outcome.ok:
             await queue.mark_delivered(session, current)
-        elif current.attempts < settings.runtime.job_max_attempts:
+        elif outcome.retry and current.attempts < settings.runtime.job_max_attempts:
             await queue.requeue(session, current)
         else:
             await queue.mark_failed(session, current)

@@ -7,6 +7,7 @@ actually depends on, and fails loudly when that dependency grows without the fak
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 
@@ -54,3 +55,144 @@ class FakeClient:
 
     def __getattr__(self, name: str) -> Any:
         raise AssertionError(f"the handler unexpectedly used the client: {name}")
+
+
+class SentMessage:
+    """One thing that was sent, with the arguments it was sent with."""
+
+    def __init__(self, method: str, kwargs: dict[str, Any], message_id: int) -> None:
+        self.method = method
+        self.kwargs = kwargs
+        self.id = message_id
+        self.message_ids = (message_id,)
+        #: Which album this message belongs to, when it arrived in one. Kurigram returns one message
+        #: per album item, so counting messages is not counting albums.
+        self.group: int | None = None
+
+    @property
+    def text(self) -> str | None:
+        return self.kwargs.get("text")
+
+    @property
+    def caption(self) -> str | None:
+        caption = self.kwargs.get("caption")
+        if caption is None and self.kwargs.get("media"):
+            return getattr(self.kwargs["media"][0], "caption", None)
+        return caption
+
+    @property
+    def path(self) -> str | None:
+        """The file that was sent, whether it went alone or inside an album."""
+        for key in ("photo", "video", "audio", "document"):
+            value = self.kwargs.get(key)
+            if value is not None:
+                return str(value)
+        media = self.kwargs.get("media")
+        if media:
+            return str(getattr(media[0], "media", media[0]))
+        return None
+
+    @property
+    def media(self) -> list[Any]:
+        return list(self.kwargs.get("media") or [])
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        shown = self.text or self.caption or self.path
+        return f"<{self.method} {shown!r}>"
+
+
+class RecordingClient:
+    """A client that records what a job sent, and can be told to fail specific files.
+
+    ``fail`` matches on the *filename*, because that is the identity a test can write down without
+    knowing the path a staging directory happened to use.
+    """
+
+    def __init__(self, *, fail: set[str] | None = None) -> None:
+        self.sent: list[SentMessage] = []
+        self.fail = fail or set()
+        self._next_id = 1000
+        self._next_group = 0
+        self.closed = False
+
+    # ── the sender protocol delivery depends on ──────────────────────────
+
+    async def send_photo(self, **kwargs: Any) -> SentMessage:
+        return self._record("send_photo", kwargs)
+
+    async def send_video(self, **kwargs: Any) -> SentMessage:
+        return self._record("send_video", kwargs)
+
+    async def send_audio(self, **kwargs: Any) -> SentMessage:
+        return self._record("send_audio", kwargs)
+
+    async def send_document(self, **kwargs: Any) -> SentMessage:
+        return self._record("send_document", kwargs)
+
+    async def send_media_group(self, **kwargs: Any) -> list[SentMessage]:
+        """One message per item, which is what the real API returns for a group."""
+        media = list(kwargs["media"])
+        for item in media:
+            name = Path(str(getattr(item, "media", item))).name
+            if name in self.fail:
+                raise RuntimeError(f"Telegram refused {name}")
+        self._next_group += 1
+        group = self._next_group
+        messages: list[SentMessage] = []
+        for item in media:
+            self._next_id += 1
+            message = SentMessage("send_media_group", {**kwargs, "media": [item]}, self._next_id)
+            message.group = group
+            messages.append(message)
+        self.sent.extend(messages)
+        return messages
+
+    async def send_message(self, **kwargs: Any) -> SentMessage:
+        return self._record("send_message", kwargs)
+
+    # ── what the tests read ──────────────────────────────────────────────
+
+    def _record(self, method: str, kwargs: dict[str, Any]) -> SentMessage:
+        name = self._name_in(kwargs)
+        if name is not None and name in self.fail:
+            raise RuntimeError(f"Telegram refused {name}")
+        self._next_id += 1
+        message = SentMessage(method, kwargs, self._next_id)
+        self.sent.append(message)
+        return message
+
+    @staticmethod
+    def _name_in(kwargs: dict[str, Any]) -> str | None:
+        for key in ("photo", "video", "audio", "document"):
+            value = kwargs.get(key)
+            if value is not None:
+                return Path(str(value)).name
+        media = kwargs.get("media")
+        if media:
+            return Path(str(getattr(media[0], "media", media[0]))).name
+        return None
+
+    @property
+    def files(self) -> list[str]:
+        """Every filename delivered, in order."""
+        return [Path(message.path).name for message in self.sent if message.path]
+
+    @property
+    def groups(self) -> dict[int, list[str]]:
+        """Each album's member filenames, so a test can talk about albums rather than messages."""
+        albums: dict[int, list[str]] = {}
+        for message in self.sent:
+            if message.group is None or message.path is None:
+                continue
+            albums.setdefault(message.group, []).append(Path(message.path).name)
+        return albums
+
+    @property
+    def texts(self) -> list[str]:
+        """Every plain message's text, which is where the done and failure copy lands."""
+        return [message.text for message in self.sent if message.text]
+
+    @property
+    def messages_for(self, name: str) -> list[str]:
+        """The texts of the messages that mention a filename, for AC-15's "named" requirement."""
+        return [text for text in self.texts if name in text]

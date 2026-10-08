@@ -308,6 +308,10 @@ DONE_WITH_FILES = "✅ **SpideyBot: Done!** Sent {sent}/{total} files ({size} MB
 #: FR-9.5's exact wording, so the reason is never paraphrased differently in two places.
 EMPTY_FILE_REASON = "empty file (0 bytes)"
 
+#: FR-8.3 asks each delivered file to carry a caption and to include the source link "where useful",
+#: leaving the wording to us (unlike the messages §7 fixes verbatim).
+SOURCE_CAPTION = "🔗 {source}"
+
 #: The reason for a share stopped mid-flight. Distinct from LIMIT_EXCEEDED because that one states
 #: a size the extractor measured, while this one can only say where the transfer was stopped (D31).
 LIMIT_EXCEEDED_REASON = "passed the {limit} MB limit while downloading"

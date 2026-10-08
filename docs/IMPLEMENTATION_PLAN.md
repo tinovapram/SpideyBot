@@ -91,6 +91,9 @@ the automatic fallback.
 | D37 | Filenames inside a job | A share's files are staged under `unique_name(safe_filename(title))`, numbering from `(2)` on collision; a number is spent only when the file actually lands | Two files in one share can carry the same title, and without this the second silently overwrites the first: the user is told two files were downloaded and receives one. Releasing the name on failure means a transient failure does not permanently rename the file that succeeds on the retry path |
 | D38 | The last resort delegates | cyberdrop-dl **downloads for us** rather than resolving, so the pipeline has two fetch strategies: the chain (resolve → our own transfers) and, when the chain fails, a delegating fetch that hands back finished files. It cannot sit in the chain, and it is not gated on any host list. What this costs: **the pre-transfer size gate is unavailable** — a CLI cannot say what it is about to fetch — so AC-3 is enforced by D31's running cap, measured against the bytes on disk, and the run is killed when they pass the limit. Its own CSVs (`unsupported.csv`, `download_errors.csv`) supply the failure reason, because **its exit code is 0 even for an unsupported URL** (measured) | Every other path can be measured before it runs, so every other path keeps AC-3's "refuse before a single byte moves". This one cannot, and pretending otherwise would mean either refusing links it could have served or letting a user's bandwidth cap be passed silently. Running it *last*, only after every measured method has failed, is what makes the trade acceptable: without it the choice is between an unmeasured attempt and no attempt at all. Config is generated per run and its keys are validated against the tool's own defaults in the tests, because a typo in a generated config is a silent feature loss. Logs are written outside the download directory, since the tool puts its CSVs there and they are not deliverables. V5's hand-written host list is deliberately not carried over: the tool knows its own hosts, and a copy would only go stale |
 | D39 | The chain is composed by the registry, not by the pipeline | `downloader/registry.py` owns host knowledge and builds the chain; `flow.download_link` receives it. The order is native adapter (if one exists) → yt-dlp for the video hosts it handles natively (D5) → gallery-dl → the delegate (D38). Cookie files are passed through, never looked up | The pipeline stays host-free, so adding an adapter never touches the fetcher, the gate or the copy. Per-user cookies are a caller concern (D8); a registry that read cookie files would be a second place that knows where they live |
+| D40 | The job handler is thin, and delivery knows no database | `app/jobs.py` joins pipeline → ledger → delivery → message and owns only bookkeeping; `telegram/delivery.py` takes finished files and a chat and never touches the DB; `flow.LinkResult` supplies everything the messages say | The three parts can each be tested where they live: the pipeline without Telegram, delivery without a job, and the wiring against a recording client with a real database. It also means the wording stays in one place (D23) — `final_message` returns text rather than sending it, so the copy is testable on its own |
+| D41 | The ledger key is the resolved media URL | `job_items.source_url` is the *resolved, fetchable* URL of the file, never the page the user pasted, and a file already recorded as `uploaded` is not sent again on a later attempt. `FetchedFile` therefore carries both URLs: `source_url` (the pasted link, for the caption) and `resolved_url` (the ledger key). A delegated file, which has no resolved URL at all, uses a `file:` URI of its own name | The schema's `(job_id, source_url)` constraint is what makes re-delivery impossible, and one pasted album link yields many files that *share* the page URL — so using the page URL as the key would either collide on the constraint or, worse, mark a whole album as delivered when one file was. Known limitation: a time-limited media URL (R13) changes between attempts, so a job resumed after resolution can re-deliver; the job-level guard (`status = delivered`) is what covers the ordinary case, and the item ledger covers the rest |
+| D42 | A deterministic outcome is not retried | `workers.JobOutcome.retry` is false for AC-3's refusal, E4's empty share and a cancellation, and true for a file that failed | Retrying is right for a host that hiccupped and wrong for a verdict that cannot change: the link stays over the limit, and the share stays empty. Without this, one oversize link would spend three attempts, three messages and three downloads from the user's daily allowance discovering the same fact |
 
 ---
 
@@ -458,8 +461,21 @@ plan assumed, so these are requirements rather than notes (details in R13):**
 - [ ] Empty share (E4); 0-byte → `empty file (0 bytes)` (E6). **Both are done**: E4 is a
       `LinkResult` with `empty_share` set, distinct from E2's failure path (D34), and a zero-byte
       body is discarded and reported with FR-9.5's exact reason
-- [ ] Album delivery ≤10, captions, reply-to-command, never deliver twice (FR-8)
-- [ ] Failure block `⚠️ N file(s) failed:` with ≤10 bullets + remainder (FR-9, E27)
+- [x] Album delivery ≤10, captions, reply-to-command, never deliver twice (FR-8). `telegram/delivery.py`
+      sends by kind, in albums of at most `ux.album_size`, replying to the job's message, with the
+      source link as the caption (FR-8.3 leaves the wording to us). "Never twice" is the ledger's job
+      (D41): a file already recorded as uploaded is skipped, and a delivery that fails is recorded as
+      a failure rather than stopping the rest (FR-9.1)
+- [x] Failure block `⚠️ N file(s) failed:` with ≤10 bullets + remainder (FR-9, E27). Asserted end to
+      end: a job with three good files and two 404s delivers the three, names both failures with
+      their reason and their link, and reports `Sent 3/5 files` — the message is the done line plus
+      the block (FR-7.9 + FR-9.4), not the block alone
+- [x] The job handler (`app/jobs.py`, D40): the worker pool now has something to run. It reads the
+      tier's limit, builds the chain and the delegate, runs the pipeline with the lease's stop flag,
+      ledgers what was delivered *before* sending the next file, charges `bytes_in` for what the
+      network moved, releases the day's download when nothing was delivered, and ends the job with
+      one message. `JobOutcome.retry` is false for a refusal or an empty share (D42), because those
+      verdicts cannot change and retrying them would spend three attempts on the same answer
 
 **Done when:** AC-2, AC-3, AC-15 pass.
 
@@ -516,7 +532,7 @@ plan assumed, so these are requirements rather than notes (details in R13):**
 |---|---|---|
 | `tests/unit` | tier/quota math, referral rules, catalog rendering, album batching, status coalescing, mask helpers, the fetcher, the merge, and the per-link pipeline | none (the fetcher's and the pipeline's tests run a real HTTP server on loopback and generate their media with ffmpeg — see below) |
 | `tests/integration` | queue leases, worker slots, restart recovery, repositories | Postgres via the layered DSN resolver |
-| `tests/acceptance` | FR/AC behaviour through handlers | `tests/fakes/` Kurigram client implementing the same protocol as the real one |
+| `tests/acceptance` | FR/AC behaviour through handlers | `tests/fakes/` Kurigram client implementing the same protocol as the real one; a real Postgres, and the loopback server for the pipeline's end-to-end tests |
 | `tests/live` (`@pytest.mark.live`) | only the non-fakeable criteria | Kurigram `test_mode=True` test servers + real hosts |
 
 - `pytest` + `pytest-asyncio`, `asyncio_mode = "auto"`; CI runs `pytest -m "not live"`.
@@ -669,8 +685,8 @@ DB password is never embedded in a URL — the DSN is assembled at runtime from 
 | FR-5 magic word | P6 | `handlers/magic_word.py` | AC-8 |
 | FR-6 TimerMedia | P6 | `handlers/timer_media.py` | AC-9 |
 | FR-7 progress/status | P4 | `telegram/status.py`; phases and per-file bytes from `downloader/flow.py` | AC-2, E7, E8 |
-| FR-8 delivery format | P3 | `telegram/delivery.py` | AC-2 |
-| FR-9 failure reporting | P3 | `downloader/flow.py` + catalog; reasons from `fetcher.py` and cyberdrop-dl's CSVs | AC-15, E27 |
+| FR-8 delivery format | P3 | `telegram/delivery.py` + the ledger in `app/jobs.py` | AC-2 |
+| FR-9 failure reporting | P3 | `downloader/flow.py` + catalog; reasons from `fetcher.py` and cyberdrop-dl's CSVs; the block is sent by `app/jobs.py` | AC-15, E27 |
 | FR-14 settings menu | P7 | `handlers/setting.py`; the cookie file reaches both engines via `downloader/registry.py` | AC-12 |
 | FR-10 queue & concurrency | P2 | `app/queue.py` | AC-4 |
 | FR-11 cancellation | P2 | `handlers/cancel.py` | AC-5 |
@@ -742,8 +758,9 @@ rather than the order the plan lists:
 | 3d — **the fetcher** (D32, D33) | ✅ committed; `downloader/fetcher.py` verified against a loopback HTTP server and real ffmpeg |
 | 3e — **`downloader/flow.py`** (D34–D37) | ✅ committed; the chain, the gate, the download loop and the outcome vocabulary, all driven in tests with fake resolvers and a real server |
 | 3f — **`downloader/registry.py` + the delegated last resort** (D38, D39) | ✅ committed; the chain per host, cookie plumbing to both engines, and cyberdrop-dl as a watched delegating fetch |
-| 3g — native adapters | **next**: TeraBox (account pool + per-user cookie), the Cyberdrop family, the ad-gated hosts. Each is a `Resolver` in `ChainContext.natives`; each needs credentials for a live smoke test |
-| 3h — the worker handler + `telegram/delivery.py` | then albums ≤10, captions, reply-to-command, the DB bookkeeping (`files_sent`, `record_bytes`), and AC-2/AC-3/AC-15 against a real link |
+| 3g — **the job handler + delivery** (D40–D42) | ✅ committed; `app/jobs.py` joins pipeline → ledger → delivery → message, `telegram/delivery.py` sends by kind in albums of ten, and AC-2/AC-3/AC-15 are verified end to end against a recording client and a real database |
+| 3h — `/dl` submission + live verification | **next**: `/dl` (usage, quota reserve, enqueue, "Queuing download…", AC-10's second half), then AC-2/AC-3/AC-15 against a real link, which is P3's gate |
+| 3i — native adapters | TeraBox (account pool + per-user cookie), the Cyberdrop family, the ad-gated hosts. Each is a `Resolver` in `ChainContext.natives`; each needs credentials for a live smoke test |
 
 Nothing in the pipeline is wired into the worker pool yet, and deliberately so: with no job handler, a
 started pool would claim real jobs and fail them. `app/workers.py`, `app/scheduler.py` and

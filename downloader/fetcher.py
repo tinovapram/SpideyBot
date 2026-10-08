@@ -134,7 +134,12 @@ class FetchedFile:
     path: Path
     media_kind: MediaKind
     bytes_written: int
+    #: The link the user pasted, for the caption (FR-8.3).
     source_url: str | None = None
+    #: The resolved, fetchable URL of the media itself. Distinct from ``source_url`` because one
+    #: pasted album link yields many files, and the job ledger identifies a file by this
+    #: (``job_items.source_url``), not by the page they all came from.
+    resolved_url: str | None = None
     note: str | None = None
     #: True when this file came out of ffmpeg rather than being a straight download.
     merged: bool = False
@@ -215,6 +220,7 @@ async def fetch(
         media_kind=item.media_kind,
         bytes_written=written,
         source_url=item.source_url,
+        resolved_url=item.primary.url,
         note=item.note,
         merged=merged,
     )
