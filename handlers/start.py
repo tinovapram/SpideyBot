@@ -1,11 +1,18 @@
-"""``/start`` — onboarding and status (spec FR-1, AC-1)."""
+"""``/start`` — registration, referral capture, and onboarding (FR-1, AC-1).
+
+The order inside the database block matters: the user is registered, the referral recorded
+and the onboarding flag read *before* the message is composed, because whether onboarding
+has already happened is what selects the copy. Referral capture is silent by requirement
+(FR-1.2) — it must not change either message.
+"""
 
 from __future__ import annotations
 
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from app import catalog, config, paths, tiers
+from app import catalog, config, paths, referral, users
+from app.db import session as db_session
 
 
 def upgrade_keyboard(url: str) -> InlineKeyboardMarkup | None:
@@ -19,34 +26,56 @@ def upgrade_keyboard(url: str) -> InlineKeyboardMarkup | None:
     return InlineKeyboardMarkup([[InlineKeyboardButton("✨ Upgrade", url=url)]])
 
 
+def referral_payload(message: Message) -> str | None:
+    """The ``/start`` argument, if one was given.
+
+    Kurigram splits the command already, so an invite deep link arrives as
+    ``["start", "<referrer_id>"]``.
+    """
+    command = getattr(message, "command", None) or []
+    return command[1] if len(command) > 1 else None
+
+
 @Client.on_message(filters.command("start") & filters.private)
 async def start_command(client: Client, message: Message) -> None:
-    """Send the welcome.
-
-    Two branches are not here yet, both because they need state this batch does not
-    have: a new user is not yet recorded (so every ``/start`` currently takes the
-    first-time path, and the "already started" notice is never sent), and the
-    referral payload is not yet captured. Spec 7.1 requires that the payload never
-    alters the copy, so ignoring it is the correct behaviour in the meantime.
-    """
     settings = config.get_settings()
-    user = message.from_user
-    user_id = user.id if user else None
+    sender = message.from_user
+    if sender is None:
+        # A channel post or a service message has nobody to onboard.
+        return
 
-    tier = tiers.resolve(settings, is_admin=tiers.is_admin(settings, user_id))
-    has_session = (
-        user_id is not None
-        and paths.session_file(user_id, test_mode=settings.test_mode).exists()
-    )
+    async with db_session() as db:
+        user = await users.upsert(
+            db,
+            user_id=sender.id,
+            username=sender.username,
+            first_name=sender.first_name,
+        )
 
+        referrer_id = referral.parse_referrer_id(referral_payload(message))
+        if referrer_id is not None:
+            await referral.record_pending(db, referrer_id=referrer_id, invitee_id=sender.id)
+
+        tier = users.tier_for(settings, user)
+        first_visit = await users.mark_onboarded(db, user)
+        has_session = paths.session_file(sender.id, test_mode=settings.test_mode).exists()
+
+    if first_visit:
+        await message.reply_text(
+            catalog.welcome_message(
+                sender.first_name or "there",
+                tier,
+                magic_word=settings.ux.default_magic_word,
+                has_session=has_session,
+                # There is no session manager yet, so a stored file can never be live.
+                is_live=False,
+            ),
+            reply_markup=upgrade_keyboard(settings.ux.upgrade_url),
+        )
+        return
+
+    # AC-1: an onboarded user gets the short notice rather than the welcome. No Upgrade
+    # button, because the notice is meant to stay brief.
     await message.reply_text(
-        catalog.welcome_message(
-            (user.first_name if user else None) or "there",
-            tier,
-            magic_word=settings.ux.default_magic_word,
-            has_session=has_session,
-            # No session manager exists yet, so a stored file can never be live.
-            is_live=False,
-        ),
-        reply_markup=upgrade_keyboard(settings.ux.upgrade_url),
+        catalog.already_started_message(has_session=has_session, is_live=False)
     )

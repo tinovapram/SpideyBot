@@ -101,6 +101,17 @@ def tier_block(tier: EffectiveTier, *, has_session: bool, is_live: bool) -> str:
     )
 
 
+def already_started_message(*, has_session: bool, is_live: bool) -> str:
+    """The short repeat-`/start` notice (FR-1.5).
+
+    Brief by requirement — it must not re-send the onboarding content — but it still
+    reports the session state, so a user whose session was just reconnected can see that
+    (FR-1.5, AC-1).
+    """
+    badge = session_badge(has_session=has_session, is_live=is_live)
+    return f"{ALREADY_STARTED}\n\n    Sessions: {badge}"
+
+
 def help_message(*, magic_word: str = "WOW", is_admin: bool = False) -> str:
     """The `/help` body: commands, then notes, then the admin block when it applies."""
     blocks = [ESSENTIAL_COMMANDS, NOTES.format(magic_word=magic_word)]
