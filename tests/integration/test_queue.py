@@ -278,6 +278,33 @@ async def test_requeued_work_can_be_claimed_again(session, settings) -> None:
     assert again.attempts == 2
 
 
+async def test_a_deliberate_requeue_releases_the_claim(session, settings) -> None:
+    """The worker's version of recovery: it decided the failure was worth another attempt."""
+    await _register(1)
+    await queue.enqueue(session, user_id=1, link=LINK, tier="free", priority=2.0)
+    claimed = await queue.claim(session, settings, now=NOW)
+    assert claimed is not None
+
+    assert await queue.requeue(session, claimed) is True
+
+    assert claimed.status == queue.QUEUED
+    assert claimed.claim_token is None
+    assert claimed.lease_expires is None
+    assert await queue.renew(session, claimed, settings, now=_after(1)) is False
+
+
+async def test_a_finished_job_is_not_requeued(session, settings) -> None:
+    """A delivery that already happened must not be undone by a late failure report (E26)."""
+    await _register(1)
+    await queue.enqueue(session, user_id=1, link=LINK, tier="free", priority=2.0)
+    claimed = await queue.claim(session, settings, now=NOW)
+    assert claimed is not None
+    await queue.mark_delivered(session, claimed, now=NOW)
+
+    assert await queue.requeue(session, claimed) is False
+    assert claimed.status == queue.DELIVERED
+
+
 # ── terminal states (E26) ───────────────────────────────────────────────
 
 

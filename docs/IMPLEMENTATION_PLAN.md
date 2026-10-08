@@ -301,7 +301,11 @@ covered by tests, and the live startup proved both handlers load.
       never share a job (`FOR UPDATE SKIP LOCKED`), the slot count travels inside the claiming
       statement so it cannot oversell a tier, a stale claim cannot renew its way back in, and a
       job that already finished cannot be terminated a second time (E26)
-- [ ] Workers: per-tier slots, release on terminal state
+- [x] Workers: per-tier slots, release on terminal state. The pool holds `max_concurrent_downloads`
+      tasks and the *claim* applies the per-tier limit, so concurrency policy lives in one place;
+      a lease-renewal task keeps a long download from being handed to a second worker, and a run
+      that lost its lease discards its result instead of overwriting the new owner's. Cancellation
+      reaches a running job through the keeper, which is how FR-11.6 is achievable at all
 - [ ] `/cancel` and `/status` with ownership/unknown-id refusals (FR-11, FR-12)
 - [ ] Restart recovery gated on `files_sent`; delivered jobs never re-run (§8.2, E26)
 - [ ] Scheduler: lease sweep, daily reset (D18)

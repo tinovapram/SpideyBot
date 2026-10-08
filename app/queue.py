@@ -293,6 +293,28 @@ async def mark_failed(db: AsyncSession, job: Job, *, now: datetime | None = None
     return await terminate(db, job, FAILED, now=now)
 
 
+async def requeue(db: AsyncSession, job: Job) -> bool:
+    """Put a running job back in the queue for another attempt, releasing its lease.
+
+    Distinct from :func:`reclaim_expired`, which recovers a job nobody is holding any more.
+    This is the *deliberate* version: a worker hit a failure it believes is transient, so the
+    attempt counter — already incremented at claim time — is what eventually stops the loop.
+    """
+    statement = (
+        update(Job)
+        .where(Job.id == job.id, Job.status == RUNNING)
+        .values(status=QUEUED, claim_token=None, lease_expires=None)
+        .returning(Job.id)
+        .execution_options(synchronize_session=False)
+    )
+    requeued = (await db.execute(statement)).scalar_one_or_none() is not None
+    if requeued:
+        job.status = QUEUED
+        job.claim_token = None
+        job.lease_expires = None
+    return requeued
+
+
 @dataclass(frozen=True)
 class CancelOutcome:
     """What ``/cancel`` should tell the user, and the job it applies to."""
