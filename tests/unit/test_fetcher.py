@@ -1,20 +1,15 @@
 """Fetching the bytes ourselves (D25, D31, FR-7): streaming, merging, and the failures that matter.
 
 Every test here talks to a real HTTP server on loopback and writes real files, because the
-behaviour under test *is* the transport: whether the headers arrive, whether a cap stops a transfer
-mid-flight, whether what ffmpeg produced is playable. A stubbed transport would assert what I
-believe curl_cffi does rather than what it does — and the merge itself can only be verified by a
-real demuxer reading the result.
+behaviour under test *is* the transport: whether headers arrive, whether a cap stops a transfer
+mid-flight, whether what ffmpeg produced is playable. The server lives in :mod:`tests.fakes.server`
+so the pipeline's tests drive the same one rather than a second copy of it.
 """
 
 from __future__ import annotations
 
 import shutil
 import subprocess
-import threading
-import time
-from collections.abc import Iterator
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -30,120 +25,12 @@ from downloader.fetcher import (
     FetchProgress,
     SizeLimitExceeded,
 )
+from tests.fakes.server import FixtureServer, url
 
 MB = 1024 * 1024
 
 
-# ── a real HTTP server ───────────────────────────────────────────────────
-#
-# HTTP/1.0 on purpose: every response ends by closing the connection, so a body with no
-# Content-Length is delimited by the close, which is exactly how a media host that refuses to
-# measure itself behaves.
-
-
-class _Server(ThreadingHTTPServer):
-    daemon_threads = True
-
-    #: Where ``/file/...`` is served from.
-    root: Path
-    #: Every request's headers, in arrival order, so a test can assert what actually went out.
-    requests: list[dict[str, str]]
-
-
-class _Handler(BaseHTTPRequestHandler):
-    protocol_version = "HTTP/1.0"
-
-    def log_message(self, *args: object) -> None:
-        """Silence the default stderr logging. A test run is not a server log."""
-
-    def do_GET(self) -> None:  # noqa: N802 - the name is the protocol
-        server: _Server = self.server  # type: ignore[assignment]
-        server.requests.append(dict(self.headers.items()))
-
-        route, _, argument = self.path.lstrip("/").partition("/")
-        try:
-            if route == "file":
-                self._send_bytes(200, (server.root / argument).read_bytes())
-            elif route == "padded":
-                self._send_generated(int(argument), measured=True)
-            elif route == "unmeasured":
-                self._send_generated(int(argument), measured=False)
-            elif route == "empty":
-                self._send_bytes(200, b"")
-            elif route == "missing":
-                self._send_bytes(404, b"gone")
-            elif route == "truncate":
-                self._truncate()
-            elif route == "slow":
-                self._slow(int(argument))
-            else:
-                self._send_bytes(404, b"unknown route")
-        except BrokenPipeError, ConnectionResetError:
-            # Expected whenever a test asserts that the transfer was stopped early.
-            self.close_connection = True
-
-    def _send_bytes(self, status: int, body: bytes) -> None:
-        self.send_response(status)
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def _send_generated(self, size: int, *, measured: bool) -> None:
-        """A body of ``size`` bytes, with or without a Content-Length to announce it."""
-        self.send_response(200)
-        if measured:
-            self.send_header("Content-Length", str(size))
-        self.end_headers()
-        block = b"z" * 65536
-        remaining = size
-        while remaining > 0:
-            piece = block[: min(len(block), remaining)]
-            self.wfile.write(piece)
-            remaining -= len(piece)
-
-    def _truncate(self) -> None:
-        """Promise more than is sent, then hang up: a stream that dies mid-body."""
-        self.send_response(200)
-        self.send_header("Content-Length", "10000")
-        self.end_headers()
-        self.wfile.write(b"y" * 100)
-        self.wfile.flush()
-        self.close_connection = True
-
-    def _slow(self, size: int) -> None:
-        """Send half now and half after a pause, so a client can be caught mid-transfer."""
-        half = size // 2
-        self.send_response(200)
-        self.send_header("Content-Length", str(size))
-        self.end_headers()
-        self.wfile.write(b"s" * half)
-        self.wfile.flush()
-        time.sleep(0.4)
-        self.wfile.write(b"s" * (size - half))
-
-
-@pytest.fixture
-def server(tmp_path: Path) -> Iterator[_Server]:
-    httpd = _Server(("127.0.0.1", 0), _Handler)
-    httpd.root = tmp_path
-    httpd.requests = []
-    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield httpd
-    finally:
-        httpd.shutdown()
-        httpd.server_close()
-        thread.join(timeout=5)
-
-
-def url(server: _Server, path: str) -> str:
-    """The loopback URL for a route, so no host other than 127.0.0.1 is ever contacted."""
-    host, port = server.server_address[0], server.server_address[1]
-    return f"http://{host}:{port}/{path}"
-
-
-def file_item(server: _Server, name: str, **overrides: object) -> ResolvedFile:
+def file_item(server: FixtureServer, name: str, **overrides: object) -> ResolvedFile:
     """A single-transfer item for one file the fixture server is serving."""
     fields: dict[str, object] = {
         "transfers": (Transfer(url(server, f"file/{name}")),),
@@ -196,7 +83,7 @@ def media(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 
 @pytest.fixture
-def media_server(server: _Server, media: Path) -> _Server:
+def media_server(server: FixtureServer, media: Path) -> FixtureServer:
     """The fixture server, rooted at the generated media."""
     server.root = media
     return server
@@ -223,7 +110,7 @@ def streams_in(path: Path) -> list[str]:
 
 
 def merge_item(
-    server: _Server,
+    server: FixtureServer,
     *,
     video: str = "video.mp4",
     audio: str = "audio.m4a",
@@ -242,7 +129,9 @@ def merge_item(
     )
 
 
-def generated_item(server: _Server, size: int, *, filename: str = "generated.bin") -> ResolvedFile:
+def generated_item(
+    server: FixtureServer, size: int, *, filename: str = "generated.bin"
+) -> ResolvedFile:
     """One transfer of ``size`` bytes with no size reported by any extractor."""
     return ResolvedFile(
         transfers=(Transfer(url(server, f"padded/{size}")),),
@@ -254,7 +143,7 @@ def generated_item(server: _Server, size: int, *, filename: str = "generated.bin
 
 
 async def test_a_single_transfer_is_streamed_to_the_destination(
-    server: _Server, tmp_path: Path
+    server: FixtureServer, tmp_path: Path
 ) -> None:
     body = b"spidey" * 1000
     (server.root / "payload.bin").write_bytes(body)
@@ -272,7 +161,7 @@ async def test_a_single_transfer_is_streamed_to_the_destination(
     assert result.source_url == "https://example.test/1"
 
 
-async def test_the_destination_directory_is_created(server: _Server, tmp_path: Path) -> None:
+async def test_the_destination_directory_is_created(server: FixtureServer, tmp_path: Path) -> None:
     """The staging directory may not exist yet, and fetching should not assume it does."""
     (server.root / "payload.bin").write_bytes(b"abc")
 
@@ -282,7 +171,7 @@ async def test_the_destination_directory_is_created(server: _Server, tmp_path: P
 
 
 async def test_browser_headers_are_sent_and_impersonation_supplies_a_user_agent(
-    server: _Server, tmp_path: Path
+    server: FixtureServer, tmp_path: Path
 ) -> None:
     """Measured against the server's own record, not against what we intended to send."""
     (server.root / "payload.bin").write_bytes(b"abc")
@@ -316,7 +205,7 @@ def test_host_headers_are_added_only_for_hosts_that_need_them() -> None:
 
 
 async def test_an_injected_session_is_reused_rather_than_closed(
-    server: _Server, tmp_path: Path
+    server: FixtureServer, tmp_path: Path
 ) -> None:
     """A caller-owned session outlives the fetch: one pool per worker, not per file."""
     (server.root / "payload.bin").write_bytes(b"abc")
@@ -332,7 +221,7 @@ async def test_an_injected_session_is_reused_rather_than_closed(
 
 
 async def test_progress_is_reported_in_steps_and_ends_at_the_total(
-    server: _Server, tmp_path: Path
+    server: FixtureServer, tmp_path: Path
 ) -> None:
     size = 2 * fetcher.PROGRESS_STEP_BYTES + 4096
     seen: list[FetchProgress] = []
@@ -358,7 +247,7 @@ async def test_progress_is_reported_in_steps_and_ends_at_the_total(
 
 
 async def test_bytes_are_written_as_they_arrive_rather_than_buffered_whole(
-    server: _Server, tmp_path: Path
+    server: FixtureServer, tmp_path: Path
 ) -> None:
     """The memory guarantee, measured: progress arrives while the server is still sending.
 
@@ -380,7 +269,9 @@ async def test_bytes_are_written_as_they_arrive_rather_than_buffered_whole(
     assert destination.stat().st_size == size
 
 
-async def test_a_plain_function_works_as_a_progress_hook(server: _Server, tmp_path: Path) -> None:
+async def test_a_plain_function_works_as_a_progress_hook(
+    server: FixtureServer, tmp_path: Path
+) -> None:
     """Not every caller wants a coroutine, and a hook that returns None must not be awaited."""
     seen: list[FetchProgress] = []
 
@@ -390,7 +281,7 @@ async def test_a_plain_function_works_as_a_progress_hook(server: _Server, tmp_pa
 
 
 async def test_a_size_the_extractor_never_reported_is_taken_from_the_server(
-    server: _Server, tmp_path: Path
+    server: FixtureServer, tmp_path: Path
 ) -> None:
     """D31's premise: the transfer runs, but the denominator is still knowable."""
     size = 300_000
@@ -405,7 +296,7 @@ async def test_a_size_the_extractor_never_reported_is_taken_from_the_server(
 
 
 async def test_a_body_with_no_length_at_all_still_produces_the_file(
-    server: _Server, tmp_path: Path
+    server: FixtureServer, tmp_path: Path
 ) -> None:
     """A host that measures nothing leaves progress total-less, which is a fact and not a crash."""
     size = 200_000
@@ -442,7 +333,7 @@ def test_a_reported_content_length_of_zero_is_not_a_size() -> None:
 
 
 async def test_a_transfer_that_passes_the_cap_is_stopped_and_leaves_nothing(
-    server: _Server, tmp_path: Path
+    server: FixtureServer, tmp_path: Path
 ) -> None:
     destination = tmp_path / "huge.bin"
     item = ResolvedFile(
@@ -458,7 +349,7 @@ async def test_a_transfer_that_passes_the_cap_is_stopped_and_leaves_nothing(
     assert not destination.exists()
 
 
-async def test_exactly_the_cap_is_allowed(server: _Server, tmp_path: Path) -> None:
+async def test_exactly_the_cap_is_allowed(server: FixtureServer, tmp_path: Path) -> None:
     """The limit refuses what *exceeds* it, the same reading as the pre-transfer gate (E3)."""
     size = 100_000
 
@@ -470,7 +361,7 @@ async def test_exactly_the_cap_is_allowed(server: _Server, tmp_path: Path) -> No
 
 
 async def test_the_cap_belongs_to_the_file_not_to_each_transfer(
-    server: _Server, tmp_path: Path
+    server: FixtureServer, tmp_path: Path
 ) -> None:
     """Otherwise a two-stream video could download twice the limit by arriving in two pieces."""
     item = ResolvedFile(
@@ -495,7 +386,9 @@ async def test_the_cap_belongs_to_the_file_not_to_each_transfer(
 # ── failures (FR-9.2, E6) ────────────────────────────────────────────────
 
 
-async def test_a_zero_byte_body_is_the_empty_file_failure(server: _Server, tmp_path: Path) -> None:
+async def test_a_zero_byte_body_is_the_empty_file_failure(
+    server: FixtureServer, tmp_path: Path
+) -> None:
     destination = tmp_path / "empty.bin"
 
     with pytest.raises(EmptyFile) as caught:
@@ -509,7 +402,7 @@ async def test_a_zero_byte_body_is_the_empty_file_failure(server: _Server, tmp_p
 
 
 async def test_a_server_error_names_the_status_and_leaves_nothing(
-    server: _Server, tmp_path: Path
+    server: FixtureServer, tmp_path: Path
 ) -> None:
     destination = tmp_path / "missing.bin"
 
@@ -524,7 +417,7 @@ async def test_a_server_error_names_the_status_and_leaves_nothing(
 
 
 async def test_a_stream_that_dies_midway_is_a_failure_and_leaves_nothing(
-    server: _Server, tmp_path: Path
+    server: FixtureServer, tmp_path: Path
 ) -> None:
     """A short body must not be delivered as if it were whole: curl reports the missing bytes."""
     destination = tmp_path / "broken.bin"
@@ -553,7 +446,7 @@ async def test_a_host_that_cannot_be_reached_is_a_fetch_error(tmp_path: Path) ->
 
 
 async def test_two_streams_are_merged_into_one_playable_file(
-    media_server: _Server, tmp_path: Path
+    media_server: FixtureServer, tmp_path: Path
 ) -> None:
     item = merge_item(media_server)
     seen: list[FetchProgress] = []
@@ -572,7 +465,7 @@ async def test_two_streams_are_merged_into_one_playable_file(
 
 
 async def test_progress_spans_both_streams_rather_than_restarting(
-    media_server: _Server, tmp_path: Path
+    media_server: FixtureServer, tmp_path: Path
 ) -> None:
     """A user watching one file should see one rising number, not two."""
     item = merge_item(media_server)
@@ -592,7 +485,7 @@ async def test_progress_spans_both_streams_rather_than_restarting(
 
 
 async def test_streams_that_are_not_one_video_and_one_audio_are_refused(
-    server: _Server, tmp_path: Path
+    server: FixtureServer, tmp_path: Path
 ) -> None:
     """A merge we do not understand is reported, rather than guessed at."""
     item = ResolvedFile(
@@ -611,7 +504,7 @@ async def test_streams_that_are_not_one_video_and_one_audio_are_refused(
 
 
 async def test_a_merge_ffmpeg_rejects_is_a_failure_and_leaves_nothing(
-    media_server: _Server, tmp_path: Path
+    media_server: FixtureServer, tmp_path: Path
 ) -> None:
     item = merge_item(media_server, audio="corrupt.m4a", filename="broken.mp4")
     destination = tmp_path / "broken.mp4"
@@ -625,7 +518,7 @@ async def test_a_merge_ffmpeg_rejects_is_a_failure_and_leaves_nothing(
 
 
 async def test_a_missing_ffmpeg_is_reported_rather_than_crashing(
-    media_server: _Server, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    media_server: FixtureServer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Every video is a merge, so a missing ffmpeg is a message rather than a crash."""
     monkeypatch.setattr(fetcher.shutil, "which", lambda name: None)

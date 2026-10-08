@@ -16,6 +16,10 @@ from app import config, db, dbprovider, paths
 from app.config import Settings
 from app.models import Base
 
+# The HTTP fixture server keeps its fixtures next to it, but pytest only collects fixtures declared
+# in a conftest, so they are re-exported here for the tests that need a real server.
+from tests.fakes.server import server, staging  # noqa: F401  (re-exported as fixtures)
+
 FAKE_SECRETS: dict[str, str] = {
     "tg_api_id": "123456",
     "tg_api_hash": "0" * 32,

@@ -13,7 +13,9 @@ into these types, and nothing downstream has to know which engine ran.
 
 from __future__ import annotations
 
+import itertools
 import re
+from collections.abc import Collection
 from dataclasses import dataclass
 from typing import Literal
 
@@ -39,7 +41,17 @@ class ResolveError(RuntimeError):
 
     Carries a reason fit to show a user: the pipeline reports it rather than a traceback
     (FR-9, E2).
+
+    ``empty`` separates the two reasons a link can yield nothing, because they are two different
+    messages to the user: a share that holds no media is E4 (*"No actual files found in this
+    share"*), while an extractor that failed is E2 (report its reason). Both mean "no files from
+    this attempt", so both move on to the next resolver in the chain — but only the failure is
+    worth repeating back, and only when every resolver failed.
     """
+
+    def __init__(self, message: str, *, empty: bool = False) -> None:
+        super().__init__(message)
+        self.empty = empty
 
 
 def kind_for(extension: str | None) -> MediaKind:
@@ -68,6 +80,30 @@ def safe_filename(name: str, *, fallback: str = FALLBACK_FILENAME) -> str:
     if not cleaned:
         return fallback
     return cleaned[:MAX_FILENAME_LENGTH].rstrip(" .") or fallback
+
+
+def unique_name(name: str, taken: Collection[str]) -> str:
+    """``name``, or the first numbered variant of it that is not already in ``taken``.
+
+    A share can hold two files with the same title as easily as it can hold one, and the second
+    would otherwise overwrite the first: the user would be told two files were downloaded and
+    receive one. Numbering keeps the extension — delivery decides the media kind from it — and
+    counts from 2 so the name reads as "another one of these" rather than as a version.
+    """
+    if name not in taken:
+        return name
+
+    stem, dot, extension = name.rpartition(".")
+    if not dot:
+        stem, extension = name, ""
+
+    for counter in itertools.count(2):
+        suffix = f" ({counter})"
+        room = MAX_FILENAME_LENGTH - len(suffix) - len(extension) - (1 if dot else 0)
+        candidate = f"{stem[:room]}{suffix}{dot}{extension}"
+        if candidate not in taken:
+            return candidate
+    raise AssertionError("unreachable")  # pragma: no cover - itertools.count is unbounded
 
 
 @dataclass(frozen=True)

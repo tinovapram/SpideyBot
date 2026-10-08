@@ -166,11 +166,11 @@ def test_the_url_is_passed_as_an_argument_not_a_shell_string() -> None:
 
 
 def test_multiple_records_become_files() -> None:
-    files, reason = probe.parse_gallerydl(WIKIMEDIA, source_url="https://page.test/x")
+    parsed = probe.parse_gallerydl(WIKIMEDIA, source_url="https://page.test/x")
 
-    assert reason is None
-    assert len(files) == 1
-    file = files[0]
+    assert parsed.reason is None
+    assert len(parsed.files) == 1
+    file = parsed.files[0]
     assert file.filename == "Example.jpg"
     assert file.media_kind == "photo"
     assert file.filesize == 9022
@@ -181,41 +181,47 @@ def test_multiple_records_become_files() -> None:
 
 
 def test_a_directory_record_is_not_media() -> None:
-    files, _ = probe.parse_gallerydl(json.dumps([[2, {"category": "x", "page": "y"}]]))
+    parsed = probe.parse_gallerydl(json.dumps([[2, {"category": "x", "page": "y"}]]))
 
-    assert files == []
+    assert parsed.files == ()
+    # A share of folders and nothing else is E4, not a failure.
+    assert parsed.empty is True
 
 
 def test_an_error_record_is_reported_under_an_exit_code_of_zero() -> None:
     """The finding that makes the exit code useless as a success signal (R13)."""
-    files, reason = probe.parse_gallerydl(NOT_FOUND)
+    parsed = probe.parse_gallerydl(NOT_FOUND)
 
-    assert files == []
-    assert reason is not None
-    assert "404 Not Found" in reason and "api.imgur.com" in reason
+    assert parsed.files == ()
+    assert parsed.reason is not None
+    assert "404 Not Found" in parsed.reason and "api.imgur.com" in parsed.reason
+    # The extractor named a failure, so this is E2 and its reason is worth repeating verbatim.
+    assert parsed.empty is False
 
 
 def test_unreadable_output_is_reported_not_raised() -> None:
-    files, reason = probe.parse_gallerydl("Traceback (most recent call last): ...")
+    parsed = probe.parse_gallerydl("Traceback (most recent call last): ...")
 
-    assert files == []
-    assert reason is not None and "unreadable" in reason
+    assert parsed.files == ()
+    assert parsed.reason is not None and "unreadable" in parsed.reason
+    assert parsed.empty is False
 
 
 def test_empty_output_is_reported() -> None:
-    files, reason = probe.parse_gallerydl("   ")
+    parsed = probe.parse_gallerydl("   ")
 
-    assert files == []
-    assert reason == "the extractor returned nothing"
+    assert parsed.files == ()
+    assert parsed.reason == "the extractor returned nothing"
+    assert parsed.empty is True
 
 
 def test_a_ytdl_marker_is_resolved_through_its_metadata() -> None:
     """The marker carries no media; the URLs are in the info dict gallery-dl embedded (R13)."""
-    files, reason = probe.parse_gallerydl(YTDL_MARKER)
+    parsed = probe.parse_gallerydl(YTDL_MARKER)
 
-    assert reason is None
-    assert len(files) == 1
-    file = files[0]
+    assert parsed.reason is None
+    assert len(parsed.files) == 1
+    file = parsed.files[0]
     assert file.needs_merge, "H.264 video plus AAC audio is two transfers"
     assert [transfer.role for transfer in file.transfers] == ["video", "audio"]
     assert all(not transfer.url.startswith("ytdl:") for transfer in file.transfers)
@@ -226,10 +232,10 @@ def test_a_ytdl_marker_is_resolved_through_its_metadata() -> None:
 def test_a_marker_without_formats_yields_a_reason_not_a_crash() -> None:
     marker = json.dumps([[3, "ytdl:https://www.youtube.com/watch?v=x", {"title": "x"}]])
 
-    files, reason = probe.parse_gallerydl(marker)
+    parsed = probe.parse_gallerydl(marker)
 
-    assert files == []
-    assert reason is not None
+    assert parsed.files == ()
+    assert parsed.reason is not None
 
 
 # ── parsing yt-dlp ──────────────────────────────────────────────────────
@@ -333,14 +339,30 @@ async def test_resolve_raises_the_extractors_own_reason() -> None:
         await probe.resolve("https://imgur.com/gallery/gone", run_gallerydl=fake_gallerydl)
 
     assert "404 Not Found" in str(raised.value)
+    # An error the extractor named is a failure (E2), not an empty share (E4).
+    assert raised.value.empty is False
+
+
+async def test_resolve_marks_a_folder_only_share_as_empty() -> None:
+    """E4 gets its own message, so the flow must be able to tell it from a failure."""
+
+    async def fake_gallerydl(url: str, *, timeout: float):
+        return json.dumps([[2, {"category": "x", "page": "y"}]])
+
+    with pytest.raises(ResolveError) as raised:
+        await probe.resolve("https://example.test/share", run_gallerydl=fake_gallerydl)
+
+    assert raised.value.empty is True
 
 
 async def test_resolve_reports_an_empty_resolution_for_video_links() -> None:
     async def fake_ytdlp(url: str, *, timeout: float):
         return {"title": "x", "formats": []}
 
-    with pytest.raises(ResolveError):
+    with pytest.raises(ResolveError) as raised:
         await probe.resolve("https://youtu.be/x", run_ytdlp=fake_ytdlp)
+
+    assert raised.value.empty is True
 
 
 async def test_a_timeout_is_a_resolve_error_not_a_hang() -> None:

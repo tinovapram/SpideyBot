@@ -26,6 +26,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from typing import Any, Literal
 from urllib.parse import urlparse
 
@@ -103,12 +104,25 @@ def _host_of(url: str) -> str:
 # ── gallery-dl output ───────────────────────────────────────────────────
 
 
+@dataclass(frozen=True)
+class ParseResult:
+    """What a gallery-dl run yielded, and — when it yielded nothing — which kind of nothing.
+
+    ``empty`` is the distinction the user's message depends on: a share that holds no media is E4,
+    while an extractor that answered with an error is E2 and its reason is worth repeating.
+    """
+
+    files: tuple[ResolvedFile, ...] = ()
+    reason: str | None = None
+    empty: bool = False
+
+
 def parse_gallerydl(
     stdout: str,
     *,
     preference: Preference = "compatible",
     source_url: str | None = None,
-) -> tuple[list[ResolvedFile], str | None]:
+) -> ParseResult:
     """Parse a gallery-dl run into files, plus a reason when there are none.
 
     Returns rather than raises, because "no files" is an ordinary outcome that the caller has to
@@ -117,15 +131,15 @@ def parse_gallerydl(
     """
     text = stdout.strip()
     if not text:
-        return [], "the extractor returned nothing"
+        return ParseResult(reason="the extractor returned nothing", empty=True)
 
     try:
         records = json.loads(text)
     except json.JSONDecodeError as error:
-        return [], f"the extractor produced unreadable output ({error.msg})"
+        return ParseResult(reason=f"the extractor produced unreadable output ({error.msg})")
 
     if not isinstance(records, list):
-        return [], "the extractor produced an unexpected shape"
+        return ParseResult(reason="the extractor produced an unexpected shape")
 
     files: list[ResolvedFile] = []
     error_message: str | None = None
@@ -152,8 +166,11 @@ def parse_gallerydl(
             files.append(item)
 
     if files:
-        return files, None
-    return [], error_message or "no downloadable media found at that link"
+        return ParseResult(files=tuple(files))
+    if error_message is not None:
+        # The extractor named a failure, so this is E2 rather than an empty share.
+        return ParseResult(reason=error_message)
+    return ParseResult(reason="no downloadable media found at that link", empty=True)
 
 
 def _error_message(record: list[Any]) -> str:
@@ -372,14 +389,14 @@ async def resolve(
         info = await runner(url, timeout=timeout)
         files = files_from_ytdlp(info, preference=preference, source_url=url)
         if not files:
-            raise ResolveError("the video resolver found nothing downloadable")
+            raise ResolveError("the video resolver found nothing downloadable", empty=True)
         log.debug("resolved %s via yt-dlp: %d file(s)", url, len(files))
         return Resolution(engine=engine, source_url=url, files=tuple(files))
 
     gallery = run_gallerydl or _run_gallerydl
     stdout = await gallery(url, timeout=timeout)
-    files, reason = parse_gallerydl(stdout, preference=preference, source_url=url)
-    if not files:
-        raise ResolveError(reason or "nothing downloadable at that link")
-    log.debug("resolved %s via gallery-dl: %d file(s)", url, len(files))
-    return Resolution(engine=engine, source_url=url, files=tuple(files))
+    parsed = parse_gallerydl(stdout, preference=preference, source_url=url)
+    if not parsed.files:
+        raise ResolveError(parsed.reason or "nothing downloadable at that link", empty=parsed.empty)
+    log.debug("resolved %s via gallery-dl: %d file(s)", url, len(parsed.files))
+    return Resolution(engine=engine, source_url=url, files=parsed.files)

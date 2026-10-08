@@ -84,6 +84,10 @@ the automatic fallback.
 | D31 | Size gate on an unknown size | An unreported size **passes, flagged for enforcement during transfer** — the fetcher aborts if the running total passes the cap | Refusing would break links that would have worked, since many extractors publish no size; allowing it silently would let an oversized share through and spend the user's daily quota discovering that. Flagging keeps one rule (the limit holds) and enforces it where it can be. `limit_mb = 0` means unlimited, so there is no cap to enforce |
 | D32 | Request headers | Browser defaults plus per-host requirements live **in code** (`downloader/fetcher.py`), not in config. The `User-Agent` is not ours at all: `impersonate="chrome"` supplies a real browser's, while our explicit headers override the rest of the profile (measured) | A `Referer` a host demands is a fact about that host, so a config key would only offer a way to get it wrong; and the media host is not the page host, which is why `googlevideo.com` carries the YouTube referer. Cookies are the deliberate exception, because those belong to a user and live in their own file (D8) |
 | D33 | No Range, no resume | A transfer always starts from byte zero. A job whose lease expired simply fetches again | The spec never asks for resume, and the ledger that makes a restart safe (`job_items`) exists to prevent re-*delivery*, not re-download. A resumed partial is the riskier design: nothing verifies that the bytes already on disk are the ones the server would still send, so a wrong assumption yields a corrupt file delivered as a success. Measured consequence: curl raises `IncompleteRead` on a short body, so a partial never survives as a file either |
+| D34 | The chain's outcome vocabulary | A resolver returns a `Resolution` (possibly empty) or raises `ResolveError`, and **each attempt's outcome is machine-readable**: `ResolveError.empty` separates "found no media" (E4) from "the extractor failed" (E2). Every attempt that yields no files continues the chain; if none ever reported a failure the result is an **empty share**, otherwise the last failure's reason is reported | Both kinds of nothing mean "this resolver cannot help", so both must move to the next one — but they are two different messages: E4 is `No actual files found in this share` while E2 repeats the extractor's own reason. Deciding that from the reason's *text* would have worked until the first wording change, so `parse_gallerydl` returns a `ParseResult` carrying `empty` instead of flattening both cases into one string |
+| D35 | Byte accounting | `record_bytes(inbound=…)` is charged for the bytes **actually pulled off the network**, including a partial that was discarded, and is recorded after the fact rather than reserved up front. `download_count` is charged per job at submission, as already specified | The bandwidth cap is measured against `usage.bytes_in`, and a failed or cancelled transfer really did consume that traffic. Nothing is reserved in advance, so counting the partial cannot double-charge; and charging what the network actually moved is the only number that stays true when a host's reported size was wrong |
+| D36 | Cancellation reaches the transfer | FR-11.6 is achieved by polling `should_stop` **between chunks**, raising `TransferCancelled`. A cancelled transfer is not a failure: it is not listed in FR-9's failures, and the partial is discarded | Checking only between files would leave a cancel looking ignored for as long as the current file takes — minutes, for a large video. `TransferCancelled` subclasses `FetchError` so the existing discard paths still run, but is caught separately so a user's own cancel never appears as something that "went wrong" |
+| D37 | Filenames inside a job | A share's files are staged under `unique_name(safe_filename(title))`, numbering from `(2)` on collision; a number is spent only when the file actually lands | Two files in one share can carry the same title, and without this the second silently overwrites the first: the user is told two files were downloaded and receives one. Releasing the name on failure means a transient failure does not permanently rename the file that succeeds on the retry path |
 
 ---
 
@@ -408,22 +412,38 @@ plan assumed, so these are requirements rather than notes (details in R13):**
       which is what lets one worker see one connection pool instead of one per file. The cap is the
       *file's* cap — the second stream is charged the first stream's bytes, or a merge could take
       twice the limit by arriving in two pieces (mutation-checked)
-- [ ] `downloader/registry.py` + `downloader/flow.py`: host → engine, native overrides, and the
-      chain native → gallery-dl → `cyberdrop-dl` last
-- [ ] Engines: yt-dlp, gallery-dl, cyberdrop-dl, generic HTTP (`curl_cffi`)
+- [x] `downloader/flow.py`: the pipeline for one link — the chain (native → gallery-dl →
+      cyberdrop-dl last, D6), AC-3's refusal decided before any transfer, the per-file loop with
+      FR-9's failure collection, and the outcome vocabulary the user's messages are built from.
+      Written with every external effect injected — the chain, the stop signal, three notification
+      hooks, the HTTP session — so the whole thing is driven in tests with no network, no database
+      and no Telegram. Decisions this forced are recorded as D34–D37: E4 and E2 are distinguished by
+      a machine-readable `empty` flag rather than by the reason's wording; bandwidth is charged for
+      what the network actually moved, partials included; FR-11.6's cancellation is polled between
+      chunks so a cancel is not ignored until the current file ends; and same-titled files in one
+      share are numbered instead of overwriting each other. Mutation-checked on six properties (skip
+      the gate, stop the loop on a failure, drop D31's running cap, report an empty share as a
+      failure, overwrite the duplicate name, ignore cancellation) — every one fails a test
+- [ ] `downloader/registry.py`: host → resolver chain, native adapters first. `flow.download_link`
+      takes the chain as an argument, so this is the only place that knows which host needs which
+      adapter; nothing in the pipeline changes when an adapter is added
+- [ ] Engines: the gallery-dl and yt-dlp resolvers are wired (`probe.resolve`), cyberdrop-dl last is
+      not. The chain needs *per-engine* entries (a way to force gallery-dl rather than have
+      `probe.engine_for` re-route the host), which is registry work
 - [ ] Native adapters: TeraBox (account pool + per-user cookie), Cyberdrop family, Doodstream,
       StreamTape, MixDrop, StreamWish, Vidmonstr, Vidara, Luluvdoo, Bysejikuar, MEGA
-- [ ] Fallback chain with a visible phase change (E2, §3); pre-download size gate (E3, AC-3)
+- [x] Fallback chain with a visible phase change (E2, §3): each new attempt emits E2's notice with
+      the engine's own name (`catalog.fallback_notice`), which renders the spec's sentence verbatim
+      for the gallery-dl step. The phases themselves are announced through `on_phase` (FR-7.3)
 - [x] Pre-transfer size gate (`downloader/gate.py`) and the failure block (`app/catalog.py`), both
       pure so they can be verified before any engine call exists. AC-3's refusal is decided on what
       resolution reported, never after transfer; the failure list is capped at 10 bullets with a
       remainder (FR-9.3/9.4) and a filename with brackets is escaped so it cannot break the link
       markup it appears in. An unreported size passes but is flagged for enforcement during transfer
       (D31) — checked because `0` and `None` had already been conflated once in D30's code
-- [ ] Empty share (E4); 0-byte → `empty file (0 bytes)` (E6). **The 0-byte half is done**: the
-      fetcher writes nothing it cannot keep, so a zero-byte body is discarded and reported with
-      FR-9.5's exact reason rather than delivered as an empty document. E4's *empty share* is a
-      flow-level outcome and lands with `downloader/flow.py`
+- [ ] Empty share (E4); 0-byte → `empty file (0 bytes)` (E6). **Both are done**: E4 is a
+      `LinkResult` with `empty_share` set, distinct from E2's failure path (D34), and a zero-byte
+      body is discarded and reported with FR-9.5's exact reason
 - [ ] Album delivery ≤10, captions, reply-to-command, never deliver twice (FR-8)
 - [ ] Failure block `⚠️ N file(s) failed:` with ≤10 bullets + remainder (FR-9, E27)
 
@@ -480,7 +500,7 @@ plan assumed, so these are requirements rather than notes (details in R13):**
 
 | Layer | Scope | Infrastructure |
 |---|---|---|
-| `tests/unit` | tier/quota math, referral rules, catalog rendering, album batching, status coalescing, mask helpers, the fetcher and the merge | none (the fetcher's tests run a real HTTP server on loopback and generate their media with ffmpeg) |
+| `tests/unit` | tier/quota math, referral rules, catalog rendering, album batching, status coalescing, mask helpers, the fetcher, the merge, and the per-link pipeline | none (the fetcher's and the pipeline's tests run a real HTTP server on loopback and generate their media with ffmpeg — see below) |
 | `tests/integration` | queue leases, worker slots, restart recovery, repositories | Postgres via the layered DSN resolver |
 | `tests/acceptance` | FR/AC behaviour through handlers | `tests/fakes/` Kurigram client implementing the same protocol as the real one |
 | `tests/live` (`@pytest.mark.live`) | only the non-fakeable criteria | Kurigram `test_mode=True` test servers + real hosts |
@@ -492,12 +512,14 @@ plan assumed, so these are requirements rather than notes (details in R13):**
 - **Injected deterministic clock** into quota, referral and scheduler so the daily reset and the 30-day
   bonus window are tested exactly (§8.5).
 - A third kind of test joins those two: **anything whose behaviour *is* the transport is tested against
-  the real thing, not a stub.** `tests/unit/test_fetcher.py` serves its own bodies from a
-  `ThreadingHTTPServer` on loopback (recording the headers it receives) and generates its fixtures with
-  ffmpeg, then verifies a merge by asking `ffprobe` what is in the result. Stubbing curl_cffi or ffmpeg
-  would have asserted my beliefs instead of their behaviour — as it turned out, it would have missed that
-  `chunk_size` is ignored, that a truncated body raises, and that the merge was being handed byte counts
-  where it needed paths.
+  the real thing, not a stub.** `tests/fakes/server.py` is a `ThreadingHTTPServer` on loopback that
+  serves bodies a test writes (and generated ones it asks for), records the headers it receives, and
+  can truncate a body or stall mid-response on request. The fetcher's and the pipeline's tests both
+  drive it, and generate their media fixtures with ffmpeg/ffprobe. Stubbing curl_cffi or ffmpeg would
+  have asserted my beliefs instead of their behaviour — as it turned out, it would have missed that
+  `chunk_size` is ignored, that a truncated body raises, and that the merge was being handed byte
+  counts where it needed paths. The pipeline's *chain* is faked, because that logic is ours; the
+  transport underneath it is not.
 **Live suite** (`@pytest.mark.live`, skipped unless `SPIDEY_TEST_MODE=true`) runs against Telegram's
 **test DCs** with throwaway accounts — never production — using `in_memory=True` clients so no session
 files are left behind. Login, 2FA, session lifecycle, the magic word and TimerMedia are exercised by
@@ -632,7 +654,7 @@ DB password is never embedded in a URL — the DSN is assembled at runtime from 
 | FR-4 `/dt` | P5 | `downloader/telegram_source` + `handlers/tg_download.py` | AC-7 |
 | FR-5 magic word | P6 | `handlers/magic_word.py` | AC-8 |
 | FR-6 TimerMedia | P6 | `handlers/timer_media.py` | AC-9 |
-| FR-7 progress/status | P4 | `telegram/status.py`; bytes from `downloader/fetcher.py` | AC-2, E7, E8 |
+| FR-7 progress/status | P4 | `telegram/status.py`; phases and per-file bytes from `downloader/flow.py` | AC-2, E7, E8 |
 | FR-8 delivery format | P3 | `telegram/delivery.py` | AC-2 |
 | FR-9 failure reporting | P3 | `downloader/flow.py` + catalog; reasons from `fetcher.py` | AC-15, E27 |
 | FR-10 queue & concurrency | P2 | `app/queue.py` | AC-4 |
@@ -703,14 +725,17 @@ rather than the order the plan lists:
 | 3b — resolver contract + engines' output (D30, R13) | ✅ committed |
 | 3c — pre-transfer size gate + failure block (D31) | ✅ committed |
 | 3d — **the fetcher** (D32, D33) | ✅ committed; `downloader/fetcher.py` verified against a loopback HTTP server and real ffmpeg |
-| 3e — `downloader/flow.py` | **next**: resolve → gate → fetch, the E2 phase change, E4's empty share, FR-9's failure collection |
-| 3f — `downloader/registry.py` + native adapters | after 3e: TeraBox account pool, the Cyberdrop family, the ad-gated hosts, `cyberdrop-dl` last |
-| 3g — `telegram/delivery.py` then the P3 gate | albums ≤10, captions, reply-to-command, then AC-2/AC-3/AC-15 against a real link |
+| 3e — **`downloader/flow.py`** (D34–D37) | ✅ committed; the chain, the gate, the download loop and the outcome vocabulary, all driven in tests with fake resolvers and a real server |
+| 3f — `downloader/registry.py` + native adapters | **next**: host → chain, TeraBox account pool, the Cyberdrop family, the ad-gated hosts, `cyberdrop-dl` last |
+| 3g — the worker handler + `telegram/delivery.py` | then albums ≤10, captions, reply-to-command, the DB bookkeeping (`files_sent`, `record_bytes`), and AC-2/AC-3/AC-15 against a real link |
 
 Nothing in the pipeline is wired into the worker pool yet, and deliberately so: with no job handler, a
 started pool would claim real jobs and fail them. `app/workers.py`, `app/scheduler.py` and
-`app/ratelimit.py` stay unstarted by `main.py` until 3e exists, which is recorded where it belongs (P2's
-scheduler bullet) rather than left implicit.
+`app/ratelimit.py` stay unstarted by `main.py` until 3g exists, which is recorded where it belongs (P2's
+scheduler bullet) rather than left implicit. The worker handler is what will connect
+`flow.download_link` to the queue: it owns the job's staging directory, checks
+`keeper.stop_requested` for FR-11.6, records `bytes_in` (D35) and `files_sent`, and keeps jobs already
+delivered from running again (§8.2).
 
 Still outstanding from earlier batches and tracked where it lives: the Docker-free DSN resolver's second
 provider (P0-prereq), the remaining §7 catalog copy (P0), and a CI job proving the `tgcrypto` source build

@@ -100,6 +100,18 @@ class EmptyFile(FetchError):
         super().__init__(catalog.EMPTY_FILE_REASON)
 
 
+class TransferCancelled(FetchError):
+    """The user cancelled while this transfer was running (FR-11.6).
+
+    A kind of ``FetchError`` so that every failure path still discards the partial file, but
+    distinct so the caller can tell "the user stopped this" from "this went wrong": a cancelled
+    file is not a failure and must not be listed as one.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("transfer cancelled")
+
+
 @dataclass(frozen=True)
 class FetchProgress:
     """Where a transfer has got to, for the status layer and for quota accounting (FR-7.4)."""
@@ -148,12 +160,17 @@ async def fetch(
     session: Any | None = None,
     timeout: float = DEFAULT_TIMEOUT,
     impersonate: str | None = DEFAULT_IMPERSONATE,
+    should_stop: Callable[[], bool] | None = None,
 ) -> FetchedFile:
     """Produce ``destination`` from ``item``'s transfers, merging if there is more than one.
 
     ``limit_bytes`` is the running cap from D31 and is only needed when the size could not be
     determined up front; passing it always is harmless, since a known oversize never gets here
     (the gate refused it before any transfer started).
+
+    ``should_stop`` is polled between chunks rather than only between files, because FR-11.6 asks
+    for the *transfer* to stop: otherwise a cancel would appear to do nothing until the current
+    file finished, which for a large video is minutes of the user watching a job they cancelled.
     """
     destination.parent.mkdir(parents=True, exist_ok=True)
     owns_session = session is None
@@ -171,6 +188,7 @@ async def fetch(
                 impersonate=impersonate,
                 base_total=item.expected_bytes,
                 sole_transfer=True,
+                should_stop=should_stop,
             )
             merged = False
         else:
@@ -182,6 +200,7 @@ async def fetch(
                 progress=progress,
                 timeout=timeout,
                 impersonate=impersonate,
+                should_stop=should_stop,
             )
     finally:
         if owns_session:
@@ -210,6 +229,7 @@ async def _download_and_merge(
     progress: ProgressHook | None,
     timeout: float,
     impersonate: str | None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> tuple[int, bool]:
     """Fetch both streams, then combine them with ffmpeg."""
     video = next((t for t in item.transfers if t.role == "video"), None)
@@ -231,6 +251,7 @@ async def _download_and_merge(
             timeout=timeout,
             impersonate=impersonate,
             base_total=item.expected_bytes,
+            should_stop=should_stop,
         )
         await _download_one(
             client,
@@ -244,6 +265,7 @@ async def _download_and_merge(
             # rather than restarting the count the user is watching.
             base_done=video_bytes,
             base_total=item.expected_bytes,
+            should_stop=should_stop,
         )
         bytes_written = await _merge(video_path, audio_path, destination)
     finally:
@@ -265,6 +287,7 @@ async def _download_one(
     base_done: int = 0,
     base_total: int | None = None,
     sole_transfer: bool = False,
+    should_stop: Callable[[], bool] | None = None,
 ) -> int:
     """Stream one transfer to ``path``. Returns the bytes written."""
     written = 0
@@ -298,6 +321,9 @@ async def _download_one(
                     continue
                 handle.write(chunk)
                 written += len(chunk)
+
+                if should_stop is not None and should_stop():
+                    raise TransferCancelled()
 
                 # D31's running cap is the *file's* cap, not each stream's: base_done is what
                 # earlier streams of the same file already wrote, so a merge cannot slip past the

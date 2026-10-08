@@ -302,7 +302,7 @@ NO_FILES_SENT = "❌ **SpideyBot:** No files were successfully sent."
 EMPTY_SHARE = "ℹ️ **SpideyBot:** No actual files found in this share."
 ERROR_OCCURRED = "❌ **SpideyBot: An error occurred.**\nError: `{error}`"
 DOWNLOAD_CANCELLED = "❌ **SpideyBot:** Download cancelled."
-FALLBACK_NOTICE = "⚠️ **SpideyBot:** Primary download failed, trying gallery-dl"
+FALLBACK_NOTICE = "⚠️ **SpideyBot:** Primary download failed, trying {engine}"
 DONE_WITH_FILES = "✅ **SpideyBot: Done!** Sent {sent}/{total} files ({size} MB)."
 
 #: FR-9.5's exact wording, so the reason is never paraphrased differently in two places.
@@ -311,6 +311,10 @@ EMPTY_FILE_REASON = "empty file (0 bytes)"
 #: The reason for a share stopped mid-flight. Distinct from LIMIT_EXCEEDED because that one states
 #: a size the extractor measured, while this one can only say where the transfer was stopped (D31).
 LIMIT_EXCEEDED_REASON = "passed the {limit} MB limit while downloading"
+
+#: FR-7.3's phases, in the order they happen. Delivery adds the last two.
+PHASE_RESOLVING = "Resolving"
+PHASE_DOWNLOADING = "Downloading"
 
 
 @dataclass(frozen=True)
@@ -351,3 +355,13 @@ def failure_block(failures: Sequence[Failure], *, limit: int = 10) -> str:
 def limit_exceeded_message(*, actual_mb: str, limit_mb: str) -> str:
     """The refusal AC-3 asks for: both numbers, before anything was transferred."""
     return LIMIT_EXCEEDED.format(actual=actual_mb, limit=limit_mb)
+
+
+def fallback_notice(engine: str) -> str:
+    """E2's notice while the next resolver is tried (spec §7.3).
+
+    The spec's sentence names gallery-dl, and that is exactly what it renders for the gallery-dl
+    step; naming the engine is what keeps the same sentence truthful for the others in the chain
+    (D6), rather than announcing gallery-dl while a native adapter runs.
+    """
+    return FALLBACK_NOTICE.format(engine=engine)
