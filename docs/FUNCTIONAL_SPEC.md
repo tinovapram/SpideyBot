@@ -44,7 +44,7 @@ re‑uploading. SpideyBot collapses that into one chat command and returns the f
   file never aborts the batch.
 - **Recover by default.** Unknown links, dead hosts, expired accounts, and transient errors are
   retried through alternate paths before the bot reports failure.
-- **Privacy by default.** User cookies and account sessions are encrypted, masked in the UI, and
+- **Privacy by default.** User cookies and account sessions are stored in service-account-only files, masked in the UI, and
   never logged in the clear.
 
 ### 1.4 Actors
@@ -311,7 +311,7 @@ reconnect** — followed by the appropriate onboarding message.
 - A session enables Telegram downloads, the magic word, TimerMedia, and access to private/restricted
   content on the user's behalf.
 - Only one session per user at a time.
-- Session credentials are stored encrypted and are revocable via `/logout`.
+- Session credentials are stored in a local session file and are revocable via `/logout`.
 
 ### FR-14 — Settings menu (`/setting`)
 An inline-button menu that edits the same message in place. Groups:
@@ -324,7 +324,7 @@ An inline-button menu that edits the same message in place. Groups:
 
 Rules:
 - Cookie is displayed **masked** (never full value); a masked `ndus` value shows first 4 + last 2 chars.
-- Cookie status page states that the cookie is encrypted at rest and never logged.
+- Cookie status page states that the cookie is stored in a local file and never logged.
 - If cookie storage is unavailable, tell the user to contact an admin.
 - Magic word change accepts a new single token; case-insensitive matching thereafter.
 - Menu navigation returns to the main menu after each action.
@@ -602,7 +602,7 @@ To log out, use /logout.
 
 This lets SpideyBot access private/restricted content on your behalf.
 
-⚠️ Your session is stored as an encrypted file session.
+⚠️ Your session is stored as a local file session.
 You can revoke access at any time with /logout.
 
 Please send your **phone number** (e.g. `+1234567890`):
@@ -636,7 +636,7 @@ Set one to download from TeraBox with your own account.
 
 • `ndus`: `{masked}`
 
-Your cookie is encrypted at rest and never logged.
+Your cookie is stored in a local file and never logged.
 ```
 ```
 📷 **TimerMedia**
@@ -728,7 +728,7 @@ Connected → /logout → No session (credentials revoked)
 
 ### 8.4 Cookie lifecycle
 ```
-No cookie → Set (from /setting) → Stored encrypted → View (masked) → Delete
+No cookie → Set (from /setting) → Stored → View (masked) → Delete
 ```
 
 ### 8.5 Daily reset
@@ -785,7 +785,7 @@ No cookie → Set (from /setting) → Stored encrypted → View (masked) → Del
    - Bounded memory/disk: stream and flush files in batches (≤10) rather than buffering everything;
      clean up temporary files after each job.
 4. **Privacy & security**
-   - Cookies and sessions encrypted at rest; masked in the UI; never logged in the clear.
+   - Cookies and sessions are stored in files restricted to the service account; masked in the UI; never logged in the clear.
    - Session revocation is immediate and user-controlled.
    - Users can only cancel/list their own jobs.
 5. **Reliability**
@@ -874,7 +874,8 @@ Each criterion should be verifiable without reference to the original implementa
 
 ## 12. Open decisions for the new engine
 
-These are deliberately unspecified; the new implementation must choose and document them.
+These are deliberately unspecified; the new implementation must choose and document them. For this
+project the answers are recorded in `IMPLEMENTATION_PLAN.md` §1.
 
 1. **Runtime/language and bot framework.**
 2. **Persistence choice** for users, quotas, queue, sessions, cookies, referrals.
@@ -921,7 +922,6 @@ All values below must be configurable without changing behavior contracts.
 | `referral.bonus_days` | 30 | Validity window for each credit |
 | `status.render_interval` | ~3 s | Min gap between content edits |
 | `status.anim_interval` | ~1.2 s | Min gap between liveness-only edits |
-| `session.encryption_key` | required | Key protecting stored cookies/sessions |
 
 ---
 

@@ -1,17 +1,44 @@
-﻿# ── Python ─────────────────────────────────────────────────────────
+# ── Secrets ────────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Runtime data (includes plaintext session/cookie files) ─────────
+# The tree itself is created by app/paths.ensure_runtime_dirs() on first run, so
+# nothing under here is tracked. Note that a "!data/.gitkeep" exception could never
+# work: git cannot re-include a file whose parent directory is excluded.
+data/
+
+# ── Telegram sessions — credentials, never commit ──────────────────
+*.session
+*.session-journal
+
+# ── Config overrides ───────────────────────────────────────────────
+config/local.toml
+config/runtime/
+
+# ── Python ─────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *$py.class
 *.egg-info/
-*.egg
 dist/
 build/
 
 # ── Virtual environments ───────────────────────────────────────────
-.env
 .venv/
-env/
 venv/
+env/
+
+# ── Testing / linting / coverage / type checking ───────────────────
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.ruff_cache/
 
 # ── IDE / editor ───────────────────────────────────────────────────
 .vscode/
@@ -20,29 +47,7 @@ venv/
 *.swo
 *~
 
-# ── Testing / coverage ─────────────────────────────────────────────
-.pytest_cache/
-.coverage
-.coverage.*
-htmlcov/
-tests/
-
-# ── Type checking ──────────────────────────────────────────────────
-.mypy_cache/
-.dmypy.json
-dmypy.json
-
-# ── Secrets ────────────────────────────────────────────────────────
-.env.*
-!.env.example
-
-# ── Database ───────────────────────────────────────────────────────
-data/
-!data/.gitkeep
-
-# ── Runtime ────────────────────────────────────────────────────────
+# ── Runtime output ─────────────────────────────────────────────────
 downloads/
 user_sessions/
-config/runtime/
 graphify-out/
-.devcontainer/
