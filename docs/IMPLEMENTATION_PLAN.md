@@ -37,6 +37,8 @@ Checked rather than assumed; these shape the plan.
 | `logging.LogRecord` on 3.14 | a lone mapping argument stays as `record.args` (the dict itself) and is **no longer merged onto the record** | The redacting filter scrubs that mapping directly; a filter written for the older merge behaviour would miss it |
 | Kurigram + tgcrypto on 3.14, live | verified against production: bot connected to `Production DC5`, both handlers loaded, session reported `Device: Desktop - 6.0.2 x64` / `System: Windows 11 x64 (en)` | The identity profile (D16) reaches Telegram for real, not just the config object |
 | YouTube format availability | probed against a real video: **0 of 49 formats are single-file** (37 video-only, 12 audio-only, highest video 2160p), and yt-dlp's default selection is the merge `401+251` (AV1 video + Opus audio) | ffmpeg is required for the YouTube feature to *exist*, not to raise its quality. The default pick is also a compatibility trap — see D28 |
+| `curl_cffi` streaming | `0.16.3`: `AsyncSession.get(stream=True, impersonate=…)` + `aiter_content()` yield incrementally, and the session is reusable after the response closes. **`chunk_size` is ignored** — it warns *"there is no way to tell curl that"* and yields whatever libcurl read | Read sizes are libcurl's, not ours, so progress is coalesced by our own byte counter rather than by asking for bigger reads. Explicit headers **do** override the impersonation profile (`Accept`, `Accept-Language`, `Referer` all arrive as sent) while the profile still supplies the browser `User-Agent` |
+| `curl_cffi` on a truncated body | a body that ends short of its `Content-Length` raises `IncompleteRead` (curl 18), it does not silently yield fewer bytes | A half-downloaded file cannot be mistaken for a whole one; the fetcher only has to discard the partial (E6/E3's integrity) |
 | ffmpeg on this machine | `9.0.1-essentials` (winget) on `PATH`, under a **version-stamped** directory, with `ffprobe` alongside | Resolve with `shutil.which`, never a fixed path, and never vendor the binaries (licensing + size) |
 
 **Risk R1 (revised after testing — see §8):** fast AES depends on a *source build* (toolchain needed in
@@ -80,6 +82,8 @@ the automatic fallback.
 | D29 | Upgrade button | `[ux] upgrade_url` is operator-supplied and empty by default; while it is unset the button is omitted rather than pointing somewhere invented | AC-1 requires the button but no destination appears anywhere in the spec. Validated at startup to be a link Telegram accepts (http/https/tg) so a typo fails immediately instead of as an API error on the first `/start`. A button-free welcome still satisfies the rest of AC-1 |
 | D30 | Resolver output | **A file to deliver is one *or more* transfers**, and sizes are all-or-nothing: a total is reported only when every stream reported one | Every YouTube format is a merge (measured: 0 of 53 carry audio), so "one file = one URL" cannot express what a job actually does — and the fetcher needs per-stream URLs to report byte progress, while the size gate needs the size of the *result* rather than of whichever stream was counted first. All-or-nothing exists because a partial sum looks precise: `None` for an unknown size must never read as `0`, or the gate waves through a download it cannot measure (E3/AC-3), while a reported `0` is a real measurement and E6 has a specific message for it |
 | D31 | Size gate on an unknown size | An unreported size **passes, flagged for enforcement during transfer** — the fetcher aborts if the running total passes the cap | Refusing would break links that would have worked, since many extractors publish no size; allowing it silently would let an oversized share through and spend the user's daily quota discovering that. Flagging keeps one rule (the limit holds) and enforces it where it can be. `limit_mb = 0` means unlimited, so there is no cap to enforce |
+| D32 | Request headers | Browser defaults plus per-host requirements live **in code** (`downloader/fetcher.py`), not in config. The `User-Agent` is not ours at all: `impersonate="chrome"` supplies a real browser's, while our explicit headers override the rest of the profile (measured) | A `Referer` a host demands is a fact about that host, so a config key would only offer a way to get it wrong; and the media host is not the page host, which is why `googlevideo.com` carries the YouTube referer. Cookies are the deliberate exception, because those belong to a user and live in their own file (D8) |
+| D33 | No Range, no resume | A transfer always starts from byte zero. A job whose lease expired simply fetches again | The spec never asks for resume, and the ledger that makes a restart safe (`job_items`) exists to prevent re-*delivery*, not re-download. A resumed partial is the riskier design: nothing verifies that the bytes already on disk are the ones the server would still send, so a wrong assumption yields a corrupt file delivered as a success. Measured consequence: curl raises `IncompleteRead` on a short body, so a partial never survives as a file either |
 
 ---
 
@@ -394,9 +398,18 @@ plan assumed, so these are requirements rather than notes (details in R13):**
       **never** fetched as media but re-resolved from the metadata's formats, and no code path reads
       the exit code as a success signal. Both guards were mutation-checked — disabling the marker rule
       produces a file whose only transfer is the marker itself, which is R13's trap exactly
+- [x] `downloader/fetcher.py`: stream each transfer to disk, merge two streams with `-c copy`,
+      report progress, and enforce D31's cap. Verified against a real HTTP server on loopback and
+      real ffmpeg output (the merge is confirmed by `ffprobe` finding both streams), because the
+      behaviour under test *is* the transport. Three findings from doing it rather than reasoning
+      about it: `aiter_content(chunk_size=…)` is ignored by curl_cffi, so the reporting interval is
+      ours and the read size is libcurl's; a body that ends short raises `IncompleteRead`, so a
+      partial cannot masquerade as a whole file; and a caller-owned session survives the fetch,
+      which is what lets one worker see one connection pool instead of one per file. The cap is the
+      *file's* cap — the second stream is charged the first stream's bytes, or a merge could take
+      twice the limit by arriving in two pieces (mutation-checked)
 - [ ] `downloader/registry.py` + `downloader/flow.py`: host → engine, native overrides, and the
       chain native → gallery-dl → `cyberdrop-dl` last
-- [ ] Engines: yt-dlp, gallery-dl, cyberdrop-dl, generic HTTP (`curl_cffi`)
 - [ ] Engines: yt-dlp, gallery-dl, cyberdrop-dl, generic HTTP (`curl_cffi`)
 - [ ] Native adapters: TeraBox (account pool + per-user cookie), Cyberdrop family, Doodstream,
       StreamTape, MixDrop, StreamWish, Vidmonstr, Vidara, Luluvdoo, Bysejikuar, MEGA
@@ -407,7 +420,10 @@ plan assumed, so these are requirements rather than notes (details in R13):**
       remainder (FR-9.3/9.4) and a filename with brackets is escaped so it cannot break the link
       markup it appears in. An unreported size passes but is flagged for enforcement during transfer
       (D31) — checked because `0` and `None` had already been conflated once in D30's code
-- [ ] Empty share (E4); 0-byte → `empty file (0 bytes)` (E6)
+- [ ] Empty share (E4); 0-byte → `empty file (0 bytes)` (E6). **The 0-byte half is done**: the
+      fetcher writes nothing it cannot keep, so a zero-byte body is discarded and reported with
+      FR-9.5's exact reason rather than delivered as an empty document. E4's *empty share* is a
+      flow-level outcome and lands with `downloader/flow.py`
 - [ ] Album delivery ≤10, captions, reply-to-command, never deliver twice (FR-8)
 - [ ] Failure block `⚠️ N file(s) failed:` with ≤10 bullets + remainder (FR-9, E27)
 
@@ -464,7 +480,7 @@ plan assumed, so these are requirements rather than notes (details in R13):**
 
 | Layer | Scope | Infrastructure |
 |---|---|---|
-| `tests/unit` | tier/quota math, referral rules, catalog rendering, album batching, status coalescing, mask helpers | none |
+| `tests/unit` | tier/quota math, referral rules, catalog rendering, album batching, status coalescing, mask helpers, the fetcher and the merge | none (the fetcher's tests run a real HTTP server on loopback and generate their media with ffmpeg) |
 | `tests/integration` | queue leases, worker slots, restart recovery, repositories | Postgres via the layered DSN resolver |
 | `tests/acceptance` | FR/AC behaviour through handlers | `tests/fakes/` Kurigram client implementing the same protocol as the real one |
 | `tests/live` (`@pytest.mark.live`) | only the non-fakeable criteria | Kurigram `test_mode=True` test servers + real hosts |
@@ -475,6 +491,13 @@ plan assumed, so these are requirements rather than notes (details in R13):**
   so AC-1…AC-15 run in CI with no network and no accounts.
 - **Injected deterministic clock** into quota, referral and scheduler so the daily reset and the 30-day
   bonus window are tested exactly (§8.5).
+- A third kind of test joins those two: **anything whose behaviour *is* the transport is tested against
+  the real thing, not a stub.** `tests/unit/test_fetcher.py` serves its own bodies from a
+  `ThreadingHTTPServer` on loopback (recording the headers it receives) and generates its fixtures with
+  ffmpeg, then verifies a merge by asking `ffprobe` what is in the result. Stubbing curl_cffi or ffmpeg
+  would have asserted my beliefs instead of their behaviour — as it turned out, it would have missed that
+  `chunk_size` is ignored, that a truncated body raises, and that the merge was being handed byte counts
+  where it needed paths.
 **Live suite** (`@pytest.mark.live`, skipped unless `SPIDEY_TEST_MODE=true`) runs against Telegram's
 **test DCs** with throwaway accounts — never production — using `in_memory=True` clients so no session
 files are left behind. Login, 2FA, session lifecycle, the magic word and TimerMedia are exercised by
@@ -609,9 +632,9 @@ DB password is never embedded in a URL — the DSN is assembled at runtime from 
 | FR-4 `/dt` | P5 | `downloader/telegram_source` + `handlers/tg_download.py` | AC-7 |
 | FR-5 magic word | P6 | `handlers/magic_word.py` | AC-8 |
 | FR-6 TimerMedia | P6 | `handlers/timer_media.py` | AC-9 |
-| FR-7 progress/status | P4 | `telegram/status.py` | AC-2, E7, E8 |
+| FR-7 progress/status | P4 | `telegram/status.py`; bytes from `downloader/fetcher.py` | AC-2, E7, E8 |
 | FR-8 delivery format | P3 | `telegram/delivery.py` | AC-2 |
-| FR-9 failure reporting | P3 | `downloader/flow.py` + catalog | AC-15, E27 |
+| FR-9 failure reporting | P3 | `downloader/flow.py` + catalog; reasons from `fetcher.py` | AC-15, E27 |
 | FR-10 queue & concurrency | P2 | `app/queue.py` | AC-4 |
 | FR-11 cancellation | P2 | `handlers/cancel.py` | AC-5 |
 | FR-12 `/status` | P2 | `handlers/job_status.py` | AC-6 |
@@ -671,16 +694,27 @@ status view has no observable behaviour). P5 needs P2+P3; P6 needs P5; P7 and P8
 
 ## 10. Immediate next step
 
-**Batch 1 (P0-prereq + P0) is complete and committed.** The next action is Batch 2 (P1 + P2) per §12,
-pending the operator's go. All three original prerequisites are closed:
+**Batches 1 and 2 are complete and committed; batch 3 is part-way through**, in the order P3 needs
+rather than the order the plan lists:
 
-1. `.gitignore` recreated (batch 0) — `git check-ignore -v` now matches both `.env` and `data/`.
-2. The `spideybot db` CLI over `postgresql-binaries` brings up PostgreSQL with Docker stopped (batch 1).
-3. The P0 scaffold in §4 exists, with 100 unit tests green and `ruff` clean.
+| Part | State |
+|---|---|
+| 3a — media selection (D28) | ✅ committed |
+| 3b — resolver contract + engines' output (D30, R13) | ✅ committed |
+| 3c — pre-transfer size gate + failure block (D31) | ✅ committed |
+| 3d — **the fetcher** (D32, D33) | ✅ committed; `downloader/fetcher.py` verified against a loopback HTTP server and real ffmpeg |
+| 3e — `downloader/flow.py` | **next**: resolve → gate → fetch, the E2 phase change, E4's empty share, FR-9's failure collection |
+| 3f — `downloader/registry.py` + native adapters | after 3e: TeraBox account pool, the Cyberdrop family, the ad-gated hosts, `cyberdrop-dl` last |
+| 3g — `telegram/delivery.py` then the P3 gate | albums ≤10, captions, reply-to-command, then AC-2/AC-3/AC-15 against a real link |
 
-R1's benchmark is captured in §0: 171.4 MiB/s with `tgcrypto` versus 0.59 MiB/s with `pyaes`, which is
-why the accelerator is now a hard requirement rather than a preference. Still outstanding: a CI job
-proving the `tgcrypto` source build stays green on each CPython bump.
+Nothing in the pipeline is wired into the worker pool yet, and deliberately so: with no job handler, a
+started pool would claim real jobs and fail them. `app/workers.py`, `app/scheduler.py` and
+`app/ratelimit.py` stay unstarted by `main.py` until 3e exists, which is recorded where it belongs (P2's
+scheduler bullet) rather than left implicit.
+
+Still outstanding from earlier batches and tracked where it lives: the Docker-free DSN resolver's second
+provider (P0-prereq), the remaining §7 catalog copy (P0), and a CI job proving the `tgcrypto` source build
+stays green on each CPython bump (R1).
 
 ---
 

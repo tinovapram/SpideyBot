@@ -23,8 +23,9 @@ from app.quota import BYTES_PER_MB
 def format_mb(total_bytes: int) -> str:
     """A byte count in MB, the way the spec's copy asks for it: ``500``, not ``500.0``.
 
-    Decimal MB here rather than the binary units ``/quota`` uses, because this string is spec
-    wording tied to ``link_total_mb`` — the number the user was given.
+    Uses the same MB as the rest of the bot (``BYTES_PER_MB``), because these strings sit next to
+    ``link_total_mb`` and a second, slightly different MB would make the refusal contradict the
+    number the user was given.
     """
     rendered = f"{max(total_bytes, 0) / BYTES_PER_MB:.1f}"
     return rendered.rstrip("0").rstrip(".") if rendered.endswith("0") else rendered
