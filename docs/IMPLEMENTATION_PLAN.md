@@ -25,12 +25,17 @@ Checked rather than assumed; these shape the plan.
 | `tgcrypto` build on 3.14 | **Verified working**: `cl /c` → `link /DLL` → `import` → IGE and CTR round-trip all succeeded against 3.14.6 + MSVC Build Tools 2026 | Fast AES on 3.14 is viable; no second interpreter needed |
 | Kurigram without `tgcrypto` | Verified: logs *"will work the same, but at a much slower speed"* and falls back to pure-Python `pyaes` | Safety net if a build ever fails: costs speed, not correctness |
 | Installed interpreters | only CPython **3.14.6**, plus `uv` | 3.14 is the target runtime |
-| `.venv` | **deleted during planning**; the base 3.14 install has no `telethon`, `cryptg`, `pyrogram` or `tgcrypto` | P0 creates a fresh venv and installs everything |
-| `.gitignore` | **deleted during planning**. `git status` reports `?? .env` and `git check-ignore .env` fails | ⚠️ **P0 step 1** — one `git add -A` would publish the bot token, API hash and TeraBox cookies |
+| `.venv` | **recreated in batch 1**: Python 3.14.6 with the full requirement set, `tgcrypto` compiled from its sdist, plus `ruff` | The planned runtime works; `uv` builds and manages it |
+| `.gitignore` | **was deleted during planning, recreated in batch 0**. `git check-ignore -v` now matches both `.env` and `data/` | ✅ Closed — a `git add -A` can no longer stage the bot token, API hash or TeraBox cookies |
 | Container runtime | Docker Desktop installed, `com.docker.service` **Stopped** | The compose provider needs Docker Desktop started |
 | Native PostgreSQL | none — no install, no service, no `psql` on PATH | The bundled-binaries provider is the no-Docker path |
 | `postgresql-binaries` | `18.6.0`, ships **`py3-none-win_amd64`** (Python-agnostic → 3.14 OK); contains `initdb`, `pg_ctl`, `postgres` (9.8 MB), `psql`, `createdb`, `pg_isready` + `LICENSE`; `__init__.py` exposes `bin()` | Powers local Postgres with no Docker and no installer |
 | `pgserver` | Windows wheels stop at **cp312**, no sdist | **Rejected** — cannot run on 3.14 (same ceiling as tgcrypto, without the escape hatch) |
+| Kurigram client identity parameters | real signature is `device_model`, `system_version`, `app_version`, `lang_code`, `lang_pack`, **`client_platform`** — the docs' sample tables call the last one `platform` | The identity mapper translates `platform` → `client_platform`; an unrecognised platform is dropped rather than raising over a cosmetic field |
+| Kurigram smart plugins | `load_plugins()` is invoked from **`start()`**, not `__init__`, and adds each handler through `loop.create_task` | Handlers exist only once a loop has run: a client built and never started advertises zero handlers, and the client captures whichever loop was current when it was constructed |
+| Event loop on 3.14 | `pyrogram.utils.get_event_loop()` catches the `RuntimeError` 3.14 raises when no loop is current, then creates one | `client.run()` works on 3.14; `uvloop.install()` must still run first so the new loop comes from the patched policy |
+| `logging.LogRecord` on 3.14 | a lone mapping argument stays as `record.args` (the dict itself) and is **no longer merged onto the record** | The redacting filter scrubs that mapping directly; a filter written for the older merge behaviour would miss it |
+| Kurigram + tgcrypto on 3.14, live | verified against production: bot connected to `Production DC5`, both handlers loaded, session reported `Device: Desktop - 6.0.2 x64` / `System: Windows 11 x64 (en)` | The identity profile (D16) reaches Telegram for real, not just the config object |
 
 **Risk R1 (revised after testing — see §8):** fast AES depends on a *source build* (toolchain needed in
 CI/Docker) from a package last released in 2022. It builds cleanly on 3.14 today, and `pyaes` remains
