@@ -320,7 +320,11 @@ covered by tests, and the live startup proved both handlers load.
       worker to act on (it was mid-transfer) is decided in `app/queue` with the row in hand, so the
       refusals cannot be raced. A requested cancellation already reads as `❌ Cancelled`, since
       showing `🔄 Running` while the worker unwinds would look like `/cancel` did nothing
-- [ ] Restart recovery gated on `files_sent`; delivered jobs never re-run (§8.2, E26)
+- [x] Restart recovery gated on `files_sent`; delivered jobs never re-run (§8.2, E26). The
+      `job_items` ledger itself arrives with the pipeline (P3), but the recovery half is verified:
+      a job abandoned by a killed process is resumed and delivered exactly once, a delivered job
+      is never picked up again by the new process, and a cancellation requested before the crash
+      is honoured rather than revived
 - [x] Scheduler: lease sweep, retention, orphan sweep (D18, D21). **Not yet started by `run`**: a
       worker with no job handler would claim jobs and fail them, so the pool and the scheduler are
       wired up with the pipeline in P3. The claim/lease/recovery path itself is verified here

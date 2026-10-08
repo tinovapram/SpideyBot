@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
-from sqlalchemy import case, func, or_, select, update
+from sqlalchemy import and_, case, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -373,6 +373,37 @@ async def counts(db: AsyncSession, user_id: int) -> JobCounts:
     )
     tally = {status: count for status, count in result.all()}
     return JobCounts(running=tally.get(RUNNING, 0), queued=tally.get(QUEUED, 0))
+
+
+async def queue_position(db: AsyncSession, job: Job) -> int:
+    """This waiting job's place in the line, 1-based (spec 7.4, AC-4).
+
+    Counted with the claim's own ordering — priority, then submission order, then id as the
+    tie-break — so the number shown to a user is the one the queue will actually honour. Only
+    *waiting* jobs count as ahead: a running job is not queued in front of this one, it is
+    occupying a slot, and a job that has already finished is not in the line at all.
+    """
+    ahead = (
+        select(func.count())
+        .select_from(Job)
+        .where(
+            Job.status == QUEUED,
+            or_(
+                Job.priority < job.priority,
+                and_(
+                    Job.priority == job.priority,
+                    or_(
+                        Job.created_at < job.created_at,
+                        and_(
+                            Job.created_at == job.created_at,
+                            Job.id < job.id,
+                        ),
+                    ),
+                ),
+            ),
+        )
+    )
+    return int((await db.execute(ahead)).scalar_one()) + 1
 
 
 async def active_jobs(db: AsyncSession, user_id: int) -> list[Job]:
