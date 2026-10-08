@@ -78,6 +78,29 @@ def _cmd_run(args: argparse.Namespace) -> int:
     return run()
 
 
+def _cmd_check(args: argparse.Namespace) -> int:
+    """Report the required capabilities. Non-zero exit when one is missing.
+
+    Deliberately does not read settings, so it still works on a fresh checkout where
+    `.env` has not been filled in yet — the point is to diagnose, not to be blocked.
+    """
+    from app import capabilities
+
+    probed = capabilities.probe()
+    for capability in probed:
+        kind = "required" if capability.required else "optional"
+        print(f"{capability.status:<8} {capability.name:<9} {kind:<9} {capability.detail}")
+
+    missing = capabilities.missing_required(probed)
+    if missing:
+        names = ", ".join(capability.name for capability in missing)
+        print()
+        print(f"missing required capability: {names}")
+        print("The bot will start, but jobs needing these will fail rather than degrade.")
+        return 1
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="spideybot", description="SpideyBot")
     sub = parser.add_subparsers(dest="command")
@@ -104,6 +127,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_reset.set_defaults(func=_cmd_db_reset)
 
     sub.add_parser("run", help="start the bot").set_defaults(func=_cmd_run)
+    sub.add_parser("check", help="report required capabilities (ffmpeg, tgcrypto)").set_defaults(
+        func=_cmd_check
+    )
     return parser
 
 

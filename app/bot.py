@@ -7,7 +7,7 @@ including the client, which logs while it is being constructed.
 
 from __future__ import annotations
 
-from app import config, paths
+from app import capabilities, config, paths
 from app import logging as app_logging
 from telegram import clients
 
@@ -43,6 +43,16 @@ def run() -> int:
         test_mode=settings.test_mode,
         redacted_values=redactor.count,
     )
+
+    # A missing required capability does not stop the bot, but it must never be silent:
+    # the degradation is invisible in normal use until a job behaves impossibly slowly.
+    for capability in capabilities.probe():
+        if capability.ok:
+            log.debug("capability", name=capability.name, detail=capability.detail)
+        elif capability.required:
+            log.error("required capability missing", name=capability.name, detail=capability.detail)
+        else:
+            log.info("optional capability absent", name=capability.name, detail=capability.detail)
 
     for directory in paths.insecure_secret_dirs():
         log.warning("credential directory is readable beyond this account", path=str(directory))

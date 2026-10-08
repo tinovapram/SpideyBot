@@ -23,7 +23,7 @@ Checked rather than assumed; these shape the plan.
 | Kurigram release | `2.2.26`, pure-Python wheel, `requires_python >=3.10`, classifiers to **3.14** | Installs on any modern CPython; 3.14 is officially supported |
 | `tgcrypto` (the `kurigram[fast]` AES accelerator) | latest `1.2.5`, released **2022-11-11**; no wheel for cp312/cp313/cp314 and no `abi3` wheel; `requires_python ~=3.7`, ships an sdist of **plain C** (not Cython) | pip falls back to a **source build** on 3.12+. Status below |
 | `tgcrypto` build on 3.14 | **Verified working**: `cl /c` → `link /DLL` → `import` → IGE and CTR round-trip all succeeded against 3.14.6 + MSVC Build Tools 2026 | Fast AES on 3.14 is viable; no second interpreter needed |
-| Kurigram without `tgcrypto` | Verified: logs *"will work the same, but at a much slower speed"* and falls back to pure-Python `pyaes` | Safety net if a build ever fails: costs speed, not correctness |
+| Kurigram without `tgcrypto` | Verified: logs *"will work the same, but at a much slower speed"* and falls back to pure-Python `pyaes`. **Benchmarked here**: AES-IGE over 8 MiB runs at **171.4 MiB/s** with `tgcrypto` vs **0.59 MiB/s** with `pyaes` — **291× slower** | The fallback is not viable: one 2 GiB transfer would cost ~58 minutes of CPU on AES alone. `tgcrypto` is a hard requirement, not an optimisation, so a missing accelerator must be reported rather than silently tolerated |
 | Installed interpreters | only CPython **3.14.6**, plus `uv` | 3.14 is the target runtime |
 | `.venv` | **recreated in batch 1**: Python 3.14.6 with the full requirement set, `tgcrypto` compiled from its sdist, plus `ruff` | The planned runtime works; `uv` builds and manages it |
 | `.gitignore` | **was deleted during planning, recreated in batch 0**. `git check-ignore -v` now matches both `.env` and `data/` | ✅ Closed — a `git add -A` can no longer stage the bot token, API hash or TeraBox cookies |
@@ -36,6 +36,8 @@ Checked rather than assumed; these shape the plan.
 | Event loop on 3.14 | `pyrogram.utils.get_event_loop()` catches the `RuntimeError` 3.14 raises when no loop is current, then creates one | `client.run()` works on 3.14; `uvloop.install()` must still run first so the new loop comes from the patched policy |
 | `logging.LogRecord` on 3.14 | a lone mapping argument stays as `record.args` (the dict itself) and is **no longer merged onto the record** | The redacting filter scrubs that mapping directly; a filter written for the older merge behaviour would miss it |
 | Kurigram + tgcrypto on 3.14, live | verified against production: bot connected to `Production DC5`, both handlers loaded, session reported `Device: Desktop - 6.0.2 x64` / `System: Windows 11 x64 (en)` | The identity profile (D16) reaches Telegram for real, not just the config object |
+| YouTube format availability | probed against a real video: **0 of 49 formats are single-file** (37 video-only, 12 audio-only, highest video 2160p), and yt-dlp's default selection is the merge `401+251` (AV1 video + Opus audio) | ffmpeg is required for the YouTube feature to *exist*, not to raise its quality. The default pick is also a compatibility trap — see D28 |
+| ffmpeg on this machine | `9.0.1-essentials` (winget) on `PATH`, under a **version-stamped** directory, with `ffprobe` alongside | Resolve with `shutil.which`, never a fixed path, and never vendor the binaries (licensing + size) |
 
 **Risk R1 (revised after testing — see §8):** fast AES depends on a *source build* (toolchain needed in
 CI/Docker) from a package last released in 2022. It builds cleanly on 3.14 today, and `pyaes` remains
@@ -47,7 +49,7 @@ the automatic fallback.
 
 | # | Topic | Decision | Rationale |
 |---|---|---|---|
-| D1 | Runtime / framework | Python **3.14**, asyncio, single process, **Kurigram 2.2.x** | Kurigram classifies 3.14 as supported and tgcrypto is verified on it, so no second interpreter is needed |
+| D1 | Runtime / framework | Python **3.14**, asyncio, single process, **Kurigram 2.2.x**, with a **C toolchain required** (MSVC Build Tools on Windows, a `gcc` stage in Docker) | Kurigram classifies 3.14 as supported, but `tgcrypto` has no wheel above cp311, so 3.14 means compiling it. Chosen over pinning 3.11 — that would only defer the compiler requirement while locking in an older runtime — because the `pyaes` fallback measured 291× slower and so is not a fallback at all |
 | D2 | Persistence | **PostgreSQL** — SQLAlchemy 2.0 async + `asyncpg` + Alembic | Enables `FOR UPDATE SKIP LOCKED` leases (FR-10.5) and atomic quota upserts (FR-3.2) |
 | D3 | Provisioning | **Bring-your-own-Postgres.** The app never knows where Postgres lives: `[db]` host/port/name/user + `SPIDEY_DB_PASSWORD` is the only coupling. Three equally documented providers — bundled binaries, compose, existing/remote | Direct run without Docker is first-class; Docker is one provider, not a dependency |
 | D4 | **No SQLite backend** | Postgres only | The queue depends on `FOR UPDATE SKIP LOCKED`; SQLite would silently change concurrency semantics and break "exactly once" (§8.2/E26) in the environment where it would go unnoticed |
@@ -73,6 +75,8 @@ the automatic fallback.
 | D24 | File transfer | Stream to a per-job temp dir, upload with progress callbacks, group ≤ `album_size` (10) per media group, flush remainder, delete the temp dir on completion | FR-8, NFR-3 |
 | D25 | Byte transfer | **We fetch the bytes ourselves** (`curl_cffi`/`aiohttp`) from the media URLs gallery-dl resolves, rather than letting gallery-dl's downloader do it | Uniform byte-level progress for FR-7, our own size accounting for the quota, and the E3 pre-download size gate operates on resolved sizes. Costs are tracked in R13 |
 | D26 | Extraction config | A committed `config/gallery-dl.json` enables `extractor.ytdl` and pins `extractor.ytdl.websites` as an allowlist, so the generic yt-dlp fallback cannot swallow URLs our native adapters should own | Enabling ytdl makes the generic extractor match *any* otherwise-unhandled URL; the allowlist keeps that from pre-empting TeraBox and the ad-gated hosts |
+| D27 | Required capabilities | `tgcrypto`, `ffmpeg` and `ffprobe` are **required capabilities**: probed at startup (a missing one is logged at ERROR), exposed by `spideybot check` (non-zero exit), and consulted by the code that needs them so a job fails with a reason rather than degrading | Starting silently is exactly what makes a 291× slowdown, or a download with no audio, hard to diagnose. Chosen over refusing to start because hosts that need neither still work |
+| D28 | Media selection | Compatibility-first: prefer H.264 + AAC in MP4, using the best available stream (AV1/Opus) only when nothing compatible exists. **Proposed — confirm at batch 3a** | YouTube's own default was AV1 video + Opus audio; Telegram playback of AV1 is inconsistent, and a file that will not play is not a successful download |
 
 ---
 
@@ -162,7 +166,7 @@ testable without a live Telegram connection.
 | TimerMedia | user-client handler on `filters.private & filters.incoming` requiring photo/video + `media_unread`, own group (FR-6.2, D14) |
 | Login flow | phone → code → optional 2FA on a pending user client; `SessionPasswordNeeded`, `PhoneCodeInvalid`, `PhoneCodeExpired`, `FloodWait` mapped to spec §7.6 copy |
 | Ban on old engines | Importing `telethon` or `cryptg` anywhere is a lint failure — they must never leak in |
-| Support modules | `python-socks[asyncio]` and `pyaes` arrive with Kurigram; `tgcrypto` only where the interpreter can build it |
+| Support modules | `python-socks[asyncio]` and `pyaes` arrive with Kurigram; `tgcrypto` is **required**, not optional (D1) |
 | Runtime plugin control | Each decorated handler exposes `func.handlers` as `(handler, group)` tuples, so `remove_handler()` can unload a plugin without a restart — the basis for a maintenance kill-switch (e.g. disabling `/bypass` during an incident) |
 | Session escape hatch | `export_session_string()` is held in reserve: it is how a session would be backed up, migrated between hosts, or moved to a DB-backed store if R11 ever bites |
 | Test-mode namespace | Live tests use `data/sessions/test/<user_id>.session`, so a test run can never clobber a real user's session |
@@ -172,7 +176,7 @@ testable without a live Telegram connection.
 | Doc page | What we adopt |
 |---|---|
 | client-settings / decreasing ban | The verbatim presets in §6 are used for user clients (D16). Two cautions from the page: **do not ship Telegram's own app credentials** (`api_id=6` / `2040` in their snippets belong to Telegram's official clients) — we keep the operator's `my.telegram.org` pair; and their `lang_code="jabka"` is a placeholder, not a real ISO 639-1 code, so we default to `en` |
-| speedups | `tgcrypto` unconditional; `uvloop` guarded and Unix-only (D17). **Ordering matters:** `uvloop.install()` must run before `asyncio.run()` *and* before any `Client` is constructed, or it silently has no effect — done in `main.py` inside `try/except ImportError` |
+| speedups | `tgcrypto` is **required** and checked at startup, because a missing accelerator is 291× slower (D1/R1); `uvloop` guarded and Unix-only (D17). **Ordering matters:** `uvloop.install()` must run before `asyncio.run()` *and* before any `Client` is constructed, or it silently has no effect — done in `main.py` inside `try/except ImportError` |
 | smart-plugins | Decorator-based registration from `handlers/` with an explicit `include` list for deterministic order (D14); per-module order can be pinned with the `"module fn3 fn1 fn2"` syntax; runtime unload via `remove_handler()` (§2.3). Overlapping filters must sit in different groups — "one handler per group, per update" is enforced by design |
 | storage-engines | Native File Storage for sessions (D7). `in_memory=True` is used for throwaway clients so the live suite leaves no session files behind; `export_session_string()` is held in reserve for backup/migration (§2.3); the `Storage` ABC is the documented extension point should files ever need encrypting |
 | scheduling | APScheduler available but not adopted; a hand-rolled scheduler keeps the injectable clock (D18) |
@@ -244,29 +248,39 @@ Design notes:
 Each phase is independently shippable with a *done when* that a command can verify. AC ids are spec §11.
 
 ### P0-prereq — DB provider (Docker-free)
-- [ ] `app/paths.py`; `spideybot db` CLI: `init | start | stop | status | migrate | reset` over
-      `postgresql-binaries`
-- [ ] Loopback-only, non-default port, `data/pgdata/` gitignored, idempotent `start`, graceful stop
+- [x] `app/paths.py`; `spideybot db` CLI: `init | start | stop | status | migrate | reset` over
+      `postgresql-binaries` — exercised: `init`, `start`, `status`, `migrate`. `reset` is implemented
+      but deliberately not exercised, since it destroys the cluster
+- [x] Loopback-only, non-default port, `data/pgdata/` gitignored, idempotent `start`, graceful stop
 - [ ] Layered test DSN resolver: `SPIDEY_TEST_DATABASE_URL` → bundled cluster → compose service
 
-**Done when:** `python -m spideybot db start` boots Postgres with Docker stopped, and the integration
-suite passes both with and without Docker.
+**Done when:** `python main.py db start` boots Postgres with Docker stopped, and the integration
+suite passes both with and without Docker. — **Half met:** the DB half is verified (Docker stopped,
+`initialised/running/ready`, migrations applied and idempotent). The integration suite arrives with
+the queue in batch 2, since there is nothing to integrate until then.
 
 ### P0 — Foundations
-- [ ] Recreate `.gitignore` **first** (`.env` is currently unignored — see §0)
-- [ ] Fresh Python 3.14 venv; `pip install "kurigram[fast]" sqlalchemy[asyncio] asyncpg alembic
-      pydantic-settings structlog cryptography curl_cffi yt-dlp gallery-dl cyberdrop-dl-patched
-      camoufox praw pytest pytest-asyncio` (tgcrypto compiles from the sdist — verified)
-- [ ] `config/default.toml`, `config/local.toml.example`, `.env.example`; confirm `git check-ignore .env`
-- [ ] `app/config.py` — 4-layer chain, `extra="forbid"` on TOML, `SecretStr`, `SecretsProvider`
-- [ ] `app/logging.py` (secret redaction), `app/models.py`, Alembic baseline
-- [ ] `data/sessions/` and `data/cookies/` created service-account-only + startup world-readable warning
-- [ ] Message catalog seeded from spec §7
-- [ ] `main.py` + `handlers/start.py` + `handlers/help.py` via smart plugins + admin guard
-- [ ] First `tests/unit` (tier table load/validation, quota math, catalog rendering, redaction,
-      typo'd TOML key fails startup)
+- [x] Recreate `.gitignore` **first** (`.env` is currently unignored — see §0)
+- [x] Fresh Python 3.14 venv via `uv`; `uv pip install -r requirements.txt`, plus `ruff`.
+      `cryptography` is absent because D9 encrypts nothing, and `camoufox` is deferred to batch 5 per
+      §12. `tgcrypto` compiles from the sdist (verified) and is now a **required** capability (D27)
+- [x] `config/default.toml`, `config/local.toml.example`, `.env.example`; `git check-ignore` confirms both
+      `.env` and `data/`
+- [x] `app/config.py` — 4-layer chain, `extra="forbid"` on TOML, `SecretStr`, `SecretsProvider`
+- [x] `app/logging.py` (secret redaction), `app/models.py`, Alembic baseline (nine tables, applied)
+- [x] `data/sessions/` and `data/cookies/` created service-account-only + startup world-readable warning
+- [ ] Message catalog seeded from spec §7 — §7.1/§7.2 (onboarding, help, usage) live in `app/catalog.py`;
+      §7.3–§7.8 land with the features that print them
+- [x] `main.py` + `handlers/start.py` + `handlers/help.py` via smart plugins + admin guard
+- [x] `app/capabilities.py` + `spideybot check`, so a missing `tgcrypto`/`ffmpeg` is never silent (D27)
+- [x] First `tests/unit`: tier limits and precedence, catalog rendering (asserting no placeholder
+      survives), redaction including the 3.14 mapping-argument path, filesystem layout, Kurigram wiring,
+      both handlers driven directly, capabilities — 109 tests
 
 **Done when:** the bot starts, migrates a fresh Postgres, answers `/start` and `/help`, `pytest tests/unit` green.
+— **Met** (batch 1), with one caveat stated rather than hidden: Telegram routing a real user's message into
+the handler was not exercised, because that needs a human to message the bot. Everything up to delivery is
+covered by tests, and the live startup proved both handlers load.
 
 ### P1 — Identity, tiers, quota gates
 - [ ] Onboarding state machine: registration, silent referral capture, first-vs-repeat `/start` (FR-1)
@@ -511,7 +525,7 @@ DB password is never embedded in a URL — the DSN is assembled at runtime from 
 
 | # | Risk | Impact | Mitigation |
 |---|---|---|---|
-| R1 | `tgcrypto` has no cp312+ wheel, so fast AES must be **compiled from the sdist** (last release 2022-11-11) | CI/Docker need a C toolchain; a future CPython could break the 2022 C | Verified working on 3.14 (MSVC `cl`/`link`, import, IGE+CTR round-trip). Multi-stage Docker: build the wheel in a `gcc` stage, copy into a slim runtime. Kurigram falls back to `pyaes`, so a failed build costs speed, not correctness. Pin and smoke-test on upgrades |
+| R1 | `tgcrypto` has no cp312+ wheel, so fast AES must be **compiled from the sdist** (last release 2022-11-11: plain hand-written C, not Cython) | Installs need a C toolchain, and a future CPython could break the 2022 C | **Compiled from source and required, not optional** — the source build is verified on 3.14 (MSVC `cl`/`link`, import, IGE+CTR round-trip) and the live connection confirms Kurigram selects it. The `pyaes` fallback is 291× slower (0.59 vs 171.4 MiB/s), so it is not a safety net. Mitigations: MSVC Build Tools on Windows, a `gcc` build stage in Docker, a **startup check** that reports a missing accelerator, and a pin plus smoke test whenever CPython moves |
 | R2 | Telegram flood limits on frequent status edits | Status errors, stalled jobs | Coalesced editor + `FloodWait` sleep/retry; the final result is always sent (FR-7.7, E8) |
 | R3 | Per-user clients are expensive (socket + crypto state each) | Memory/connection exhaustion | Live cap + idle reaping + LRU (D21); sessions live on disk, clients start on demand |
 | R4 | Third-party hosts drift or add anti-bot gates | Downloads break silently over time | Registry + layered fallback (D5); per-engine end-to-end tests; camoufox for gated hosts |
@@ -549,14 +563,16 @@ status view has no observable behaviour). P5 needs P2+P3; P6 needs P5; P7 and P8
 
 ## 10. Immediate next step
 
-Two prerequisites, then the scaffold. **Documentation only until the operator says go.**
+**Batch 1 (P0-prereq + P0) is complete and committed.** The next action is Batch 2 (P1 + P2) per §12,
+pending the operator's go. All three original prerequisites are closed:
 
-1. Recreate `.gitignore` **before anything else** — it is currently absent and `.env` is unignored.
-2. `P0-prereq`: the `spideybot db` CLI over `postgresql-binaries`, plus the layered test DSN resolver.
-3. Then the P0 scaffold list in §4.
+1. `.gitignore` recreated (batch 0) — `git check-ignore -v` now matches both `.env` and `data/`.
+2. The `spideybot db` CLI over `postgresql-binaries` brings up PostgreSQL with Docker stopped (batch 1).
+3. The P0 scaffold in §4 exists, with 100 unit tests green and `ruff` clean.
 
-A benchmark of one real upload — 3.14 with source-built `tgcrypto` vs 3.14 with `pyaes` — should be
-captured here to quantify R1, and a CI job must prove the source build stays green.
+R1's benchmark is captured in §0: 171.4 MiB/s with `tgcrypto` versus 0.59 MiB/s with `pyaes`, which is
+why the accelerator is now a hard requirement rather than a preference. Still outstanding: a CI job
+proving the `tgcrypto` source build stays green on each CPython bump.
 
 ---
 
