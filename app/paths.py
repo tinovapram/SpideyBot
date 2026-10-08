@@ -29,6 +29,9 @@ COOKIES_DIR = DATA_DIR / "cookies"
 # to delete its own session by accident.
 BOT_DIR = DATA_DIR / "bot"
 
+# Everything that holds a credential. Created 0700: see ensure_runtime_dirs().
+SECRET_DIRS = (SESSIONS_DIR, TEST_SESSIONS_DIR, COOKIES_DIR, BOT_DIR)
+
 TMP_DIR = DATA_DIR / "tmp"
 DOWNLOADS_DIR = DATA_DIR / "downloads"
 PGDATA_DIR = DATA_DIR / "pgdata"
@@ -42,7 +45,14 @@ ENV_FILE = PROJECT_ROOT / ".env"
 
 
 def ensure_runtime_dirs() -> None:
-    """Create the runtime directories. Safe to call repeatedly."""
+    """Create the runtime directories and tighten the credential ones. Safe to repeat.
+
+    The credential directories are set to 0700 because the session and cookie files
+    inside them are plaintext by design (D7-D9), which makes the filesystem the only
+    thing protecting them (R10). A default ``mkdir`` under a typical umask yields 0755 —
+    readable by every other account on the host — which is exactly what
+    :func:`insecure_secret_dirs` then reports at startup.
+    """
     for path in (
         DATA_DIR,
         SESSIONS_DIR,
@@ -53,6 +63,23 @@ def ensure_runtime_dirs() -> None:
         DOWNLOADS_DIR,
     ):
         path.mkdir(parents=True, exist_ok=True)
+
+    for path in SECRET_DIRS:
+        _restrict(path)
+
+
+def _restrict(path: Path) -> None:
+    """Remove group and other access from a credential directory.
+
+    Best effort by design: a filesystem that refuses ``chmod`` must not stop the bot from
+    starting, and :func:`insecure_secret_dirs` still reports the directory either way.
+    """
+    if os.name != "posix":
+        return
+    try:
+        path.chmod(0o700)
+    except OSError:
+        pass
 
 
 def session_path(user_id: int, *, test_mode: bool = False) -> Path:

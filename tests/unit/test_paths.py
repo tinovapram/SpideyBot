@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from app import paths
 
 
@@ -48,3 +50,34 @@ def test_runtime_directories_can_be_created_any_number_of_times() -> None:
         paths.DOWNLOADS_DIR,
     ):
         assert directory.is_dir()
+
+
+# ── permissions on the credential directories (R10) ─────────────────────
+
+
+def test_credential_directories_are_tightened(monkeypatch) -> None:
+    """Plaintext credentials lean on filesystem permissions, so 0700 is the safeguard.
+
+    Without it a default mkdir leaves them world-readable and the bot merely warns about
+    it at startup, which is what happened inside the container.
+    """
+    tightened: list[Path] = []
+    monkeypatch.setattr(paths, "_restrict", tightened.append)
+
+    paths.ensure_runtime_dirs()
+
+    assert set(tightened) == set(paths.SECRET_DIRS)
+
+
+def test_bulk_directories_are_not_treated_as_credentials() -> None:
+    """Downloads and temp files are not secrets; restricting them would be theatre."""
+    assert paths.TMP_DIR not in paths.SECRET_DIRS
+    assert paths.DOWNLOADS_DIR not in paths.SECRET_DIRS
+
+
+def test_restrict_never_raises(monkeypatch, tmp_path) -> None:
+    """A filesystem that refuses chmod must not stop the bot from starting."""
+    paths._restrict(tmp_path)  # no-op on Windows, tightens on POSIX
+
+    monkeypatch.setattr(paths.os, "name", "nt")
+    paths._restrict(tmp_path)
