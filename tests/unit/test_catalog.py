@@ -352,3 +352,91 @@ def test_cancel_refuses_someone_elses_job_without_naming_the_owner() -> None:
 def test_cancel_usage_and_invalid_id_copy_exist() -> None:
     assert "/cancel *ID*" in catalog.USAGE_CANCEL
     assert "/status" in catalog.CANCEL_INVALID_ID
+
+
+# ── failure reporting (FR-9, spec 7.7) ──────────────────────────────────
+
+
+def test_nothing_failed_is_an_empty_block() -> None:
+    """The completion message must not grow a `0 file(s) failed:` header."""
+    assert catalog.failure_block([]) == ""
+
+
+def test_failures_are_counted_then_listed() -> None:
+    block = catalog.failure_block(
+        [catalog.Failure(name="clip.mp4", reason="404"), catalog.Failure("song.mp3", "timeout")]
+    )
+
+    assert block.splitlines()[0] == "⚠️ 2 file(s) failed:"
+    assert "• clip.mp4 — 404" in block
+    assert "• song.mp3 — timeout" in block
+
+
+def test_a_failure_with_a_url_is_hyperlinked() -> None:
+    """FR-9.3: the name is linked when a source URL is known, so the user can retry it."""
+    block = catalog.failure_block(
+        [catalog.Failure(name="clip.mp4", reason="404", url="https://host/x")]
+    )
+
+    assert "• [clip.mp4](https://host/x) — 404" in block
+
+
+def test_brackets_in_a_filename_cannot_break_the_link() -> None:
+    """Filenames come from the internet, and an unescaped `]` would end the link early."""
+    block = catalog.failure_block(
+        [catalog.Failure(name="a]b[c.mp4", reason="404", url="https://host/x")]
+    )
+
+    assert "• [a\\]b\\[c.mp4](https://host/x) — 404" in block
+
+
+def test_the_list_is_capped_and_the_remainder_summarised() -> None:
+    """A share where everything fails must still produce a message Telegram accepts."""
+    failures = [catalog.Failure(name=f"file{i}.mp4", reason="404") for i in range(25)]
+
+    block = catalog.failure_block(failures, limit=10)
+
+    assert block.count("•") == 11, "ten bullets plus the remainder line"
+    assert "• …and 15 more" in block
+    assert "⚠️ 25 file(s) failed:" in block.splitlines()[0]
+
+
+def test_exactly_the_limit_failures_produce_no_remainder_line() -> None:
+    failures = [catalog.Failure(name=f"f{i}", reason="x") for i in range(10)]
+
+    block = catalog.failure_block(failures, limit=10)
+
+    assert "…and" not in block
+
+
+def test_the_zero_byte_reason_is_the_spec_wording() -> None:
+    assert catalog.EMPTY_FILE_REASON == "empty file (0 bytes)"
+
+
+# ── lifecycle copy (spec 7.3) ───────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        catalog.NO_FILES_SENT,
+        catalog.EMPTY_SHARE,
+        catalog.DOWNLOAD_CANCELLED,
+        catalog.FALLBACK_NOTICE,
+        catalog.ERROR_OCCURRED,
+        catalog.DONE_WITH_FILES,
+    ],
+)
+def test_lifecycle_copy_matches_the_spec(message: str) -> None:
+    assert message.startswith(("✅", "❌", "ℹ️", "⚠️"))
+
+
+def test_the_error_message_carries_the_reason() -> None:
+    """E1: a user sees why, not a bare 'an error occurred'."""
+    assert "boom" in catalog.ERROR_OCCURRED.format(error="boom")
+
+
+def test_the_done_message_reports_counts_and_size() -> None:
+    line = catalog.DONE_WITH_FILES.format(sent=7, total=10, size="512")
+
+    assert line == "✅ **SpideyBot: Done!** Sent 7/10 files (512 MB)."

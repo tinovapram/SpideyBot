@@ -287,3 +287,63 @@ def cancel_message(*, kind: CancelKind, job_id: int) -> str:
     if kind == "not_owned":
         return CANCEL_NOT_OWNED
     return CANCEL_UNKNOWN.format(id=job_id)
+
+
+# ── the download lifecycle (FR-3, FR-9, spec 7.3 and 7.7) ───────────────
+
+LIMIT_EXCEEDED = (
+    "⚠️ **SpideyBot: Limit Exceeded.** Total share size is `{actual} MB`, "
+    "exceeding your limit of `{limit}`."
+)
+FAILURE_HEADER = "⚠️ {count} file(s) failed:"
+FAILURE_BULLET = "• {name} — {reason}"
+FAILURE_MORE = "• …and {remaining} more"
+NO_FILES_SENT = "❌ **SpideyBot:** No files were successfully sent."
+EMPTY_SHARE = "ℹ️ **SpideyBot:** No actual files found in this share."
+ERROR_OCCURRED = "❌ **SpideyBot: An error occurred.**\nError: `{error}`"
+DOWNLOAD_CANCELLED = "❌ **SpideyBot:** Download cancelled."
+FALLBACK_NOTICE = "⚠️ **SpideyBot:** Primary download failed, trying gallery-dl"
+DONE_WITH_FILES = "✅ **SpideyBot: Done!** Sent {sent}/{total} files ({size} MB)."
+
+#: FR-9.5's exact wording, so the reason is never paraphrased differently in two places.
+EMPTY_FILE_REASON = "empty file (0 bytes)"
+
+
+@dataclass(frozen=True)
+class Failure:
+    """One file that did not make it, and why (FR-9.2)."""
+
+    name: str
+    reason: str
+    url: str | None = None
+
+
+def _escape_markdown(text: str) -> str:
+    """Filenames come from the internet, so brackets would otherwise break the link syntax."""
+    return text.replace("[", "\\[").replace("]", "\\]")
+
+
+def failure_block(failures: Sequence[Failure], *, limit: int = 10) -> str:
+    """The failure list, or an empty string when nothing failed (FR-9.3, FR-9.4).
+
+    Capped at ``limit`` bullets followed by a remainder count, so a share in which everything fails
+    still produces a message Telegram will accept rather than one it truncates.
+    """
+    if not failures:
+        return ""
+
+    lines = [FAILURE_HEADER.format(count=len(failures))]
+    for failure in failures[:limit]:
+        name = _escape_markdown(failure.name)
+        shown = f"[{name}]({failure.url})" if failure.url else name
+        lines.append(FAILURE_BULLET.format(name=shown, reason=failure.reason))
+
+    remaining = len(failures) - limit
+    if remaining > 0:
+        lines.append(FAILURE_MORE.format(remaining=remaining))
+    return "\n".join(lines)
+
+
+def limit_exceeded_message(*, actual_mb: str, limit_mb: str) -> str:
+    """The refusal AC-3 asks for: both numbers, before anything was transferred."""
+    return LIMIT_EXCEEDED.format(actual=actual_mb, limit=limit_mb)

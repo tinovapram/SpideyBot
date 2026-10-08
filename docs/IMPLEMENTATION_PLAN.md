@@ -79,6 +79,7 @@ the automatic fallback.
 | D28 | Media selection | Compatibility-first: prefer H.264 + AAC in MP4, using the best available stream (AV1/Opus) only when nothing compatible exists. **Settled 2026-10 as A+C: compatibility-first by default, with the choice exposed as `[download] video_preference = "compatible" \| "quality"`.** Chosen while the user was unavailable, on the grounds that it satisfies the spec's "use AV1/Opus only when nothing compatible exists", keeps the tier table about limits rather than quality, and is reversible by changing one config value | A file that will not play is not a successful download: AV1 in Telegram is client-dependent, while H.264/AAC in MP4 is universally playable and merges by stream copy (no transcode). Measured on the probed video: compat `299+140` = **1080p, ~255 MB**; yt-dlp's own default `401+251` = **2160p, ~689 MB**. The size is the stronger argument — the daily bandwidth cap, not the download count, is what really limits a free user (~4 downloads/day at 255 MB against ~1.5 at 689 MB), and 689 MB exceeds a free user's 500 MB link limit outright. A stream we cannot play is still delivered, as a document with the reason in the caption, rather than failed |
 | D29 | Upgrade button | `[ux] upgrade_url` is operator-supplied and empty by default; while it is unset the button is omitted rather than pointing somewhere invented | AC-1 requires the button but no destination appears anywhere in the spec. Validated at startup to be a link Telegram accepts (http/https/tg) so a typo fails immediately instead of as an API error on the first `/start`. A button-free welcome still satisfies the rest of AC-1 |
 | D30 | Resolver output | **A file to deliver is one *or more* transfers**, and sizes are all-or-nothing: a total is reported only when every stream reported one | Every YouTube format is a merge (measured: 0 of 53 carry audio), so "one file = one URL" cannot express what a job actually does — and the fetcher needs per-stream URLs to report byte progress, while the size gate needs the size of the *result* rather than of whichever stream was counted first. All-or-nothing exists because a partial sum looks precise: `None` for an unknown size must never read as `0`, or the gate waves through a download it cannot measure (E3/AC-3), while a reported `0` is a real measurement and E6 has a specific message for it |
+| D31 | Size gate on an unknown size | An unreported size **passes, flagged for enforcement during transfer** — the fetcher aborts if the running total passes the cap | Refusing would break links that would have worked, since many extractors publish no size; allowing it silently would let an oversized share through and spend the user's daily quota discovering that. Flagging keeps one rule (the limit holds) and enforces it where it can be. `limit_mb = 0` means unlimited, so there is no cap to enforce |
 
 ---
 
@@ -400,6 +401,12 @@ plan assumed, so these are requirements rather than notes (details in R13):**
 - [ ] Native adapters: TeraBox (account pool + per-user cookie), Cyberdrop family, Doodstream,
       StreamTape, MixDrop, StreamWish, Vidmonstr, Vidara, Luluvdoo, Bysejikuar, MEGA
 - [ ] Fallback chain with a visible phase change (E2, §3); pre-download size gate (E3, AC-3)
+- [x] Pre-transfer size gate (`downloader/gate.py`) and the failure block (`app/catalog.py`), both
+      pure so they can be verified before any engine call exists. AC-3's refusal is decided on what
+      resolution reported, never after transfer; the failure list is capped at 10 bullets with a
+      remainder (FR-9.3/9.4) and a filename with brackets is escaped so it cannot break the link
+      markup it appears in. An unreported size passes but is flagged for enforcement during transfer
+      (D31) — checked because `0` and `None` had already been conflated once in D30's code
 - [ ] Empty share (E4); 0-byte → `empty file (0 bytes)` (E6)
 - [ ] Album delivery ≤10, captions, reply-to-command, never deliver twice (FR-8)
 - [ ] Failure block `⚠️ N file(s) failed:` with ≤10 bullets + remainder (FR-9, E27)
