@@ -80,21 +80,39 @@ class Resolver:
 
 
 @dataclass(frozen=True)
+class DelegatingFetch:
+    """A fetch strategy that performs the transfer itself, handing back finished files (D38).
+
+    The last resort is a *program* that downloads, so it cannot join the resolver chain: it produces
+    files rather than transfers, which is why the pipeline has two strategies instead of one. The
+    cost is the pre-transfer size gate — a CLI cannot say what it is about to fetch, so the cap is
+    enforced by watching the download instead (D31's fallback), and that cost is why it runs last.
+    """
+
+    name: str
+    run: Callable[..., Awaitable[tuple[FetchedFile, ...]]]
+
+
+@dataclass(frozen=True)
 class JobProgress:
     """The fetcher's numbers, plus where this file sits in the job (FR-7.4, FR-7.5).
 
-    The fetcher knows nothing about jobs on purpose, so the counting happens here rather than
-    inside it.
+    The fetcher knows nothing about jobs on purpose, so the counting happens here rather than inside
+    it. ``index`` and ``total`` are absent for a delegated run, which reports aggregate bytes only:
+    reporting "file 1/1" for a tool that is fetching twenty files would be a worse lie than
+    reporting none.
     """
 
-    index: int
-    total: int
     filename: str
     transfer: FetchProgress
+    index: int | None = None
+    total: int | None = None
 
     @property
     def file_counter(self) -> str:
-        """``3/20``, the shape the status rows ask for."""
+        """``3/20``, the shape the status rows ask for, or empty when there is no per-file count."""
+        if self.index is None or self.total is None:
+            return ""
         return f"{self.index}/{self.total}"
 
 
@@ -209,6 +227,7 @@ async def download_link(
     *,
     limit_mb: int,
     chain: Sequence[Resolver],
+    delegate: DelegatingFetch | None = None,
     should_stop: StopCheck | None = None,
     on_phase: PhaseHook | None = None,
     on_progress: ProgressHook | None = None,
@@ -223,9 +242,12 @@ async def download_link(
     never cleaned up here, because the caller owns its lifetime — the files have to outlive this
     call to be uploaded.
 
-    ``chain`` is supplied by the caller (:mod:`downloader.registry`, once it exists) and carries its
-    own settings — cookies, the D28 preference, a TeraBox account pool. Keeping them in the chain
-    is what lets a new adapter arrive without this signature changing.
+    ``chain`` is supplied by the caller (:mod:`downloader.registry`) and carries its own settings —
+    cookies, the D28 preference, a TeraBox account pool. Keeping them in the chain is what lets an
+    adapter arrive without this signature changing.
+
+    ``delegate`` is the last resort (D38): tried once the chain has failed, and only then, because
+    it cannot be measured before it runs.
     """
     staging.mkdir(parents=True, exist_ok=True)
     stop = should_stop or (lambda: False)
@@ -234,6 +256,19 @@ async def download_link(
     try:
         resolution = await resolve_through_chain(url, chain, on_notice=on_notice)
     except ResolveError as error:
+        # E2's last resort. Its cap is the tier's, unmeasured on purpose: nobody can report the size
+        # of what a CLI is about to fetch, so the limit is enforced by watching the run (D31/D38).
+        if delegate is not None:
+            return await _delegate(
+                delegate,
+                url,
+                staging,
+                limit_mb=limit_mb,
+                should_stop=should_stop,
+                on_progress=on_progress,
+                on_notice=on_notice,
+                on_phase=on_phase,
+            )
         if error.empty:
             return LinkResult(empty_share=True, reason=str(error))
         return LinkResult(reason=str(error))
@@ -334,7 +369,56 @@ def _file_reporter(
 
     async def report(update: FetchProgress) -> None:
         await _progress(
-            hook, JobProgress(index=index, total=total, filename=item.filename, transfer=update)
+            hook,
+            JobProgress(index=index, total=total, filename=item.filename, transfer=update),
         )
 
     return report
+
+
+async def _delegate(
+    delegate: DelegatingFetch,
+    url: str,
+    staging: Path,
+    *,
+    limit_mb: int,
+    should_stop: StopCheck | None,
+    on_progress: ProgressHook | None,
+    on_notice: Notification | None,
+    on_phase: PhaseHook | None,
+) -> LinkResult:
+    """Run the last resort, and report what it produced or why it produced nothing."""
+    await _notify(on_notice, catalog.fallback_notice(delegate.name))
+    await _phase(on_phase, "downloading")
+
+    # The cap without a measurement: exactly D31's case, arrived at from the other direction.
+    verdict = gate.check_size(None, limit_mb=limit_mb)
+
+    async def report(update: FetchProgress) -> None:
+        await _progress(
+            on_progress,
+            JobProgress(filename=url, transfer=update),
+        )
+
+    try:
+        files = await delegate.run(
+            url,
+            staging,
+            limit_bytes=verdict.limit_bytes,
+            progress=report if on_progress is not None else None,
+            should_stop=should_stop,
+        )
+    except TransferCancelled:
+        return LinkResult(cancelled=True)
+    except FetchError as failure:
+        # FetchError, not ResolveError: this strategy failed while *fetching*, and its message is
+        # either the tool's own recorded reason or a plain statement that nothing arrived.
+        return LinkResult(reason=str(failure))
+
+    written = sum(item.bytes_written for item in files)
+    return LinkResult(
+        files=tuple(files),
+        engine=delegate.name,
+        bytes_written=written,
+        bytes_transferred=written,
+    )

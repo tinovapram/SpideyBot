@@ -296,11 +296,13 @@ def test_an_item_whose_stream_lost_its_url_is_dropped() -> None:
 async def test_resolve_uses_the_library_for_youtube() -> None:
     calls: list[str] = []
 
-    async def fake_ytdlp(url: str, *, timeout: float):
+    async def fake_ytdlp(url: str, *, timeout: float, cookies_file=None):
         calls.append("ytdlp")
         return YTDL_INFO
 
-    async def fake_gallerydl(url: str, *, timeout: float):  # pragma: no cover - must not run
+    async def fake_gallerydl(
+        url: str, *, timeout: float, cookies_file=None
+    ):  # pragma: no cover - must not run
         calls.append("gallerydl")
         raise AssertionError("YouTube must not go through gallery-dl")
 
@@ -316,7 +318,7 @@ async def test_resolve_uses_the_library_for_youtube() -> None:
 async def test_resolve_uses_gallery_dl_for_other_hosts() -> None:
     calls: list[str] = []
 
-    async def fake_gallerydl(url: str, *, timeout: float):
+    async def fake_gallerydl(url: str, *, timeout: float, cookies_file=None):
         calls.append("gallerydl")
         return WIKIMEDIA
 
@@ -332,7 +334,7 @@ async def test_resolve_uses_gallery_dl_for_other_hosts() -> None:
 async def test_resolve_raises_the_extractors_own_reason() -> None:
     """A user should see why, not a traceback (FR-9)."""
 
-    async def fake_gallerydl(url: str, *, timeout: float):
+    async def fake_gallerydl(url: str, *, timeout: float, cookies_file=None):
         return NOT_FOUND
 
     with pytest.raises(ResolveError) as raised:
@@ -346,7 +348,7 @@ async def test_resolve_raises_the_extractors_own_reason() -> None:
 async def test_resolve_marks_a_folder_only_share_as_empty() -> None:
     """E4 gets its own message, so the flow must be able to tell it from a failure."""
 
-    async def fake_gallerydl(url: str, *, timeout: float):
+    async def fake_gallerydl(url: str, *, timeout: float, cookies_file=None):
         return json.dumps([[2, {"category": "x", "page": "y"}]])
 
     with pytest.raises(ResolveError) as raised:
@@ -356,7 +358,7 @@ async def test_resolve_marks_a_folder_only_share_as_empty() -> None:
 
 
 async def test_resolve_reports_an_empty_resolution_for_video_links() -> None:
-    async def fake_ytdlp(url: str, *, timeout: float):
+    async def fake_ytdlp(url: str, *, timeout: float, cookies_file=None):
         return {"title": "x", "formats": []}
 
     with pytest.raises(ResolveError) as raised:
@@ -366,7 +368,7 @@ async def test_resolve_reports_an_empty_resolution_for_video_links() -> None:
 
 
 async def test_a_timeout_is_a_resolve_error_not_a_hang() -> None:
-    async def slow_ytdlp(url: str, *, timeout: float):
+    async def slow_ytdlp(url: str, *, timeout: float, cookies_file=None):
         raise ResolveError(f"the video resolver did not answer within {timeout:.0f}s")
 
     with pytest.raises(ResolveError) as raised:

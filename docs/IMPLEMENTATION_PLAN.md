@@ -39,6 +39,7 @@ Checked rather than assumed; these shape the plan.
 | YouTube format availability | probed against a real video: **0 of 49 formats are single-file** (37 video-only, 12 audio-only, highest video 2160p), and yt-dlp's default selection is the merge `401+251` (AV1 video + Opus audio) | ffmpeg is required for the YouTube feature to *exist*, not to raise its quality. The default pick is also a compatibility trap — see D28 |
 | `curl_cffi` streaming | `0.16.3`: `AsyncSession.get(stream=True, impersonate=…)` + `aiter_content()` yield incrementally, and the session is reusable after the response closes. **`chunk_size` is ignored** — it warns *"there is no way to tell curl that"* and yields whatever libcurl read | Read sizes are libcurl's, not ours, so progress is coalesced by our own byte counter rather than by asking for bigger reads. Explicit headers **do** override the impersonation profile (`Accept`, `Accept-Language`, `Referer` all arrive as sent) while the profile still supplies the browser `User-Agent` |
 | `curl_cffi` on a truncated body | a body that ends short of its `Content-Length` raises `IncompleteRead` (curl 18), it does not silently yield fewer bytes | A half-downloaded file cannot be mistaken for a whole one; the fetcher only has to discard the partial (E6/E3's integrity) |
+| `cyberdrop-dl` CLI | `10.10.0` has a `download` subcommand with `--config-file`, `--output`, `--cookies`, `--dump-json`, and `show` (its own supported-host table). **It exits 0 for an unsupported URL** and writes `unsupported.csv` / `download_errors.csv` beside its log instead. `--cache-file` and `--database-file` are rejected unless the files already exist. A minimal generated config is accepted, and `config new` prints its defaults | The last resort is a subprocess with a generated config, and its **exit code cannot be a success signal** (the same lesson as gallery-dl's exit 0 on a 404, R13): the files on disk are the evidence, and its CSVs are the reason. Generating the config per run keeps each job self-contained, and the log directory is pointed away from the download directory so its bookkeeping is never harvested as a deliverable. D38 |
 | ffmpeg on this machine | `9.0.1-essentials` (winget) on `PATH`, under a **version-stamped** directory, with `ffprobe` alongside | Resolve with `shutil.which`, never a fixed path, and never vendor the binaries (licensing + size) |
 
 **Risk R1 (revised after testing — see §8):** fast AES depends on a *source build* (toolchain needed in
@@ -88,6 +89,8 @@ the automatic fallback.
 | D35 | Byte accounting | `record_bytes(inbound=…)` is charged for the bytes **actually pulled off the network**, including a partial that was discarded, and is recorded after the fact rather than reserved up front. `download_count` is charged per job at submission, as already specified | The bandwidth cap is measured against `usage.bytes_in`, and a failed or cancelled transfer really did consume that traffic. Nothing is reserved in advance, so counting the partial cannot double-charge; and charging what the network actually moved is the only number that stays true when a host's reported size was wrong |
 | D36 | Cancellation reaches the transfer | FR-11.6 is achieved by polling `should_stop` **between chunks**, raising `TransferCancelled`. A cancelled transfer is not a failure: it is not listed in FR-9's failures, and the partial is discarded | Checking only between files would leave a cancel looking ignored for as long as the current file takes — minutes, for a large video. `TransferCancelled` subclasses `FetchError` so the existing discard paths still run, but is caught separately so a user's own cancel never appears as something that "went wrong" |
 | D37 | Filenames inside a job | A share's files are staged under `unique_name(safe_filename(title))`, numbering from `(2)` on collision; a number is spent only when the file actually lands | Two files in one share can carry the same title, and without this the second silently overwrites the first: the user is told two files were downloaded and receives one. Releasing the name on failure means a transient failure does not permanently rename the file that succeeds on the retry path |
+| D38 | The last resort delegates | cyberdrop-dl **downloads for us** rather than resolving, so the pipeline has two fetch strategies: the chain (resolve → our own transfers) and, when the chain fails, a delegating fetch that hands back finished files. It cannot sit in the chain, and it is not gated on any host list. What this costs: **the pre-transfer size gate is unavailable** — a CLI cannot say what it is about to fetch — so AC-3 is enforced by D31's running cap, measured against the bytes on disk, and the run is killed when they pass the limit. Its own CSVs (`unsupported.csv`, `download_errors.csv`) supply the failure reason, because **its exit code is 0 even for an unsupported URL** (measured) | Every other path can be measured before it runs, so every other path keeps AC-3's "refuse before a single byte moves". This one cannot, and pretending otherwise would mean either refusing links it could have served or letting a user's bandwidth cap be passed silently. Running it *last*, only after every measured method has failed, is what makes the trade acceptable: without it the choice is between an unmeasured attempt and no attempt at all. Config is generated per run and its keys are validated against the tool's own defaults in the tests, because a typo in a generated config is a silent feature loss. Logs are written outside the download directory, since the tool puts its CSVs there and they are not deliverables. V5's hand-written host list is deliberately not carried over: the tool knows its own hosts, and a copy would only go stale |
+| D39 | The chain is composed by the registry, not by the pipeline | `downloader/registry.py` owns host knowledge and builds the chain; `flow.download_link` receives it. The order is native adapter (if one exists) → yt-dlp for the video hosts it handles natively (D5) → gallery-dl → the delegate (D38). Cookie files are passed through, never looked up | The pipeline stays host-free, so adding an adapter never touches the fetcher, the gate or the copy. Per-user cookies are a caller concern (D8); a registry that read cookie files would be a second place that knows where they live |
 
 ---
 
@@ -424,14 +427,25 @@ plan assumed, so these are requirements rather than notes (details in R13):**
       share are numbered instead of overwriting each other. Mutation-checked on six properties (skip
       the gate, stop the loop on a failure, drop D31's running cap, report an empty share as a
       failure, overwrite the duplicate name, ignore cancellation) — every one fails a test
-- [ ] `downloader/registry.py`: host → resolver chain, native adapters first. `flow.download_link`
-      takes the chain as an argument, so this is the only place that knows which host needs which
-      adapter; nothing in the pipeline changes when an adapter is added
-- [ ] Engines: the gallery-dl and yt-dlp resolvers are wired (`probe.resolve`), cyberdrop-dl last is
-      not. The chain needs *per-engine* entries (a way to force gallery-dl rather than have
-      `probe.engine_for` re-route the host), which is registry work
+- [x] `downloader/registry.py`: host → chain, and the delegate. The chain is native adapter (if any) →
+      yt-dlp for the video hosts it handles natively → gallery-dl, with cyberdrop-dl supplied as a
+      *delegating* last resort (D38/D39). Asserted by *name*, because the names are what E2's notice
+      shows the user. Two deliberate absences: no copy of the tool's host list (it knows its own, and
+      a copy only goes stale), and no cookie lookup (D8: the caller resolves the file, the registry
+      passes it)
+- [ ] Engines: gallery-dl and yt-dlp are wired through `probe.resolve_gallerydl`/`resolve_ytdlp`, and
+      `--cookies` reaches both. cyberdrop-dl is wired as the delegate. Still to come: the per-engine
+      forcing that lets the *chain* pick an engine for a host rather than the router's default
+- [x] The delegated last resort (`downloader/cyberdropdl.py`, D38): a per-run generated config whose
+      keys are checked against the tool's own defaults in a test, `--dump-json` for machine-readable
+      results, its CSVs read for the failure reason, logs pointed outside the download directory, and
+      the cap enforced by watching the bytes on disk and killing the run — which is a *real* kill of
+      the child process, not a cancelled task, or the download would continue after the user was told
+      it stopped. Its exit code is ignored for success because it is 0 even for an unsupported URL
 - [ ] Native adapters: TeraBox (account pool + per-user cookie), Cyberdrop family, Doodstream,
-      StreamTape, MixDrop, StreamWish, Vidmonstr, Vidara, Luluvdoo, Bysejikuar, MEGA
+      StreamTape, MixDrop, StreamWish, Vidmonstr, Vidara, Luluvdoo, Bysejikuar, MEGA. Each is a
+      `Resolver` and slots into `ChainContext.natives`; each needs a live smoke test, which is why
+      batch 3b needs credentials for the host under test
 - [x] Fallback chain with a visible phase change (E2, §3): each new attempt emits E2's notice with
       the engine's own name (`catalog.fallback_notice`), which renders the spec's sentence verbatim
       for the gallery-dl step. The phases themselves are announced through `on_phase` (FR-7.3)
@@ -656,7 +670,8 @@ DB password is never embedded in a URL — the DSN is assembled at runtime from 
 | FR-6 TimerMedia | P6 | `handlers/timer_media.py` | AC-9 |
 | FR-7 progress/status | P4 | `telegram/status.py`; phases and per-file bytes from `downloader/flow.py` | AC-2, E7, E8 |
 | FR-8 delivery format | P3 | `telegram/delivery.py` | AC-2 |
-| FR-9 failure reporting | P3 | `downloader/flow.py` + catalog; reasons from `fetcher.py` | AC-15, E27 |
+| FR-9 failure reporting | P3 | `downloader/flow.py` + catalog; reasons from `fetcher.py` and cyberdrop-dl's CSVs | AC-15, E27 |
+| FR-14 settings menu | P7 | `handlers/setting.py`; the cookie file reaches both engines via `downloader/registry.py` | AC-12 |
 | FR-10 queue & concurrency | P2 | `app/queue.py` | AC-4 |
 | FR-11 cancellation | P2 | `handlers/cancel.py` | AC-5 |
 | FR-12 `/status` | P2 | `handlers/job_status.py` | AC-6 |
@@ -726,8 +741,9 @@ rather than the order the plan lists:
 | 3c — pre-transfer size gate + failure block (D31) | ✅ committed |
 | 3d — **the fetcher** (D32, D33) | ✅ committed; `downloader/fetcher.py` verified against a loopback HTTP server and real ffmpeg |
 | 3e — **`downloader/flow.py`** (D34–D37) | ✅ committed; the chain, the gate, the download loop and the outcome vocabulary, all driven in tests with fake resolvers and a real server |
-| 3f — `downloader/registry.py` + native adapters | **next**: host → chain, TeraBox account pool, the Cyberdrop family, the ad-gated hosts, `cyberdrop-dl` last |
-| 3g — the worker handler + `telegram/delivery.py` | then albums ≤10, captions, reply-to-command, the DB bookkeeping (`files_sent`, `record_bytes`), and AC-2/AC-3/AC-15 against a real link |
+| 3f — **`downloader/registry.py` + the delegated last resort** (D38, D39) | ✅ committed; the chain per host, cookie plumbing to both engines, and cyberdrop-dl as a watched delegating fetch |
+| 3g — native adapters | **next**: TeraBox (account pool + per-user cookie), the Cyberdrop family, the ad-gated hosts. Each is a `Resolver` in `ChainContext.natives`; each needs credentials for a live smoke test |
+| 3h — the worker handler + `telegram/delivery.py` | then albums ≤10, captions, reply-to-command, the DB bookkeeping (`files_sent`, `record_bytes`), and AC-2/AC-3/AC-15 against a real link |
 
 Nothing in the pipeline is wired into the worker pool yet, and deliberately so: with no job handler, a
 started pool would claim real jobs and fail them. `app/workers.py`, `app/scheduler.py` and

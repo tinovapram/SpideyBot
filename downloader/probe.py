@@ -27,6 +27,7 @@ import json
 import logging
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
 
@@ -74,27 +75,41 @@ def engine_for(url: str) -> Engine:
 
     Deliberately a plain host check: it decides *resolution*, and the native per-host adapters
     (TeraBox, the Cyberdrop family, the ad-gated hosts) are a separate concern that
-    ``downloader.registry`` will own.
+    ``downloader.registry`` owns.
     """
-    host = _host_of(url)
-    return "ytdlp" if any(marker in host for marker in YOUTUBE_HOSTS) else "gallerydl"
+    return "ytdlp" if is_video_host(url) else "gallerydl"
 
 
-def gallerydl_command(url: str, *, executable: str = GALLERYDL_EXECUTABLE) -> list[str]:
+def host_of(url: str) -> str:
+    """The lower-cased host, without ``www.``, so a rule never has to name both spellings."""
+    return _host_of(url).removeprefix("www.")
+
+
+def is_video_host(url: str) -> bool:
+    """Whether the yt-dlp library resolves this host directly (D5)."""
+    host = host_of(url)
+    return any(host == marker or host.endswith("." + marker) for marker in YOUTUBE_HOSTS)
+
+
+def gallerydl_command(
+    url: str,
+    *,
+    executable: str = GALLERYDL_EXECUTABLE,
+    cookies_file: Path | None = None,
+) -> list[str]:
     """The gallery-dl invocation, as a list so nothing is interpolated through a shell.
 
     ``--simulate`` is the flag every probe behind this module was validated with, and it is what
     guarantees resolution cannot write files. ``-o`` carries the ytdl enablement rather than a
     config file, so the behaviour cannot depend on the operator's own gallery-dl setup.
+
+    ``--cookies`` is how a user's own cookie file reaches a host that needs one (D8, FR-14). It is
+    passed only when the caller resolved a file, because gallery-dl fails on a path that is absent.
     """
-    return [
-        executable,
-        "-j",
-        "--simulate",
-        "-o",
-        YTDL_EXTRACTOR_FLAG,
-        url,
-    ]
+    command = [executable, "-j", "--simulate", "-o", YTDL_EXTRACTOR_FLAG]
+    if cookies_file is not None:
+        command += ["--cookies", str(cookies_file)]
+    return [*command, url]
 
 
 def _host_of(url: str) -> str:
@@ -313,6 +328,7 @@ async def _run_gallerydl(
     *,
     timeout: float = DEFAULT_RESOLVE_TIMEOUT,
     executable: str = GALLERYDL_EXECUTABLE,
+    cookies_file: Path | None = None,
 ) -> str:
     """Run gallery-dl and return stdout. Raises :class:`ResolveError` only for *process* failures.
 
@@ -321,7 +337,7 @@ async def _run_gallerydl(
     :func:`parse_gallerydl`, which reads what actually happened.
     """
     process = await asyncio.create_subprocess_exec(
-        *gallerydl_command(url, executable=executable),
+        *gallerydl_command(url, executable=executable, cookies_file=cookies_file),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -342,6 +358,7 @@ async def _run_ytdlp(
     url: str,
     *,
     timeout: float = DEFAULT_RESOLVE_TIMEOUT,
+    cookies_file: Path | None = None,
 ) -> Mapping[str, Any]:
     """Resolve through the yt-dlp library, off the event loop.
 
@@ -354,6 +371,8 @@ async def _run_ytdlp(
 
     def extract() -> Mapping[str, Any]:
         options: dict[str, Any] = {"quiet": True, "no_warnings": True, "skip_download": True}
+        if cookies_file is not None:
+            options["cookiefile"] = str(cookies_file)
         with yt_dlp.YoutubeDL(options) as downloader:
             info = downloader.extract_info(url, download=False)
         if not isinstance(info, Mapping):
@@ -370,6 +389,47 @@ async def _run_ytdlp(
         raise ResolveError(str(error).strip() or "the video resolver failed") from error
 
 
+async def resolve_gallerydl(
+    url: str,
+    *,
+    preference: Preference = "compatible",
+    timeout: float = DEFAULT_RESOLVE_TIMEOUT,
+    cookies_file: Path | None = None,
+    run: GallerydlRunner | None = None,
+) -> Resolution:
+    """Resolve through gallery-dl alone.
+
+    Separate from :func:`resolve` because the chain (D6) needs to try engines in a chosen order,
+    where the router can only pick one from the host. An empty resolution means "this engine found
+    no media"; a :class:`ResolveError` means the attempt failed — the distinction E4 and E2 need.
+    """
+    runner = run or _run_gallerydl
+    stdout = await runner(url, timeout=timeout, cookies_file=cookies_file)
+    parsed = parse_gallerydl(stdout, preference=preference, source_url=url)
+    if not parsed.files:
+        raise ResolveError(parsed.reason or "nothing downloadable at that link", empty=parsed.empty)
+    log.debug("resolved %s via gallery-dl: %d file(s)", url, len(parsed.files))
+    return Resolution(engine="gallerydl", source_url=url, files=parsed.files)
+
+
+async def resolve_ytdlp(
+    url: str,
+    *,
+    preference: Preference = "compatible",
+    timeout: float = DEFAULT_RESOLVE_TIMEOUT,
+    cookies_file: Path | None = None,
+    run: YtdlpRunner | None = None,
+) -> Resolution:
+    """Resolve through the yt-dlp library alone (D5's native route for video hosts)."""
+    runner = run or _run_ytdlp
+    info = await runner(url, timeout=timeout, cookies_file=cookies_file)
+    files = files_from_ytdlp(info, preference=preference, source_url=url)
+    if not files:
+        raise ResolveError("the video resolver found nothing downloadable", empty=True)
+    log.debug("resolved %s via yt-dlp: %d file(s)", url, len(files))
+    return Resolution(engine="ytdlp", source_url=url, files=tuple(files))
+
+
 async def resolve(
     url: str,
     *,
@@ -378,25 +438,13 @@ async def resolve(
     run_gallerydl: GallerydlRunner | None = None,
     run_ytdlp: YtdlpRunner | None = None,
 ) -> Resolution:
-    """Resolve one link into the transfers that will produce the user's files.
+    """Resolve one link with whichever engine its host calls for.
+
+    The by-host router, kept for callers that have no chain to run; :mod:`downloader.registry`
+    builds chains out of :func:`resolve_gallerydl` and :func:`resolve_ytdlp` instead.
 
     Raises :class:`ResolveError` when nothing fetchable came back, carrying a reason worth showing.
     """
-    engine = engine_for(url)
-
-    if engine == "ytdlp":
-        runner = run_ytdlp or _run_ytdlp
-        info = await runner(url, timeout=timeout)
-        files = files_from_ytdlp(info, preference=preference, source_url=url)
-        if not files:
-            raise ResolveError("the video resolver found nothing downloadable", empty=True)
-        log.debug("resolved %s via yt-dlp: %d file(s)", url, len(files))
-        return Resolution(engine=engine, source_url=url, files=tuple(files))
-
-    gallery = run_gallerydl or _run_gallerydl
-    stdout = await gallery(url, timeout=timeout)
-    parsed = parse_gallerydl(stdout, preference=preference, source_url=url)
-    if not parsed.files:
-        raise ResolveError(parsed.reason or "nothing downloadable at that link", empty=parsed.empty)
-    log.debug("resolved %s via gallery-dl: %d file(s)", url, len(parsed.files))
-    return Resolution(engine=engine, source_url=url, files=parsed.files)
+    if engine_for(url) == "ytdlp":
+        return await resolve_ytdlp(url, preference=preference, timeout=timeout, run=run_ytdlp)
+    return await resolve_gallerydl(url, preference=preference, timeout=timeout, run=run_gallerydl)

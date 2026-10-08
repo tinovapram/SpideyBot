@@ -10,13 +10,20 @@ really is the transport: which files land on disk, and what happens to the ones 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from curl_cffi import requests
 
 from app import catalog
 from downloader import flow
 from downloader.contracts import Resolution, ResolvedFile, ResolveError, Transfer
-from downloader.fetcher import PROGRESS_STEP_BYTES
+from downloader.fetcher import (
+    PROGRESS_STEP_BYTES,
+    FetchedFile,
+    FetchError,
+    FetchProgress,
+    TransferCancelled,
+)
 from downloader.gate import SizeCheck
 from tests.fakes.server import FixtureServer, url
 
@@ -542,3 +549,211 @@ async def test_the_staging_directory_is_created_if_missing(
     )
 
     assert result.files[0].path.parent == nested
+
+
+# ── the last resort (D38) ────────────────────────────────────────────────
+
+
+class FakeDelegate:
+    """A delegating fetch that reports what it was asked to do."""
+
+    def __init__(
+        self,
+        *,
+        files: tuple[FetchedFile, ...] = (),
+        raises: Exception | None = None,
+    ) -> None:
+        self.name = "cyberdrop-dl"
+        self.files = files
+        self.raises = raises
+        self.calls: list[dict[str, Any]] = []
+
+    async def run(self, url: str, staging: Path, **kwargs: Any) -> tuple[FetchedFile, ...]:
+        self.calls.append({"url": url, "staging": staging, **kwargs})
+        if self.raises is not None:
+            raise self.raises
+        return self.files
+
+
+def delivered(name: str, size: int) -> FetchedFile:
+    return FetchedFile(
+        path=Path("/tmp") / name, media_kind="document", bytes_written=size, note="cyberdrop-dl"
+    )
+
+
+async def test_the_last_resort_runs_only_after_the_chain_fails(staging: Path) -> None:
+    delegate = FakeDelegate(files=(delivered("a.bin", 100),))
+
+    result = await flow.download_link(
+        "https://example.test/x",
+        staging,
+        limit_mb=500,
+        chain=(resolver("gallery-dl", ResolveError("the extractor failed")),),
+        delegate=delegate,
+    )
+
+    assert [item.path.name for item in result.files] == ["a.bin"]
+    assert result.engine == "cyberdrop-dl"
+    assert result.bytes_written == 100
+    assert result.bytes_transferred == 100
+    assert delegate.calls[0]["url"] == "https://example.test/x"
+
+
+async def test_a_folder_only_share_still_reaches_the_last_resort(staging: Path) -> None:
+    """E4 is not a reason to skip it: a share with no media is exactly what it may still handle."""
+    delegate = FakeDelegate(files=(delivered("a.bin", 10),))
+
+    result = await flow.download_link(
+        "https://example.test/x",
+        staging,
+        limit_mb=500,
+        chain=(resolver("gallery-dl", ResolveError("nothing here", empty=True)),),
+        delegate=delegate,
+    )
+
+    assert delegate.calls != []
+    assert result.engine == "cyberdrop-dl"
+    assert result.empty_share is False
+
+
+async def test_without_a_last_resort_an_empty_share_stays_an_empty_share(staging: Path) -> None:
+    result = await flow.download_link(
+        "https://example.test/x",
+        staging,
+        limit_mb=500,
+        chain=(resolver("gallery-dl", ResolveError("nothing here", empty=True)),),
+    )
+
+    assert result.empty_share is True
+    assert result.files == ()
+
+
+async def test_the_last_resort_is_not_tried_after_success(
+    server: FixtureServer, staging: Path
+) -> None:
+    """It is expensive and unmeasured, so a working chain must never reach it."""
+    delegate = FakeDelegate(files=(delivered("a.bin", 100),))
+
+    result = await flow.download_link(
+        "https://example.test/x",
+        staging,
+        limit_mb=500,
+        chain=(resolver("gallery-dl", found(served(server, "a.bin", b"abc"))),),
+        delegate=delegate,
+    )
+
+    assert delegate.calls == []
+    assert result.engine == "gallerydl"
+
+
+async def test_the_last_resort_is_announced_with_its_own_name(staging: Path) -> None:
+    """E2's notice, and the user is told *which* engine is being tried."""
+    notices: list[str] = []
+
+    await flow.download_link(
+        "https://example.test/x",
+        staging,
+        limit_mb=500,
+        chain=(resolver("gallery-dl", ResolveError("nope")),),
+        delegate=FakeDelegate(),
+        on_notice=notices.append,
+    )
+
+    assert notices == ["⚠️ **SpideyBot:** Primary download failed, trying cyberdrop-dl"]
+
+
+async def test_the_last_resort_gets_the_tier_cap_not_a_resolved_size(staging: Path) -> None:
+    """D38: nothing could be measured, so the cap is passed as D31's running limit instead."""
+    delegate = FakeDelegate()
+
+    await flow.download_link(
+        "https://example.test/x",
+        staging,
+        limit_mb=2,
+        chain=(resolver("gallery-dl", ResolveError("nope")),),
+        delegate=delegate,
+    )
+
+    assert delegate.calls[0]["limit_bytes"] == 2 * MB
+
+
+async def test_an_unlimited_tier_passes_no_cap_to_the_last_resort(staging: Path) -> None:
+    delegate = FakeDelegate()
+
+    await flow.download_link(
+        "https://example.test/x",
+        staging,
+        limit_mb=0,
+        chain=(resolver("gallery-dl", ResolveError("nope")),),
+        delegate=delegate,
+    )
+
+    assert delegate.calls[0]["limit_bytes"] is None
+
+
+async def test_a_failing_last_resort_reports_its_own_reason(staging: Path) -> None:
+    """E2's reason, from the tool itself when it recorded one."""
+    delegate = FakeDelegate(raises=FetchError("Unsupported URL: https://example.test/x"))
+
+    result = await flow.download_link(
+        "https://example.test/x",
+        staging,
+        limit_mb=500,
+        chain=(resolver("gallery-dl", ResolveError("nope")),),
+        delegate=delegate,
+    )
+
+    assert result.reason == "Unsupported URL: https://example.test/x"
+    assert result.files == ()
+    assert result.stopped_early is True
+
+
+async def test_a_cancelled_last_resort_is_a_cancellation_not_a_failure(staging: Path) -> None:
+    delegate = FakeDelegate(raises=TransferCancelled())
+
+    result = await flow.download_link(
+        "https://example.test/x",
+        staging,
+        limit_mb=500,
+        chain=(resolver("gallery-dl", ResolveError("nope")),),
+        delegate=delegate,
+    )
+
+    assert result.cancelled is True
+    assert result.reason is None
+
+
+async def test_the_last_resort_reports_bytes_without_a_file_count(staging: Path) -> None:
+    """FR-7.5 wants a per-file counter, but a delegating tool reports none, so none is invented."""
+    seen: list[flow.JobProgress] = []
+
+    async def progress(update: flow.JobProgress) -> None:
+        seen.append(update)
+
+    async def run(url: str, staging: Path, *, progress: Any, **_: Any) -> tuple[FetchedFile, ...]:
+        await progress(
+            FetchProgress(
+                url=url,
+                role="file",
+                transfer_done=512,
+                transfer_total=None,
+                overall_done=512,
+                overall_total=None,
+            )
+        )
+        return (delivered("a.bin", 512),)
+
+    delegate = flow.DelegatingFetch(name="cyberdrop-dl", run=run)
+
+    await flow.download_link(
+        "https://example.test/x",
+        staging,
+        limit_mb=500,
+        chain=(resolver("gallery-dl", ResolveError("nope")),),
+        delegate=delegate,
+        on_progress=progress,
+    )
+
+    assert seen[-1].transfer.transfer_done == 512
+    assert seen[-1].index is None and seen[-1].total is None
+    assert seen[-1].file_counter == ""
