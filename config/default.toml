@@ -1,0 +1,87 @@
+# SpideyBot configuration.
+#
+# This file is committed: it is the functional spec's section 13 contract as
+# reviewable data. Precedence, lowest to highest:
+#
+#     these defaults  ->  config/local.toml  ->  environment / .env
+#
+# Secrets never belong here — they come from the environment (see .env.example).
+# An unknown key is a startup error, so a typo cannot silently fall back to a
+# default. Directory layout is NOT configured here; app/paths.py owns it.
+
+[tier.free]
+link_total_mb = 500          # 0 means unlimited
+daily_downloads = 10
+daily_mb = 1024
+concurrent = 1
+priority = 2.0
+
+[tier.pro]
+link_total_mb = 10240
+daily_downloads = 50
+daily_mb = 25600
+concurrent = 2
+priority = 1.0
+
+[tier.premium]
+link_total_mb = 0            # unlimited
+daily_downloads = 200
+daily_mb = 102400
+concurrent = 3
+priority = 0.5
+
+[admin]
+priority = 0.2               # ahead of every tier
+
+# Client identity. This is what a user sees in their own Active Sessions, so it
+# is an account-safety setting rather than cosmetics (plan D16). Values are taken
+# from the Kurigram docs; their lang_code is a placeholder, so use a real ISO
+# 639-1 code here.
+[client]
+profile = "desktop"          # desktop | android | custom
+
+[client.desktop]
+device_model = "Desktop"
+system_version = "Windows 11 x64"
+app_version = "6.0.2 x64"
+lang_pack = "tdesktop"
+lang_code = "en"
+platform = "DESKTOP"
+
+[client.android]
+device_model = "Samsung SM-S931B"   # device MODEL, not the marketing name
+system_version = "15 (35)"
+app_version = "11.13.2 (60601)"
+lang_pack = "android"
+lang_code = "en"
+platform = "ANDROID"
+
+[ux]
+album_size = 10              # files per delivered media group
+failure_list_limit = 10      # failures listed before summarising the rest
+render_interval = 3.0        # min seconds between status content edits
+anim_interval = 1.2          # min seconds between liveness-only edits
+default_magic_word = "WOW"
+timer_media_default = true
+
+[referral]
+daily_bonus = 10             # extra downloads/day per credited invite
+bonus_days = 30              # validity of each credit
+
+[runtime]
+max_concurrent_downloads = 20
+job_lease_seconds = 300
+job_max_attempts = 3
+rate_limit_per_minute = 20
+session_max_live = 50        # live user clients before LRU eviction
+session_idle_seconds = 900
+
+[db]
+host = "127.0.0.1"
+port = 55432                 # non-default, so a real Postgres can coexist
+name = "spideybot"
+user = "spideybot"
+# The password is a secret: SPIDEY_DB_PASSWORD
+
+[download]
+retention_days = 14          # how long finished job history is kept

@@ -1,0 +1,43 @@
+# SpideyBot runtime dependencies.
+#
+# Core set only. The /bypass feature additionally needs camoufox (which pins its
+# own Playwright); that is deliberately installed later, as it pulls 100 MB+ of
+# browser binaries that nothing else uses.
+
+# ── Telegram ────────────────────────────────────────────────────────
+# Kurigram is a Pyrogram fork; the import name is still `pyrogram`.
+# [fast] adds tgcrypto, whose sdist must be compiled (see README / plan R1);
+# Kurigram silently falls back to pure-Python pyaes if it is unavailable.
+kurigram[fast]>=2.2.26
+
+# ── Configuration ───────────────────────────────────────────────────
+pydantic-settings>=2.7
+structlog>=24.1
+
+# ── Database (PostgreSQL, async) ────────────────────────────────────
+SQLAlchemy[asyncio]>=2.0
+asyncpg>=0.29
+alembic>=1.13
+# Bundles a PostgreSQL distribution so the bot runs with no Docker and no
+# installer. The wheel is py3-none-win_amd64 / py3-none-manylinux, i.e.
+# Python-version agnostic.
+postgresql-binaries>=18.6
+
+# ── HTTP ────────────────────────────────────────────────────────────
+curl_cffi>=0.7
+
+# ── Media extractors ────────────────────────────────────────────────
+yt-dlp>=2025.1.1
+gallery-dl>=1.29
+cyberdrop-dl-patched>=10.0
+
+# ── Reddit ──────────────────────────────────────────────────────────
+praw>=7.7
+
+# ── Testing ─────────────────────────────────────────────────────────
+pytest>=8.0
+pytest-asyncio>=0.24
+
+# ── Linting ─────────────────────────────────────────────────────────
+# Configured in pyproject.toml under [tool.ruff].
+ruff>=0.16
