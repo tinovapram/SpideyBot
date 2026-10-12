@@ -14,6 +14,7 @@ from pyrogram.types import Message
 
 from app import catalog, queue, users
 from app.db import session as db_session
+from handlers import login
 
 
 def cancel_argument(message: Message) -> str | None:
@@ -29,6 +30,14 @@ def cancel_argument(message: Message) -> str | None:
 async def cancel_command(client: Client, message: Message) -> None:
     sender = message.from_user
     if sender is None:
+        return
+
+    # A login in progress owns /cancel (FR-13.8): the spec lets a user abort at any step, and the
+    # argument-less form is exactly what they will reach for. Checked before anything else so the
+    # two handlers cannot both answer the same message.
+    flow = login.get_flow()
+    if flow.in_progress(sender.id):
+        await message.reply_text(await flow.cancel(sender.id))
         return
 
     raw = cancel_argument(message)

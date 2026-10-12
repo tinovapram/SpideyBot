@@ -46,11 +46,14 @@ def final_message(outcome: LinkResult, *, total: int) -> JobDialogue:
         return JobDialogue(body=catalog.DOWNLOAD_CANCELLED, delivered=0, failed=failed)
 
     if outcome.empty_share:
-        return JobDialogue(body=catalog.EMPTY_SHARE, delivered=0, failed=0)
+        # E4 with a source's own sentence when it has one (Telegram says *which* range was empty).
+        return JobDialogue(body=outcome.summary or catalog.EMPTY_SHARE, delivered=0, failed=0)
 
     if delivered == 0:
         reason = outcome.reason or catalog.NO_FILES_SENT
-        body = catalog.ERROR_OCCURRED.format(error=reason)
+        # A source that speaks for itself (Telegram: FR-4.5/4.6) already wrote the sentence, and
+        # wrapping it in the generic error template would make a refusal look like a crash.
+        body = outcome.summary or catalog.ERROR_OCCURRED.format(error=reason)
         return JobDialogue(
             body=f"{block}\n{body}" if block else body, delivered=0, failed=failed
         )
@@ -58,6 +61,8 @@ def final_message(outcome: LinkResult, *, total: int) -> JobDialogue:
     body = catalog.DONE_WITH_FILES.format(
         sent=delivered, total=max(total, delivered), size=_mb(outcome.bytes_written)
     )
+    if outcome.summary:
+        body = f"{body}\n{outcome.summary}"
     return JobDialogue(
         body=f"{body}\n{block}" if block else body, delivered=delivered, failed=failed
     )

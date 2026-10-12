@@ -156,6 +156,10 @@ class FetchedFile:
     note: str | None = None
     #: True when this file came out of ffmpeg rather than being a straight download.
     merged: bool = False
+    #: The caption the file was *posted* with, when the source knows one. Only Telegram does
+    #: (FR-4.4 asks for it to be preserved on re-send); everything else leaves this empty and is
+    #: captioned from its link.
+    caption: str | None = None
 
 
 def headers_for(url: str) -> dict[str, str]:

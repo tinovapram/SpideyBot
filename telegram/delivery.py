@@ -251,11 +251,15 @@ def _ids(message: Any) -> tuple[int, ...]:
 
 
 def default_caption(file: FetchedFile) -> str | None:
-    """The caption when the caller has nothing better: the source link, when there is one.
+    """The caption when the caller has nothing better.
 
-    FR-8.3 asks for the source link "where useful", and a file with no link is a file whose origin
-    the user already knows — it is the command they just sent.
+    A file that was posted with its own caption keeps it — that is FR-4.4's rule for a Telegram
+    re-send, and the caption is usually the only context the media has. Otherwise FR-8.3's source
+    link, "where useful": a file with no link is a file whose origin the user already knows, since
+    it is the command they just sent.
     """
+    if file.caption:
+        return file.caption
     if not file.source_url:
         return file.note
     return catalog.SOURCE_CAPTION.format(source=file.source_url)

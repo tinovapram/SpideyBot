@@ -8,11 +8,18 @@ has already happened is what selects the copy. Referral capture is silent by req
 
 from __future__ import annotations
 
+import logging
+
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from app import catalog, config, paths, referral, users
+from app import catalog, config, referral, users
+from app.config import Settings
 from app.db import session as db_session
+from telegram import sessions
+from telegram.sessions import SessionError
+
+log = logging.getLogger(__name__)
 
 
 def upgrade_keyboard(url: str) -> InlineKeyboardMarkup | None:
@@ -58,7 +65,11 @@ async def start_command(client: Client, message: Message) -> None:
 
         tier = users.tier_for(settings, user)
         first_visit = await users.mark_onboarded(db, user)
-        has_session = paths.session_file(sender.id, test_mode=settings.test_mode).exists()
+
+    # §8.3's middle arrow: a stored session is reconnected on /start, so the badge a user reads here
+    # is the real one. Reconnecting is best-effort — a session Telegram has revoked must not stop
+    # /start from answering, it must just be reported as gone (the pool deletes it in that case).
+    has_session, is_live = await _session_state(sender.id, settings)
 
     if first_visit:
         await message.reply_text(
@@ -67,8 +78,7 @@ async def start_command(client: Client, message: Message) -> None:
                 tier,
                 magic_word=settings.ux.default_magic_word,
                 has_session=has_session,
-                # There is no session manager yet, so a stored file can never be live.
-                is_live=False,
+                is_live=is_live,
             ),
             reply_markup=upgrade_keyboard(settings.ux.upgrade_url),
         )
@@ -77,5 +87,27 @@ async def start_command(client: Client, message: Message) -> None:
     # AC-1: an onboarded user gets the short notice rather than the welcome. No Upgrade
     # button, because the notice is meant to stay brief.
     await message.reply_text(
-        catalog.already_started_message(has_session=has_session, is_live=False)
+        catalog.already_started_message(has_session=has_session, is_live=is_live)
     )
+
+
+async def _session_state(user_id: int, settings: Settings) -> tuple[bool, bool]:
+    """``(has_session, is_live)`` for the badge, reconnecting a stored session on the way.
+
+    FR-1.5 asks the onboarding copy to *say* whether the session is live, which is only answerable
+    by trying: a file on disk says nothing about whether Telegram still accepts the key. So a stored
+    session is connected here, and the two failures that matter are both ordinary outcomes — a
+    session that cannot be reached (reported as saved-but-not-running) and one Telegram has revoked
+    (reported as absent, because the pool has already deleted the file).
+    """
+    pool = sessions.get_pool(settings)
+    has_session = pool.has_session(user_id)
+    if not has_session:
+        return False, False
+
+    try:
+        await pool.get(user_id)
+    except SessionError as refused:
+        log.info("a stored session did not come back on /start: %s", refused.reason)
+        return refused.expired is False and pool.has_session(user_id), False
+    return True, True

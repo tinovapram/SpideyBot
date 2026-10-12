@@ -82,14 +82,20 @@ def _restrict(path: Path) -> None:
         pass
 
 
-def session_path(user_id: int, *, test_mode: bool = False) -> Path:
-    """Session file path *without* the ``.session`` suffix, which Kurigram appends.
+def sessions_dir(*, test_mode: bool = False) -> Path:
+    """The directory session files live in.
 
-    Live-test sessions live in their own directory, so a test run can never
-    clobber a real user's session.
+    The client is constructed with ``workdir=<this>`` and ``name=<user_id>``, and every existence
+    check goes through :func:`session_file` — both derive from here, so the file the library writes
+    is the file the badge looks for. Live-test sessions live in their own directory, so a test run
+    can never clobber a real user's session.
     """
-    directory = TEST_SESSIONS_DIR if test_mode else SESSIONS_DIR
-    return directory / str(user_id)
+    return TEST_SESSIONS_DIR if test_mode else SESSIONS_DIR
+
+
+def session_path(user_id: int, *, test_mode: bool = False) -> Path:
+    """Session file path *without* the ``.session`` suffix, which Kurigram appends."""
+    return sessions_dir(test_mode=test_mode) / str(user_id)
 
 
 def cookie_path(user_id: int) -> Path:

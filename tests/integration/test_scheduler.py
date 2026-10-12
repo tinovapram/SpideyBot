@@ -240,3 +240,59 @@ async def test_retention_only_runs_when_it_is_due(clean, settings) -> None:
     assert second.pruned_jobs == (), "an hour has not passed, so retention is not due"
     async with db.session() as session:
         assert await session.get(Job, recent) is not None
+
+# ── live sessions are reaped, not forgotten (D21, R3) ───────────────────
+
+
+class _FakeUserClient:
+    """The parts of a user client the pool touches."""
+
+    def __init__(self) -> None:
+        self.is_connected = False
+        self.is_initialized = False
+        self.stopped = False
+
+    async def connect(self) -> bool:
+        self.is_connected = True
+        return True
+
+    async def get_me(self) -> str:
+        return "user"
+
+    async def initialize(self) -> None:
+        self.is_initialized = True
+
+    async def stop(self) -> None:
+        self.stopped = True
+        self.is_connected = False
+
+
+async def test_a_housekeeping_pass_closes_an_idle_session(clean, settings, monkeypatch, tmp_path):
+    """The scheduler is where reaping lives, so this is the seam that has to hold.
+
+    Reaping is not a deletion: the session file stays, which is what makes the user's next
+    request reconnect instead of asking for a code again (D7).
+    """
+    from telegram import sessions
+
+    directory = tmp_path / "sessions"
+    directory.mkdir()
+    monkeypatch.setattr(paths, "SESSIONS_DIR", directory)
+    monkeypatch.setattr(paths, "TEST_SESSIONS_DIR", directory / "test")
+    directory.joinpath("7.session").write_bytes(b"sqlite")
+
+    client = _FakeUserClient()
+    clock = [0.0]
+    pool = sessions.SessionPool(
+        settings, factory=lambda _: client, clock=lambda: clock[0]
+    )
+    await pool.get(7)
+    assert pool.is_live(7)
+
+    clock[0] = settings.runtime.session_idle_seconds + 1
+    housekeeping = await scheduler.Scheduler(settings, sessions_pool=pool).tick()
+
+    assert housekeeping.reaped_sessions == (7,)
+    assert client.stopped, "the socket is closed"
+    assert directory.joinpath("7.session").exists(), "the login survives the reaping"
+    assert pool.live_count == 0

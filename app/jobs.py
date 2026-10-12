@@ -40,15 +40,19 @@ from app import catalog, paths, quota, tiers, workers
 from app import db as db_module
 from app.config import Settings
 from app.models import Job, JobItem
-from downloader import flow, registry
+from downloader import fetcher, flow, registry
 from downloader.fetcher import FetchedFile
-from telegram import delivery, status
+from telegram import delivery, links, media, status
+from telegram.sessions import SessionError, get_pool
 
 log = logging.getLogger(__name__)
 
 #: What a job's own reserve is released to when nothing was delivered (FR-3.2).
 DELIVERED = "uploaded"
 FAILED = "failed"
+
+#: The name a Telegram job's files are attributed to, for the log line and the status rows.
+TELEGRAM_ENGINE = "telegram"
 
 def build_handler(
     settings: Settings,
@@ -88,18 +92,35 @@ def build_handler(
             ),
         )
 
-        log.info("Starting download_link for job %s", job.id)
-        outcome = await flow.download_link(
-            job.link,
-            paths.job_tmp_dir(job.id),
-            limit_mb=limits.link_total_mb,
-            chain=chain_for(job.link, context),
-            delegate=delegate_for(context),
-            should_stop=lambda: keeper.stop_requested,
-            on_phase=_phase_hook(status_renderer),
-            on_progress=status_renderer.progress,
-            on_notice=status_renderer.notice,
-        )
+        target = _telegram_target(job.link)
+        if target is not None:
+            # FR-4: a Telegram link is fetched with the *user's* own session, because the media
+            # lives behind their account. Everything after this point is the same as any other job —
+            # the ledger, the albums, the caption and the final message do not care where the bytes
+            # came from, which is why the two paths meet again in ``LinkResult``.
+            log.info("job %s: Telegram source", job.id)
+            outcome = await _telegram_source(
+                settings,
+                job,
+                target,
+                paths.job_tmp_dir(job.id),
+                keeper=keeper,
+                status_renderer=status_renderer,
+                limit_mb=limits.link_total_mb,
+            )
+        else:
+            log.info("Starting download_link for job %s", job.id)
+            outcome = await flow.download_link(
+                job.link,
+                paths.job_tmp_dir(job.id),
+                limit_mb=limits.link_total_mb,
+                chain=chain_for(job.link, context),
+                delegate=delegate_for(context),
+                should_stop=lambda: keeper.stop_requested,
+                on_phase=_phase_hook(status_renderer),
+                on_progress=status_renderer.progress,
+                on_notice=status_renderer.notice,
+            )
         log.info(
             "job %s: %d file(s), %d failure(s), cancelled=%s, refused=%s, empty=%s, reason=%s",
             job.id,
@@ -158,6 +179,118 @@ def build_handler(
         )
 
     return handle
+
+
+def _telegram_target(link: str) -> links.TgTarget | None:
+    """The Telegram thing this job's link names, or ``None`` for every other link.
+
+    Parsing decides the path, and it is the *same* parser ``/dt`` used to accept the link, so a job
+    row is self-describing: a restart re-reads it and reaches the same conclusion without any stored
+    "this one was Telegram" flag to fall out of step with the link itself.
+    """
+    if not _looks_like_telegram(link):
+        return None
+    try:
+        return links.parse(link)
+    except links.TgLinkError:
+        # A t.me link the pipeline should have a go at (a channel's own page, say) rather than a job
+        # that dies here: /dt refuses these, but a link that reached the queue by another route has
+        # not been judged by anybody yet.
+        return None
+
+
+def _looks_like_telegram(link: str) -> bool:
+    lowered = (link or "").lower()
+    return any(host in lowered for host in links.HOSTS)
+
+
+async def _telegram_source(
+    settings: Settings,
+    job: Job,
+    target: links.TgTarget,
+    staging: Path,
+    *,
+    keeper: workers.LeaseKeeper,
+    status_renderer: status.StatusRenderer,
+    limit_mb: int,
+) -> flow.LinkResult:
+    """Fetch a Telegram link with the user's own session, in the pipeline's vocabulary (FR-4).
+
+    Failures are per *object*, which for Telegram means per message: a range that loses one message
+    still delivers the rest, and the reason names that message so the user can see which one.
+    """
+    try:
+        async with get_pool(settings).borrow(job.user_id) as session:
+            fetched = await media.fetch(
+                session,
+                target,
+                staging,
+                limit_mb=limit_mb,
+                should_stop=lambda: keeper.stop_requested,
+                on_progress=_telegram_progress(status_renderer),
+            )
+    except SessionError as refused:
+        return flow.LinkResult(reason=refused.reason, summary=refused.reason)
+
+    failures = tuple(
+        catalog.Failure(name=name, reason=reason) for name, reason in fetched.failures
+    )
+    if fetched.refused is not None:
+        return flow.LinkResult(refused=fetched.refused, engine=TELEGRAM_ENGINE)
+    if fetched.cancelled:
+        return flow.LinkResult(files=fetched.files, failures=failures, cancelled=True)
+    if fetched.error is not None:
+        # A message that was reachable but carried nothing is E4's empty share — a verdict no retry
+        # can change — while a chat we could not open is an ordinary failure worth another attempt.
+        return flow.LinkResult(
+            files=fetched.files,
+            failures=failures,
+            reason=fetched.error,
+            summary=fetched.error,
+            empty_share=fetched.empty,
+        )
+
+    return flow.LinkResult(
+        files=fetched.files,
+        failures=failures,
+        engine=TELEGRAM_ENGINE,
+        bytes_transferred=sum(file.bytes_written for file in fetched.files),
+        bytes_written=sum(file.bytes_written for file in fetched.files),
+        summary=catalog.DT_DONE.format(
+            sent=len(fetched.files),
+            total=len(fetched.files) + len(failures),
+            scanned=fetched.scanned,
+            chat=fetched.chat,
+        ),
+    )
+
+
+def _telegram_progress(
+    renderer: status.StatusRenderer,
+) -> Callable[[int, int], Awaitable[None]]:
+    """The pipeline's progress hook, from Telegram's per-file byte counts.
+
+    A Telegram download reports no per-file index the way the HTTP fetcher does, so the rows show
+    the bytes of the whole job rather than "file 3/20" — the same deliberate absence D43 accepted
+    for an HLS stream, and for the same reason: a mis-stated counter is worse than a missing one.
+    """
+
+    async def report(done: int, total: int) -> None:
+        await renderer.progress(
+            flow.JobProgress(
+                filename=TELEGRAM_ENGINE,
+                transfer=fetcher.FetchProgress(
+                    url=TELEGRAM_ENGINE,
+                    role="video",
+                    transfer_done=done,
+                    transfer_total=total or None,
+                    overall_done=done,
+                    overall_total=total or None,
+                ),
+            )
+        )
+
+    return report
 
 
 def _phase_hook(renderer: status.StatusRenderer) -> Callable[[str], Awaitable[None]]:

@@ -3,13 +3,19 @@
 The order inside :func:`run` is the whole point of the module: uvloop has to be
 installed before any event loop exists, and logging before anything can log —
 including the client, which logs while it is being constructed.
+
+What the loop then *does* lives in :mod:`app.runtime`: the client, the session pool,
+the worker pool and the scheduler, started and stopped in the one order that leaves
+nothing mid-flight. This module is the synchronous edge of that, which is why it is
+separate — ``asyncio.run`` is not the place to make a start-up decision.
 """
 
 from __future__ import annotations
 
-from app import capabilities, config, paths
-from app import logging as app_logging
-from telegram import clients
+import asyncio
+import contextlib
+
+from app import runtime
 
 
 def _install_uvloop() -> bool:
@@ -28,44 +34,8 @@ def _install_uvloop() -> bool:
 
 
 def run() -> int:
-    config.load_env_file()
-    settings = config.get_settings()
-    paths.ensure_runtime_dirs()
-
-    uvloop_used = _install_uvloop()
-    redactor = app_logging.setup_logging(secrets=settings.secret_values())
-    log = app_logging.get_logger("spideybot")
-
-    log.info(
-        "starting",
-        uvloop=uvloop_used,
-        client_profile=settings.client.profile,
-        test_mode=settings.test_mode,
-        redacted_values=redactor.count,
-    )
-
-    # A missing required capability does not stop the bot, but it must never be silent:
-    # the degradation is invisible in normal use until a job behaves impossibly slowly.
-    for capability in capabilities.probe():
-        if capability.ok:
-            log.debug("capability", name=capability.name, detail=capability.detail)
-        elif capability.required:
-            log.error("required capability missing", name=capability.name, detail=capability.detail)
-        else:
-            log.info("optional capability absent", name=capability.name, detail=capability.detail)
-
-    for directory in paths.insecure_secret_dirs():
-        log.warning("credential directory is readable beyond this account", path=str(directory))
-
-    if settings.test_mode:
-        log.warning("test mode: using Telegram's test servers and data/sessions/test")
-
-    client = clients.build_bot(settings)
-    try:
-        client.run()
-    except KeyboardInterrupt:
-        log.info("interrupted")
-    finally:
-        log.info("stopped")
-
+    """``python main.py run``: install the fast loop, then serve until interrupted."""
+    _install_uvloop()
+    with contextlib.suppress(KeyboardInterrupt):
+        return asyncio.run(runtime.serve())
     return 0

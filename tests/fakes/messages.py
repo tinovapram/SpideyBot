@@ -27,6 +27,27 @@ class FakeUser:
         self.username = username
 
 
+class FakeChat:
+    """The chat a message came from. Real messages have one, and handlers read ``chat.id``."""
+
+    def __init__(self, chat_id: int) -> None:
+        self.id = chat_id
+
+
+class SentReply:
+    """What ``reply_text`` hands back: a message with an id and a chat, as the API does.
+
+    Returned rather than ``None`` because a handler that records *where* its reply landed (FR-7.1's
+    status message) depends on it, and a fake that returned nothing would make that code
+    untestable — which is how the status message id came to be unverifiable for two batches.
+    """
+
+    def __init__(self, chat_id: int, message_id: int, text: str) -> None:
+        self.chat = FakeChat(chat_id)
+        self.id = message_id
+        self.text = text
+
+
 class FakeMessage:
     """Captures what a handler sent, so a test can assert on it."""
 
@@ -40,12 +61,17 @@ class FakeMessage:
         # Pyrogram exposes the command as a list, e.g. ["start", "123456"] for a deep link.
         self.command = list(command)
         self.text = text
+        #: A private chat's id equals the user's, and private is the only kind of chat these run in.
+        self.chat = FakeChat(user.id if user is not None else 0)
         self.replies: list[str] = []
         self.reply_markups: list[Any] = []
+        self._next_reply_id = 500
 
-    async def reply_text(self, text: str, reply_markup: Any = None, **_kwargs: Any) -> None:
+    async def reply_text(self, text: str, reply_markup: Any = None, **_kwargs: Any) -> SentReply:
         self.replies.append(text)
         self.reply_markups.append(reply_markup)
+        self._next_reply_id += 1
+        return SentReply(self.chat.id, self._next_reply_id, text)
 
     @property
     def reply(self) -> str:

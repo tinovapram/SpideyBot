@@ -140,6 +140,15 @@ class LinkResult:
     bytes_transferred: int = 0
     #: Bytes inside the files that are actually being handed to delivery.
     bytes_written: int = 0
+    #: A sentence the *source* wants shown as the job's result, when it has one.
+    #:
+    #: The pipeline's shapes (refusal, empty share, failure, done-with-files) are built from the
+    #: numbers, which works when a source's own vocabulary is the same as everyone else's. Telegram
+    #: has more to say — FR-4.5 wants the source chat's title and how many messages were *scanned*,
+    #: and FR-4.6's refusals are sentences written where the parsing happened — so the source
+    #: supplies one line and :func:`app.messages.final_message` shows it instead of inventing a
+    #: second phrasing for the same fact.
+    summary: str | None = None
 
     @property
     def delivered_anything(self) -> bool:

@@ -103,9 +103,12 @@ the automatic fallback.
 | D48 | **Kuaishou resolves from its own share page** | `downloader/sites/kuaishou.py` fetches `https://v.m.chenzhongtech.com/fw/photo/<id>` with a **mobile** user agent, reads the `window.INIT_STATE` JSON out of the markup, and takes the highest-bitrate non-hidden `representation` URL from `photo.manifest.adaptationSet` (with the `mainMvUrls` mirrors as the fallback when a post has no manifest). A `v.kuaishou.com/<code>` link is followed first (`bridge.get_final_url`) because the photo id exists only in the redirect's destination. The caption names the file, and the manifest's `fileSize` becomes the known size the pre-transfer gate needs. No cookies and no third-party bridge | The bridge this port started with is dead (R17), and the two obvious replacements are both closed: Kuaishou's desktop GraphQL answers `result: 400002` with a **sliding-captcha challenge** once a real `did` cookie is present (measured: a synthetic `did` gets a bare `result: 2`, the site's own `did` gets the captcha), and the mobile `rest/wd/photo/info` endpoint answers `result: 2` for both web and Android `did` formats. The share page was the third path, and it works. Two traps cost real time and are now stated in the module: the state serialises booleans as **strings** (`"False"` is truthy), and it only embeds the state for a mobile user agent — the desktop page is a 74 KB JavaScript shell against the mobile page's 162 KB. Verified live for both link forms: `…/short-video/3xqqmetbyqh4qie` and `v.kuaishou.com/2xZgBx` resolve to the same post's 720p AVC file, 3,784,687 bytes, with the candidate URLs confirmed fetchable by ranged GET (a plain HEAD 404s on some of that CDN's hosts, so HEAD is not the test) |
 | D49 | **Bluesky is left to gallery-dl, and the removal is the evidence** | `downloader/sites/bluesky.py` is deleted and unwired (`downloader/sites/__init__.py` records why), so `bsky.app` links fall through to gallery-dl, which handles them properly. The same measured-and-decide rule as D47: an adapter that cannot resolve is a wasted attempt with a nicer error message | Measured live 2026-10 against **four real posts** (two video, two image, including the one gallery-dl is known to handle): the bridge's answer carries **no result section** for any of them — not a rate limit, not a stale payload shape, the endpoint simply no longer serves real posts. gallery-dl, run on the same links, returns records with `meta.extension: mp4` and a blob URL that fetches `200 video/mp4`. Had the adapter stayed, every Bluesky link would have burned a bridge call, printed a fallback notice, and then worked — the worst kind of green-ish behaviour, because the notice says something is broken when nothing is. This is the second removal of the same shape as D47's (cyberdrop), and both point the same way: an adapter has to be *measured* against a live link before it is trusted, which is why §5's live matrix is a step rather than an assumption |
 
----
+| D50 | **A user session is a budget, and it is proved before it is used** | `telegram/sessions.py` owns the pool: a live cap that evicts the least-recently-used *idle* client and refuses when every live client is busy, a per-conversation login timer that closes an abandoned client, and a reconnect that asks `get_me()` before trusting a client. A session Telegram has revoked is **deleted**, and the badge says `🔴 No session` | Three separate limits, because they answer three different ways of running out: sockets (the cap, R3), time (the idle timeout, enforced by `scheduler.tick`), and account safety (one session per user, FR-13). `connect()` returning is not evidence a key still works — a revoked session often connects and then refuses to answer — so every reconnect makes one request, the same eager-validation rule as D46. A file whose key is dead is worse than no file: `/account` would advertise a session that can never connect, and the state machine in §8.3 has only three states, none of which is "stored but unusable" |
+| D51 | **`/dt` runs through the same queue as `/dl`** | `handlers/telegram_dl.py` parses and checks the session, then calls `handlers/submission.submit` — the same admission path as `/dl` (FR-3). The job handler branches on the link: a Telegram link is fetched by `telegram/media.fetch` with the *user's* session, everything else by the pipeline, and both produce a `flow.LinkResult` so the ledger, the gate, the albums and the final message are shared | A `/dt` that bypassed the queue would be a second implementation of quota, concurrency and cancellation — and the one thing the spec is explicit about (FR-10.2) is that downloads share one queue. It also made the status message free: the job carries `status_message_id` from `/dt` exactly as from `/dl`, so FR-7's live view works on Telegram jobs without knowing they are different. The branch is on the *link* rather than a stored flag, so a job row survives a restart with nothing to fall out of step |
+| D52 | **A folder link downloads one message per chat** | `t.me/addlist/<slug>` parses into `FolderLink`; the resolver reads the filter through the user's session, and for each chat scans up to `FOLDER_SCAN` (10) recent messages and takes the first with media | FR-4.3 asks for folder support and a folder names *no content*: it is a filter over chats. "Download the folder" is therefore unbounded — it could quietly spend a whole allowance on one click, and no per-link limit can refuse something whose size is unknown until it has been fetched (the opposite of AC-3's rule). One message per chat is bounded, predictable, and reported in FR-4.5's counts (chats scanned), so the user can see exactly what it did. Reconciling that against the spec's wording is an operator decision, not a silent invention |
+| D53 | **The size gate runs on Telegram's own metadata** | `telegram/media.fetch` sums `file_size` from the messages and calls `gate.check_size` **before** requesting anything, and the AC-3 refusal is returned as the same `SizeCheck` the HTTP path returns | Telegram reports real sizes for everything it stores, so unlike an extractor's guess this number is trustworthy — which makes AC-3's "refuse before a byte moves" *stronger* on this path than on the HTTP one, where an unreported size can only be flagged for enforcement during transfer (D31). Returning the gate's own verdict rather than a sentence keeps one refusal message for every source |
 
-## 2. Architecture
+---
 
 ### 2.1 Process model
 
@@ -145,20 +148,22 @@ SpideyBot/
   main.py                  # entrypoint: Client(...) + plugins=dict(root="handlers")
   app/                     # infrastructure + domain
     config.py  logging.py  paths.py
-    db.py  models.py
+    db.py  models.py  bot.py  runtime.py
     tiers.py  quota.py  queue.py  scheduler.py
     sessions.py  cookies.py  referral.py  metrics.py
   handlers/                # Kurigram smart plugins, decorator-registered
-    start.py  help.py  download.py  tg_download.py  cancel.py  job_status.py
+    start.py  help.py  download.py  telegram_dl.py  cancel.py  job_status.py
     account.py  login.py  setting.py  quota_info.py  sites.py  referral.py
     bypass.py  admin.py  magic_word.py  timer_media.py
+    submission.py          # the admission path /dl and /dt share (FR-3)
   downloader/              # the code that downloads; the bytes land in data/downloads/
     engines.py  flow.py  probe.py  registry.py  selection.py
     sites/                 # native adapters only: terabox.py, youtube.py, the ad-gated hosts,
                            # the bridge-backed platforms, and the two that read their own site
     bypass/                # FR-18 shortener families
   telegram/
-    clients.py  status.py  delivery.py  progress.py  keyboards.py
+    clients.py  sessions.py  login.py  links.py  media.py
+    status.py  delivery.py  progress.py  keyboards.py
   tests/                   # unit/, integration/, acceptance/, fakes/
   migrations/              # Alembic
   config/                  # default.toml (committed), local.toml (gitignored)
@@ -521,13 +526,40 @@ plan assumed, so these are requirements rather than notes (details in R13):**
 a hand-advanced clock; `test_ac2_*` asserts the delivered status and the replaced message end to end.
 
 ### P5 — Telegram downloads & account sessions
-- [ ] `/login` phone → code → 2FA with the spec §7.6 error copy (E13/E14/E15)
-- [ ] `/logout` = `log_out()` **then** delete the file (D10); `/account` badges from file presence
-- [ ] Kurigram File Storage at `data/sessions/<user_id>.session`; reconnect on `/start` (§8.3)
-- [ ] Client identity profile (D16); live cap + idle reaping + LRU
-- [ ] `/dt` for message / channel / folder / **range** links, captions preserved, counts reported (FR-4)
+- [x] `/login` phone → code → 2FA with the spec §7.6 error copy (E13/E14/E15). `telegram/login.py` is
+      the state machine (Pyrogram has no conversation handler, so the state is explicit) and
+      `handlers/login.py` is the routing: `/login` starts it, and a plain text message *while a login
+      is open* continues it. Every step's outcome is a sentence rather than an exception, because
+      every step ends by telling the user something. Amended from the spec's copy in one place: §7.6's
+      warning says the session is stored "encrypted", and nothing is (D9), so the sentence says what
+      actually happens
+- [x] `/logout` = `log_out()` **then** delete the file (D10); `/account` badges from file presence.
+      `handlers/account.py`. The order is the rule and the failure is reported: if Telegram cannot be
+      told, the local file still goes and the user is told the session may still be listed in their
+      devices
+- [x] Kurigram File Storage at `data/sessions/<user_id>.session`; reconnect on `/start` (§8.3).
+      `telegram/clients.build_user` composes `workdir`/`name` the way the library does, so the file
+      the client writes is the file the badge looks for; `/start` reconnects through the pool and
+      reports what it found — connected, saved-but-unreachable, or gone
+- [x] Client identity profile (D16); live cap + idle reaping + LRU. `telegram/sessions.py`: the cap
+      evicts the least-recently-used *idle* client and refuses when every live client is busy (R3),
+      the idle timeout is enforced by `scheduler.tick` alongside the lease sweep, and every reconnect
+      is *proved* with `get_me()` — a revoked key connects and then refuses to answer, so a connect
+      that returns is not evidence (the same rule D46 applies to Reddit)
+- [x] `/dt` for message / channel / folder / **range** links, captions preserved, counts reported
+      (FR-4). `telegram/links.py` parses (four forms, plus topic links and query tails, with FR-4.6's
+      specific refusals), `telegram/media.py` fetches with the *user's* session, and the job runs
+      through the ordinary queue — so `/dt` and `/dl` share one admission policy, one ledger and one
+      status message. Captions are carried on the file (`FetchedFile.caption`, FR-4.4) and the counts
+      ride in `LinkResult.summary` (FR-4.5), which is how a source's own sentence reaches the final
+      message without `app.messages` learning about Telegram
 
-**Done when:** AC-7 passes and a restart reconnects from the session file.
+**Done when:** AC-7 passes and a restart reconnects from the session file. **Met:**
+`tests/acceptance/test_ac7_telegram.py` drives all three of AC-7's bullets (refusal without a
+session; a message link delivered with its caption; a range reporting files *and* messages scanned),
+plus the album, one-file-failed, oversize-refusal and dead-session cases; `tests/unit/test_login.py`
+walks the conversation including E13/E14/E15 and the timeout; `tests/unit/test_sessions.py` covers the
+cap, LRU, reaping and what a dead session does to its file.
 
 ### P6 — Reply triggers
 - [ ] Magic word: outgoing single-token match, per-user word, guidance replies, Saved Messages delivery (FR-5)
@@ -563,7 +595,7 @@ a hand-advanced clock; `test_ac2_*` asserts the delivered status and the replace
 
 | Layer | Scope | Infrastructure |
 |---|---|---|
-| `tests/unit` | tier/quota math, referral rules, catalog rendering, album batching, status coalescing, mask helpers, the fetcher, the merge, the per-link pipeline, and the payload shape every native adapter parses | none (the fetcher's and the pipeline's tests run a real HTTP server on loopback and generate their media with ffmpeg — see below) |
+| `tests/unit` | tier/quota math, referral rules, catalog rendering, album batching, status coalescing, mask helpers, the fetcher, the merge, the per-link pipeline, the payload shape every native adapter parses, the `t.me` link grammar, the session pool (cap, LRU, reaping, dead sessions) and the `/login` conversation | none (the fetcher's and the pipeline's tests run a real HTTP server on loopback and generate their media with ffmpeg — see below) |
 | `tests/integration` | queue leases, worker slots, restart recovery, repositories | Postgres via the layered DSN resolver |
 | `tests/acceptance` | FR/AC behaviour through handlers | `tests/fakes/` Kurigram client implementing the same protocol as the real one; a real Postgres, and the loopback server for the pipeline's end-to-end tests |
 | `tests/live` (`@pytest.mark.live`) | only the non-fakeable criteria | Kurigram `test_mode=True` test servers + real hosts |
@@ -836,12 +868,23 @@ rather than the order the plan lists:
 | 3g — **the job handler + delivery** (D40–D42) | ✅ committed; `app/jobs.py` joins pipeline → ledger → delivery → message, `telegram/delivery.py` sends by kind in albums of ten, and AC-2/AC-3/AC-15 are verified end to end against a recording client and a real database |
 | 3h — `/dl` submission + live verification | ✅ committed; `handlers/download.py` carries usage, the quota reserve, the enqueue and "Queuing download…" (AC-10's second half), and the live pass below was run against real links rather than assumed |
 | 3i — native adapters | ✅ committed; 25 wired through `registry._NATIVE_TABLE` — all of V5's modules except `cyberdrop` (D47) and `bluesky` (D49), plus TeraBox, which V5 does not have. Each is a `Resolver` in `ChainContext.natives` with payload tests; the live matrix in §5 records which of them have been *seen* resolving and which are still owed a real link |
+| 5a — the session pool, `/login`, `/logout`, `/account`, `/start` reconnect (D50) | ✅ committed; `telegram/sessions.py` + `telegram/login.py` + `handlers/account.py`/`login.py`, with the identity profile (D16), the cap/LRU and the idle reaping the scheduler now runs every pass |
+| 5b — `/dt` and the Telegram job (D51–D53) | ✅ committed; `telegram/links.py`, `telegram/media.py`, `handlers/telegram_dl.py`, the branch in `app/jobs.py`, and AC-7 verified end to end against a real database and a recording client |
 
-Nothing in the pipeline is wired into the worker pool yet, and deliberately so: with no job handler, a
-started pool would claim real jobs and fail them. `app/workers.py`, `app/scheduler.py` and
-`app/ratelimit.py` stay unstarted by `main.py` until 3g exists, which is recorded where it belongs (P2's
-scheduler bullet) rather than left implicit. The worker handler is what will connect
-`flow.download_link` to the queue: it owns the job's staging directory, checks
+**The runtime is now wired, which retires the deferral this section used to carry.** `app/runtime.py`
+starts the client, installs the session pool, starts the worker pool and the scheduler, and sweeps
+orphaned staging directories once at startup; `app/bot.py` stays the synchronous edge (uvloop before
+any loop exists, then `asyncio.run`). The order is the contract and is documented there: the client
+before the workers (so a handler's first reply cannot race registration), the pool before the workers
+(so a claimed Telegram job finds it), the scheduler last, and shutdown in the mirror order.
+
+Still outstanding from earlier batches and tracked where it lives: the Docker-free DSN resolver's second
+provider (P0-prereq), the remaining §7 catalog copy (P0), and a CI job proving the `tgcrypto` source build
+stays green on each CPython bump (R1).
+
+Nothing in the pipeline stays unwired any more: the pool, the scheduler and the reaper are started by
+`app/runtime.py` (P5's wiring), and `app/ratelimit.py` is started where it is needed rather than at boot.
+The worker handler joins `flow.download_link` to the queue: it owns the job's staging directory, checks
 `keeper.stop_requested` for FR-11.6, records `bytes_in` (D35) and `files_sent`, and keeps jobs already
 delivered from running again (§8.2).
 
@@ -852,7 +895,6 @@ stays green on each CPython bump (R1).
 ---
 
 ## 11. Spec realignment (applied)
-
 Every statement in [FUNCTIONAL_SPEC.md](./FUNCTIONAL_SPEC.md) that promised encryption has been
 rewritten, because the system no longer encrypts anything (D9):
 

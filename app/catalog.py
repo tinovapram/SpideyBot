@@ -404,3 +404,85 @@ def fallback_notice(engine: str) -> str:
     (D6), rather than announcing gallery-dl while a native adapter runs.
     """
     return FALLBACK_NOTICE.format(engine=engine)
+
+
+# ── accounts and sessions (FR-13, spec 7.6) ─────────────────────────────
+#
+# The login copy is the spec's, verbatim where it exists; the rest is written here because §7.6
+# names the error cases (E13/E14/E15) without wording them. One deliberate edit: the spec's login
+# warning says the session is stored as an "encrypted file session", and nothing is encrypted (D9),
+# so the sentence says what actually happens instead.
+
+LOGIN_PHONE = (
+    "🔐 **Login to your Telegram account**\n\n"
+    "This lets SpideyBot access private/restricted content on your behalf.\n\n"
+    "⚠️ Your session is stored as a local file session.\n"
+    "You can revoke access at any time with /logout.\n\n"
+    "Please send your **phone number** (e.g. `+1234567890`):"
+)
+LOGIN_CODE = "📩 A code was sent to `{masked}`.\n\nPlease send the **code** you received:"
+LOGIN_PASSWORD = "🔒 Two-factor authentication is enabled.\n\nPlease send your **2FA password**:"
+LOGIN_SUCCESS = (
+    "✅ **Login successful!**\n\n"
+    "Logged in as `{masked}`.\n\n"
+    "Use `/stop` to disconnect, or `/logout` to revoke."
+)
+LOGIN_ALREADY = (
+    "✅ You are already logged in.\nUse /logout first to sign in with a different account."
+)
+LOGIN_IN_PROGRESS = "⏳ A login is already in progress. Send /cancel to abort it."
+LOGIN_NONE = "ℹ️ There is no login in progress."
+LOGIN_CANCELLED = "❌ Login cancelled."
+LOGIN_TIMED_OUT = "⌛ The login timed out. Send /login to start again."
+LOGIN_FAILED = "❌ Login failed. Send /login to try again."
+LOGIN_PHONE_INVALID = (
+    "❌ That does not look like a phone number.\n"
+    "Send it in international format, e.g. `+1234567890`."
+)
+#: E13: invalid and expired are separate sentences because only one of them is worth retrying.
+LOGIN_CODE_INVALID = "❌ That code is not valid. Send it again, or /cancel to abort."
+LOGIN_CODE_EXPIRED = "❌ That code has expired. Send /login to get a new one."
+#: E15.
+LOGIN_PASSWORD_INVALID = "❌ That password is not correct. Send it again, or /cancel to abort."
+#: E14.
+LOGIN_FLOOD = "⏳ Telegram is rate limiting this login. Try again in {seconds} seconds."
+
+LOGOUT_DONE = "🔓 Logged out successfully. Your session has been removed."
+LOGOUT_NONE = "ℹ️ You are not currently logged in."
+#: D10 revokes server-side *and* deletes locally. When the first half fails the user is told,
+#: because the session still exists in their Active Sessions list — a fact they cannot see here.
+LOGOUT_UNREVOKED = (
+    "🔓 The session was removed from SpideyBot, but Telegram could not be told to revoke it "
+    "(`{reason}`). Remove it from Settings → Devices if you want it gone there too."
+)
+
+ACCOUNT_STATUS = (
+    "**Account Status**\n\n"
+    "{badge}\n\n"
+    "Use /login to connect your Telegram account, or /logout to revoke it."
+)
+#: FR-13.1: the badge is the whole answer, so the line that names the alternative is added only when
+#: there is no session to describe.
+ACCOUNT_HINT = "TeraBox cookies are managed with /setting."
+
+# ── the Telegram download path (FR-4) ───────────────────────────────────
+
+DT_NOT_TELEGRAM = "⚠️ /dt takes Telegram links only. Use /dl for any other site."
+DT_NO_SESSION = (
+    "⚠️ You need a Telegram session before downloading from Telegram.\n"
+    "Send /login to connect your account, then send the link again."
+)
+DT_SESSION_EXPIRED = "⚠️ Your session is no longer valid ({reason})\nSend /login to connect again."
+DT_MESSAGE_MISSING = (
+    "❌ Message `{id}` was not found in `{chat}`.\n"
+    "It may be deleted, or your account may not have access to it."
+)
+DT_CHAT_UNREACHABLE = "❌ Could not open `{chat}`: {reason}"
+DT_NO_MEDIA = "ℹ️ That message has no media to download."
+DT_RANGE_EMPTY = "ℹ️ No media found in messages {start}-{end} of `{chat}`."
+DT_FOLDER_EMPTY = "ℹ️ Nothing downloadable was found in that folder."
+#: FR-4.5: files *and* what was scanned, plus the source chat's title. The scanned count is what
+#: distinguishes "the range was empty" from "the range had no media in it".
+DT_DONE = "✅ **Sent {sent}/{total} file(s)** from `{chat}` — scanned {scanned} message(s)."
+DT_DONE_ALBUM = "✅ **Sent {sent}/{total} file(s)** from `{chat}` (one album)."
+DT_CAPTION_FALLBACK = "🔗 From {chat}, message {id}"

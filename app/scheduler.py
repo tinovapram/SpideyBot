@@ -26,6 +26,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import delete, select
 
@@ -55,6 +56,9 @@ class Housekeeping:
     reclaimed: queue.Reclaim = field(default_factory=queue.Reclaim)
     pruned_jobs: tuple[int, ...] = ()
     pruned_dirs: tuple[Path, ...] = ()
+    #: Users whose live Telegram client was disconnected for being idle (D21). Not a deletion: their
+    #: session file stays, which is what makes the next request reconnect instead of logging in.
+    reaped_sessions: tuple[int, ...] = ()
 
 
 async def sweep_leases(settings: Settings, *, now: datetime | None = None) -> queue.Reclaim:
@@ -146,11 +150,16 @@ class Scheduler:
         self,
         settings: Settings,
         *,
+        sessions_pool: Any | None = None,
         sweep_interval: float = DEFAULT_SWEEP_INTERVAL,
         retention_interval: float = DEFAULT_RETENTION_INTERVAL,
         clock: Callable[[], datetime] = _utcnow,
     ) -> None:
         self._settings = settings
+        #: The session pool, when there is one. Injected rather than looked up: the scheduler has
+        #: exactly one optional collaborator, and a test of the lease sweep should not have to
+        #: install a pool to get one.
+        self._sessions = sessions_pool
         self._sweep_interval = sweep_interval
         self._retention_interval = retention_interval
         self._clock = clock
@@ -185,13 +194,23 @@ class Scheduler:
             pruned = await prune_history(self._settings, now=moment)
             self._next_retention = moment + timedelta(seconds=self._retention_interval)
 
-        if reclaimed.total or pruned:
+        # R3: a live user client holds a socket and an auth key, so it is closed once its user has
+        # stopped asking for anything. Every pass, because the cost of checking is a comparison and
+        # the cost of forgetting is a leak that only shows up as the process's memory footprint.
+        reaped: tuple[int, ...] = ()
+        if self._sessions is not None:
+            reaped = await self._sessions.reap()
+
+        if reclaimed.total or pruned or reaped:
             log.info(
-                "housekeeping: %d job(s) recovered, %d pruned",
+                "housekeeping: %d job(s) recovered, %d pruned, %d session(s) reaped",
                 reclaimed.total,
                 len(pruned),
+                len(reaped),
             )
-        return Housekeeping(reclaimed=reclaimed, pruned_jobs=pruned)
+        return Housekeeping(
+            reclaimed=reclaimed, pruned_jobs=pruned, reaped_sessions=reaped
+        )
 
     async def _loop(self) -> None:
         while True:

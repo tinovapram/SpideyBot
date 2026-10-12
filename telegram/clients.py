@@ -48,3 +48,24 @@ def build_bot(settings: Settings) -> Client:
         parse_mode=enums.ParseMode.MARKDOWN,
         **_base_kwargs(settings),
     )
+
+
+def build_user(settings: Settings, user_id: int) -> Client:
+    """A client that speaks as one *user*, backed by that user's stored session (D7).
+
+    Two differences from the bot client, and both matter:
+
+    * the session file is named by the user id and lives in ``SESSIONS_DIR`` (or its test-mode
+      sibling), which is what makes a restart reconnect instead of asking for a code again;
+    * ``no_updates`` is on. This client is a *fetcher* — it resolves and downloads media the user
+      asks for — and a second dispatcher competing for the same account's updates would consume
+      the ones the account's own clients expect. Nothing needs them: the magic word and TimerMedia
+      arrive at the bot, not here.
+    """
+    directory = paths.sessions_dir(test_mode=settings.test_mode)
+    return Client(
+        name=str(user_id),
+        workdir=str(directory),
+        no_updates=True,
+        **_base_kwargs(settings),
+    )
