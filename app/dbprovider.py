@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import secrets
 import shutil
+import socket
 import subprocess
 import time
 from dataclasses import dataclass
@@ -161,6 +162,40 @@ def status(port: int) -> ClusterState:
     )
 
 
+def _refuse_an_unbindable_port(port: int) -> None:
+    """Say why the port cannot be used *before* pg_ctl fails with a generic message.
+
+    Windows reserves ranges of ports for its own dynamic allocations, and the ranges move as
+    services start — so a port that worked yesterday can be inside one today, and Postgres's own
+    failure for that is a ``could not create listen socket ... Permission denied`` buried in a log
+    file. Measured here: 55432 (the committed default) had become unbindable, and all a developer
+    saw was "pg_ctl could not start the server".
+
+    Checked by binding rather than by asking the OS for its exclusion list, because "refused for
+    this process" is the actual question and a socket bind answers it directly.
+    """
+    probe = socket.socket()
+    try:
+        probe.bind(("127.0.0.1", port))
+    except PermissionError as error:
+        raise DbProviderError(
+            f"port {port} cannot be bound on this machine ({error}). "
+            "Windows reserves port ranges as it starts services, so this port has probably moved "
+            "into one. Pick another — for example `[db] port = 54329` in config/local.toml — and "
+            "the next `db start` will use it."
+        ) from error
+    except OSError as error:
+        raise DbProviderError(
+            f"port {port} is already in use ({error}). Stop whatever holds it, or set a different "
+            "`[db] port` in config/local.toml."
+        ) from error
+    else:
+        # Nothing refused us, so the port is genuinely available.
+        return
+    finally:
+        probe.close()
+
+
 # ── lifecycle ───────────────────────────────────────────────────────────
 
 
@@ -243,6 +278,7 @@ def start(settings: Settings, *, timeout: float = _STARTUP_TIMEOUT_SECONDS) -> C
     _apply_managed_settings(settings.db.port)
 
     if not is_running():
+        _refuse_an_unbindable_port(settings.db.port)
         paths.DATA_DIR.mkdir(parents=True, exist_ok=True)
         # Uncaptured on purpose: see _run. pg_ctl's own -l log holds the detail.
         started = _run(

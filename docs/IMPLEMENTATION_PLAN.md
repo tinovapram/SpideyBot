@@ -59,7 +59,7 @@ the automatic fallback.
 | D5 | Extraction | **gallery-dl is the general extractor**, and yt-dlp is invoked **as a library, for resolution only**, on native video sites (the YouTube family). Native adapters still run first; everything else goes to gallery-dl with `extractor.ytdl.enabled = true`. yt-dlp never transfers bytes for us — resolution hands back per-stream URLs and we fetch them (D25) | **Amended 2026-10 after probing; the original "our code never invokes yt-dlp" was already hollow.** gallery-dl imports yt-dlp lazily, so it is on the path either way, and its `ytdl` extractor hands back a `ytdl:https://…` **marker** in the URL slot (`extension: None`) rather than media — so for exactly those sites the single-surface claim bought nothing and cost clarity. Using `yt_dlp.YoutubeDL(...).extract_info(url, download=False)` directly is the most direct, best-maintained resolution route for YouTube, and the previous implementation already did this (`downloader/site/youtube.py::_fetch_ytdlp_fallback`, branch `V5`). Verified: the resolved pair's per-stream URLs are all present, so D25 still holds. Cross-check — handing D28 to yt-dlp as a format string (`bv*[vcodec^=avc1]+ba[ext=m4a]/bv*[vcodec^=avc1]+ba`) selects `299+140` at 1080p, the same pair `downloader/selection.py` chooses |
 | D6 | Adapter scope | **Engine-first.** Engines cover the broad platform list; native adapters only where they fail: **TeraBox**, **Cyberdrop family**, the **YouTube family**, and the **ad-gated hosts** (Doodstream, StreamTape, MixDrop, StreamWish, Vidmonstr, Vidara, Luluvdoo, Bysejikuar, MEGA) | Each native adapter is a module + smoke test + a standing breakage surface (R4); breadth is free from the engines, so reliability is bought only where needed. **Chain order (user decision, 2026-10): native adapter → engine → `cyberdrop-dl` LAST**, only once every other method has failed — it is a heavyweight application with its own state rather than a peer engine, so it is a rescue path. TeraBox keeps its own path. This matches the previous implementation's `downloader/flow.py` (branch `V5`), which falls back native → gallery-dl → cyberdrop-dl, and its `downloader/site/*.py` is the reference for per-site behaviour. YouTube joins the native list because the *engine* cannot satisfy D25 there (it returns a `ytdl:` marker), which is exactly D6's stated test for buying a native adapter |
 | D7 | **Sessions storage** | Kurigram native **File Storage**, **plaintext**: `data/sessions/<user_id>.session` | Operator decision. Simplest and self-healing; no key management. Accepted risk documented in §8/R10 |
-| D8 | **Cookie storage** | Plaintext file: `data/cookies/<user_id>` | Mirrors D7 for consistency |
+| D8 | **Cookie storage** | Plaintext file: `data/cookies/<user_id>` | Mirrors D7 for consistency. **Both cookie formats are accepted** (2026-10): the engines are handed the file with `--cookies`, which wants Netscape/`cookies.txt`, while the native adapters read the jar themselves — so `sites/bridge.load_cookies` parses Netscape *or* the JSON list the previous implementation wrote. Accepting both means whichever format P7's `/setting` uploads will work, and the failure mode of guessing wrong (no cookies sent, which looks exactly like an expired login) cannot happen |
 | D9 | **Encryption** | **None anywhere in the system.** No Fernet, no key management, no `user_secrets` table, and `SPIDEY_SESSION_ENCRYPT_KEY` is dropped | Follows from D7/D8 |
 | D10 | Revocation | `/logout` calls `log_out()` **(server-side)** and *then* deletes the file | Deleting only the file leaves the auth key valid and the session listed in Active Sessions — the spec requires genuine revocation |
 | D11 | Config layering | Committed `config/default.toml` (all §13 defaults as a reviewable `[tier.*]` table) → optional gitignored `config/local.toml` → `SPIDEY_*` env vars (highest) | Defaults become reviewable in a diff; TOML sources can be validated with `extra="forbid"` so a typo fails loudly instead of silently defaulting |
@@ -94,6 +94,9 @@ the automatic fallback.
 | D40 | The job handler is thin, and delivery knows no database | `app/jobs.py` joins pipeline → ledger → delivery → message and owns only bookkeeping; `telegram/delivery.py` takes finished files and a chat and never touches the DB; `flow.LinkResult` supplies everything the messages say | The three parts can each be tested where they live: the pipeline without Telegram, delivery without a job, and the wiring against a recording client with a real database. It also means the wording stays in one place (D23) — `final_message` returns text rather than sending it, so the copy is testable on its own |
 | D41 | The ledger key is the resolved media URL | `job_items.source_url` is the *resolved, fetchable* URL of the file, never the page the user pasted, and a file already recorded as `uploaded` is not sent again on a later attempt. `FetchedFile` therefore carries both URLs: `source_url` (the pasted link, for the caption) and `resolved_url` (the ledger key). A delegated file, which has no resolved URL at all, uses a `file:` URI of its own name | The schema's `(job_id, source_url)` constraint is what makes re-delivery impossible, and one pasted album link yields many files that *share* the page URL — so using the page URL as the key would either collide on the constraint or, worse, mark a whole album as delivered when one file was. Known limitation: a time-limited media URL (R13) changes between attempts, so a job resumed after resolution can re-deliver; the job-level guard (`status = delivered`) is what covers the ordinary case, and the item ledger covers the rest |
 | D42 | A deterministic outcome is not retried | `workers.JobOutcome.retry` is false for AC-3's refusal, E4's empty share and a cancellation, and true for a file that failed | Retrying is right for a host that hiccupped and wrong for a verdict that cannot change: the link stays over the limit, and the share stays empty. Without this, one oversize link would spend three attempts, three messages and three downloads from the user's daily allowance discovering the same fact |
+| D43 | **HLS is a transfer role, not a file** | `TransferRole` gains `"hls"`. An `.m3u8` transfer is consumed by ffmpeg (`-i <playlist> -c copy`), with progress and D31's cap taken from the bytes appearing on disk by polling, and with the child process *killed* on cancel or cap breach. The plain download path additionally refuses a response whose body starts with `#EXTM3U` | Three ported adapters (StreamWish, Luluvdoo, Bysejikuar) hand back a playlist URL and their docstrings claimed "yt-dlp handles HLS", which nothing did — the fetcher had no content-type check, so it would have written the playlist *text* to disk and delivered it as a `.mp4`. A playlist is a manifest, not media, which is the same category error R13 records for yt-dlp's `ytdl:` marker. The body check exists because the role can only be set by a resolver: a bridge can answer with a fresh `.m3u8` URL under a name no resolver classified, and the fetcher is the only component that sees the bytes. An HLS stream has no `Content-Length`, so its row reports bytes without a percentage — a deliberate absence rather than an invented number (D30) |
+| D44 | **Native breadth comes from the bridge pattern, and the table** | V5's 26 site modules are all ported (27 native hosts counting TeraBox). Nine of them are "hand the link to a third-party saver endpoint and read the URL out of the answer", so that plumbing lives once in `downloader/sites/bridge.py`; the rest keep their own parsing. `registry.chain_for` composes from a `_NATIVE_TABLE` of `(module, arguments, options scope)` rows rather than an `elif` ladder | D6 was written when the engine-first claim looked stronger than it turned out to be: gallery-dl covers the *mainstream* platforms, but the previous implementation's per-site list existed for the ad-gated and bridge-only hosts, and the operator's own experience is that gallery-dl alone misses them. Twenty-seven `elif` branches would be a place where one wrong branch silently hides every host below it, so the chain is data now — with tests asserting that no two rows claim a host and that every module in the package is wired. Bridge plumbing is shared for the same reason R4 gives: each adapter is a standing breakage surface, so the part that is identical everywhere should be small and tested once |
+| D45 | **Adapter options are scoped, and credentials travel as CLI options** | `ChainContext.options` is a mapping keyed by the strategy's own name (`reddit`, `gallery-dl`); the registry hands each adapter only its own slice. Reddit's PRAW credentials come from `settings.reddit_praw_*`, falling back to Reddit's public installed-app pairs, and gallery-dl's Reddit credentials from `settings.gdl_reddit_*` as `-o extractor.reddit.client-id=…` | The seam already existed for this and was read by nobody, while `config.py` declared four Reddit settings that nothing consumed — a dead setting is worse than an absent one, because it looks configured. `-o` rather than D26's committed `config/gallery-dl.json`, for the reason the ytdl flag is passed that way: an option cannot be shadowed by the operator's own gallery-dl configuration. Scoping keeps the registry free of per-site knowledge in both directions |
 
 ---
 
@@ -436,19 +439,27 @@ plan assumed, so these are requirements rather than notes (details in R13):**
       shows the user. Two deliberate absences: no copy of the tool's host list (it knows its own, and
       a copy only goes stale), and no cookie lookup (D8: the caller resolves the file, the registry
       passes it)
-- [ ] Engines: gallery-dl and yt-dlp are wired through `probe.resolve_gallerydl`/`resolve_ytdlp`, and
-      `--cookies` reaches both. cyberdrop-dl is wired as the delegate. Still to come: the per-engine
-      forcing that lets the *chain* pick an engine for a host rather than the router's default
+- [x] Engines: gallery-dl and yt-dlp are wired through `probe.resolve_gallerydl`/`resolve_ytdlp`, and
+      `--cookies` reaches both. cyberdrop-dl is wired as the delegate. An extractor *credential*
+      reaches gallery-dl as `-o` (D45), which supersedes D26's committed config file — the file was
+      never created, because an option cannot be shadowed by the operator's own configuration.
+      Per-engine forcing arrived with D44: the chain is composed from a table, so which engine a host
+      gets is a row rather than the router's default
 - [x] The delegated last resort (`downloader/cyberdropdl.py`, D38): a per-run generated config whose
       keys are checked against the tool's own defaults in a test, `--dump-json` for machine-readable
       results, its CSVs read for the failure reason, logs pointed outside the download directory, and
       the cap enforced by watching the bytes on disk and killing the run — which is a *real* kill of
       the child process, not a cancelled task, or the download would continue after the user was told
       it stopped. Its exit code is ignored for success because it is 0 even for an unsupported URL
-- [ ] Native adapters: TeraBox (account pool + per-user cookie), Cyberdrop family, Doodstream,
-      StreamTape, MixDrop, StreamWish, Vidmonstr, Vidara, Luluvdoo, Bysejikuar, MEGA. Each is a
-      `Resolver` and slots into `ChainContext.natives`; each needs a live smoke test, which is why
-      batch 3b needs credentials for the host under test
+- [x] Native adapters: TeraBox (account pool + per-user cookie), Cyberdrop family, Doodstream,
+      StreamTape, MixDrop, StreamWish, Vidmonstr, Vidara, Luluvdoo, Bysejikuar, MEGA, YouTube, and —
+      added 2026-10 at the operator's direction, after finding gallery-dl alone does not cover them —
+      Twitter/X, Reddit, TikTok, Douyin, Threads, Bluesky, Pinterest, Tumblr, Snapchat, LinkedIn,
+      CapCut, Dailymotion, Kuaishou, SoundCloud, Spotify. Each is a `Resolver` in
+      `ChainContext.natives` via `registry._NATIVE_TABLE`; each has offline tests over the payload
+      shape its site answers with (`tests/unit/test_sites.py`), and the third-party bridges
+      additionally need the live smoke matrix below, because a payload fixture cannot prove a site
+      still answers that way
 - [x] Fallback chain with a visible phase change (E2, §3): each new attempt emits E2's notice with
       the engine's own name (`catalog.fallback_notice`), which renders the spec's sentence verbatim
       for the gallery-dl step. The phases themselves are announced through `on_phase` (FR-7.3)
@@ -480,12 +491,24 @@ plan assumed, so these are requirements rather than notes (details in R13):**
 **Done when:** AC-2, AC-3, AC-15 pass.
 
 ### P4 — Live status UX
-- [ ] `telegram/status.py`: header / rows / footer, phases `Resolving → Downloading → Uploading → Done`
-- [ ] Animated ellipsis while a transfer is active; counters + failure count (FR-7.4/7.6)
-- [ ] Coalescing at `render_interval` / `anim_interval`; never drop the final result (FR-7.7, E8)
-- [ ] Deleted-status recreation (E7); replace-not-append on completion (FR-7.9)
+- [x] `telegram/status.py`: header / rows / footer, phases `Resolving → Downloading → Uploading → Done`.
+      One renderer per job, editing the message `/dl` already posted — the job's stored
+      `status_message_id` is passed in, which is what makes the "one message per job" rule (FR-7.1)
+      hold across a worker restart rather than only within one attempt
+- [x] Animated ellipsis while a transfer is active (FR-7.6); counters for files and bytes, and
+      FR-7.5's per-file upload context (`Uploading (file 7/25)`) reported from `delivery.deliver`
+      through an `on_upload` hook
+- [x] Coalescing at `render_interval` / `anim_interval` with an **injected clock**, so the intervals
+      are tested without sleeping; the final result bypasses both (FR-7.7, E8)
+- [x] Deleted-status recreation, once (E7); `FloodWait` waited out and retried, then dropped rather
+      than raised — a report must never fail the download it reports on; replace-not-append on
+      completion (FR-7.9)
+- [x] Failure count in the rows (FR-7.4), taken from the pipeline's returned failures because that is
+      where per-file failures are collected
 
-**Done when:** AC-2 asserts phase progression on one message id; E7/E8 replays pass.
+**Done when:** AC-2 asserts phase progression on one message id; E7/E8 replays pass. **Met:**
+`tests/unit/test_status.py` drives the phases, both intervals, E7 and E8 against a scripted client and
+a hand-advanced clock; `test_ac2_*` asserts the delivered status and the replaced message end to end.
 
 ### P5 — Telegram downloads & account sessions
 - [ ] `/login` phone → code → 2FA with the spec §7.6 error copy (E13/E14/E15)
@@ -530,7 +553,7 @@ plan assumed, so these are requirements rather than notes (details in R13):**
 
 | Layer | Scope | Infrastructure |
 |---|---|---|
-| `tests/unit` | tier/quota math, referral rules, catalog rendering, album batching, status coalescing, mask helpers, the fetcher, the merge, and the per-link pipeline | none (the fetcher's and the pipeline's tests run a real HTTP server on loopback and generate their media with ffmpeg — see below) |
+| `tests/unit` | tier/quota math, referral rules, catalog rendering, album batching, status coalescing, mask helpers, the fetcher, the merge, the per-link pipeline, and the payload shape every native adapter parses | none (the fetcher's and the pipeline's tests run a real HTTP server on loopback and generate their media with ffmpeg — see below) |
 | `tests/integration` | queue leases, worker slots, restart recovery, repositories | Postgres via the layered DSN resolver |
 | `tests/acceptance` | FR/AC behaviour through handlers | `tests/fakes/` Kurigram client implementing the same protocol as the real one; a real Postgres, and the loopback server for the pipeline's end-to-end tests |
 | `tests/live` (`@pytest.mark.live`) | only the non-fakeable criteria | Kurigram `test_mode=True` test servers + real hosts |
@@ -541,6 +564,26 @@ plan assumed, so these are requirements rather than notes (details in R13):**
   so AC-1…AC-15 run in CI with no network and no accounts.
 - **Injected deterministic clock** into quota, referral and scheduler so the daily reset and the 30-day
   bonus window are tested exactly (§8.5).
+- **The bridge adapters are tested against the *payload*, not the site** (`tests/unit/test_sites.py`).
+  A scripted session answers whatever a test says, so the assertions are about naming, media kind and
+  transfer role — the parts delivery depends on. What this cannot prove is that the site still answers
+  that way, which is exactly why the live matrix below exists as a separate, explicit step rather than
+  being folded into the suite and assumed green.
+
+### The live smoke matrix for the bridge adapters (not yet run)
+
+Thirteen of the ported hosts are reached through a third-party "saver" endpoint, and two need an
+account. Their payload shapes are pinned by tests; their *liveness* is not, and pretending otherwise
+would be the kind of green that hides a broken chain. So a real check is one URL each, run with
+`SPIDEY_TEST_MODE=true` and `@pytest.mark.live`, expecting one of two outcomes per host — a resolved
+file, or a `ResolveError` the chain moves on from:
+
+| Group | Hosts | Needs |
+|---|---|---|
+| Ad-gated video hosts | Doodstream, StreamTape, MixDrop, StreamWish, Vidmonstr, Vidara, Luluvdoo, Bysejikuar | a fresh, live link each (these expiry quickly) |
+| Bridge-only platforms | Twitter/X, TikTok, Douyin, Threads, Bluesky, Pinterest, Tumblr, Snapchat, LinkedIn, CapCut, Dailymotion, Kuaishou, SoundCloud | nothing but a public post URL |
+| Account-backed | TeraBox, Reddit, Spotify (bridge is DRM-matched) | a TeraBox cookie file, Reddit credentials, a public track |
+| Engines | YouTube, MEGA, Cyberdrop family | nothing, plus the cyberdrop-dl delegate installed |
 - A third kind of test joins those two: **anything whose behaviour *is* the transport is tested against
   the real thing, not a stub.** `tests/fakes/server.py` is a `ThreadingHTTPServer` on loopback that
   serves bodies a test writes (and generated ones it asks for), records the headers it receives, and
@@ -711,7 +754,7 @@ DB password is never embedded in a URL — the DSN is assembled at runtime from 
 | R1 | `tgcrypto` has no cp312+ wheel, so fast AES must be **compiled from the sdist** (last release 2022-11-11: plain hand-written C, not Cython) | Installs need a C toolchain, and a future CPython could break the 2022 C | **Compiled from source and required, not optional** — the source build is verified on 3.14 (MSVC `cl`/`link`, import, IGE+CTR round-trip) and the live connection confirms Kurigram selects it. The `pyaes` fallback is 291× slower (0.59 vs 171.4 MiB/s), so it is not a safety net. Mitigations: MSVC Build Tools on Windows, a `gcc` builder stage in Docker (**verified** — the image compiles it and `spideybot check` reports `ok` inside the container), a **startup check** that reports a missing accelerator, and a pin plus smoke test whenever CPython moves |
 | R2 | Telegram flood limits on frequent status edits | Status errors, stalled jobs | Coalesced editor + `FloodWait` sleep/retry; the final result is always sent (FR-7.7, E8) |
 | R3 | Per-user clients are expensive (socket + crypto state each) | Memory/connection exhaustion | Live cap + idle reaping + LRU (D21); sessions live on disk, clients start on demand |
-| R4 | Third-party hosts drift or add anti-bot gates | Downloads break silently over time | Registry + layered fallback (D5); per-engine end-to-end tests; camoufox for gated hosts |
+| R4 | Third-party hosts drift or add anti-bot gates | Downloads break silently over time | Registry + layered fallback (D5); per-engine end-to-end tests; camoufox for gated hosts. **Amended 2026-10:** twenty-seven native adapters are now wired, of which thirteen are third-party *bridges* — the largest standing breakage surface in the project. Bounded deliberately: every bridge failure is a `ResolveError`, so the chain falls through to the engines and then the delegate, and the worst case is a rejected link rather than a failed job. The shared plumbing is one module (`sites/bridge.py`) with its own tests, so a change to the request shape is one edit rather than twenty-five. The remaining exposure is that a bridge's *payload* can change without its HTTP shape changing; the fixture tests pin the parse, and only the live matrix above can detect that |
 | R5 | TeraBox account pool blocked or limited (E16) | TeraBox failures | Round-robin pool, skip-on-block, clear reason including account count |
 | R6 | Multi-hour jobs across a restart | Duplicate delivery or lost work | Leased queue + `job_items` ledger; delivered jobs never re-run |
 | R7 | Windows dev vs Linux prod (uvloop absent, path/case sensitivity) | "Works on my machine" | `app/paths.py`; uvloop optional and guarded (D17); CI on Linux, dev on Windows |
@@ -722,6 +765,8 @@ DB password is never embedded in a URL — the DSN is assembled at runtime from 
 | R12 | Legal/ToS of user-mediated downloads | Reputational | README states users may only download content they are entitled to; no moderation policy (spec §14) |
 | R13 | Downloading resolved URLs ourselves (D25) | Sites that need a `Referer`, a specific `User-Agent` or per-site cookies will return 403 when we fetch directly; and a yt-dlp-backed item can resolve to a `webpage_url` or a DASH/HLS *manifest* rather than a fetchable media URL | **Probed 2026-10 with gallery-dl 1.32.15 and yt-dlp 2026.08.19; the plan's assumption was wrong in a way that would have produced a broken parser.** `gallery-dl -j` emits one pretty-printed JSON *array* whose records are typed and positional — `[3, "<url>", {meta}]` for a file, `[2, {meta}]` for a directory, `[-1, {error, message}]` for a failure — so the URL is **not** a dict key, and it is **exit 0 on failure**, which means the exit code cannot be the success signal. For yt-dlp-backed sites the record's URL slot is a **`ytdl:` marker** carrying no media at all (`extension: None`), so the fetchable URLs must be read from `metadata["formats"]` / `metadata["requested_formats"]` — and those are time-limited, so a resolved job must be fetched promptly rather than queued against a stale URL. `yt-dlp -j` emits **one JSON object** (a different shape, needing its own parser) and its top-level dict can have **no `url`**: the probed video resolved to a merge (`protocol: https+https`, `requested_formats` length 2) with the URLs only inside `requested_formats`. Neither engine offers a single-file YouTube format any more (0 of 53), so the merge path is the normal path. Per-host header/cookie map still required |
 | R14 | **`.env` quoting was read differently by `python-dotenv` and Docker's `--env-file`** | A value quoted the way `.env.example` recommends loaded correctly on the host but arrived **still quoted** in a container, so startup failed validation — a failure that never reproduces locally | **Fixed.** `load_env_file` normalises `SPIDEY_*` values in the environment (`strip_env_quotes`), so one `.env` behaves identically in both places. Verified by re-running the container with the real `.env`, which previously failed with `invalid literal for int()`. `.env.example` now documents only what `--env-file` also supports, marking `${VAR}` expansion and inline comments as host-only |
+| R15 | **The bundled Postgres port can become unbindable** | `db start` fails with a message about `pg_ctl`, and the real cause is three layers down | **Happened, 2026-10:** the committed default 55432 fell inside a Windows-reserved dynamic range (`55408-55507`, WinError 10013) and every integration test failed at fixture setup. The ranges move as Windows starts services, so this can recur on any checkout. Mitigations: `dbprovider.start` now binds the port *before* launching `pg_ctl` and reports the cause and the remedy (`[db] port` in `config/local.toml`); `config/local.toml` is the documented gitignored override and is where this checkout moved to 54329; and the two tests that assert the committed defaults hide `local.toml`, so a local override cannot make them fail. Left as a risk rather than fixed by auto-selecting a port, because moving an operator's database out from under them silently would be worse than a clear error |
+| R16 | **PRAW's borrowed Reddit application pairs** | Reddit rate-limits or retires a shared client id, and the fallback then fails on every Reddit link | D45: configured credentials are tried first, each failure is logged with the client id that failed, and the reason reaches the user as E2's message. The pairs are application identities rather than secrets, and the fallback exists so a self-hoster without a Reddit app still gets something — with the trade-off stated rather than hidden (R12's terms-of-service note covers the rest) |
 
 ---
 

@@ -3,6 +3,9 @@ name = "spideybot"
 version = "0.1.0"
 description = "Telegram media downloader bot (TeraBox, YouTube, TikTok, Reddit, 30+ platforms)"
 requires-python = ">=3.14"
+dependencies = [
+    "cryptography>=50.0.2",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
