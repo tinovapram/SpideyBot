@@ -32,6 +32,35 @@ from downloader.contracts import Resolution
 from downloader.fetcher import FetchedFile, ProgressHook
 from downloader.flow import DelegatingFetch, Resolver
 from downloader.selection import Preference
+from downloader.sites import (
+    bluesky,
+    bysejikuar,
+    capcut,
+    cyberdrop,
+    dailymotion,
+    doodstream,
+    douyin,
+    kuaishou,
+    linkedin,
+    luluvdoo,
+    mega,
+    mixdrop,
+    pinterest,
+    reddit,
+    snapchat,
+    soundcloud,
+    spotify,
+    streamtape,
+    streamwish,
+    terabox,
+    threads,
+    tiktok,
+    tumblr,
+    twitter,
+    vidara,
+    vidmonstr,
+    youtube,
+)
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +73,16 @@ CYBERDROP = "cyberdrop-dl"
 VIDEO_HOSTS = probe.YOUTUBE_HOSTS
 
 StopCheck = Callable[[], bool]
+
+
+def _engine(module: Any, **kwargs: Any) -> Resolver:
+    """One row of the native table: a module's own resolver, with the arguments it needs.
+
+    The keyword names differ between adapters on purpose (YouTube needs a preference, Reddit needs
+    credentials, the rest need cookies and a timeout), so a row lists only what its adapter takes
+    rather than every adapter accepting every argument.
+    """
+    return module.resolver(**kwargs)
 
 
 @dataclass(frozen=True)
@@ -79,6 +118,11 @@ def gallerydl_resolver(context: ChainContext) -> Resolver:
             preference=context.preference,
             timeout=context.timeout,
             cookies_file=context.cookies_file,
+            # An extractor that needs a credential gets it as `-o`, from the adapter's own scoped
+            # options. Reddit is the one that does: D26's committed config file was never needed,
+            # because an option on the command line cannot be shadowed by the operator's own
+            # gallery-dl config.
+            extractor_options=context.options.get(GALLERYDL),
         )
 
     return Resolver(name=GALLERYDL, attempt=attempt)
@@ -98,6 +142,86 @@ def ytdlp_resolver(context: ChainContext) -> Resolver:
     return Resolver(name=YTDLP, attempt=attempt)
 
 
+def native_resolvers(
+    url: str, context: ChainContext
+) -> tuple[Resolver, ...]:
+    """Every native adapter that claims this link, in the table's order.
+
+    A table rather than a ladder of ``elif``s. The ladder was one branch per host and worked while
+    there were twelve; with twenty-seven it becomes a place where a wrong ``elif`` silently hides
+    every host below it, and only a smoke test against the hidden site would notice. A row states
+    "this module claims these hosts", the order is the tuple's order, and
+    ``tests/unit/test_registry.py`` asserts that no two rows claim the same host and that every
+    module in the package appears exactly once.
+
+    Returns *all* matches rather than the first: an adapter that claims a host and then fails is
+    exactly the case the next entry in the chain exists for, and a host legitimately served by two
+    adapters (a shortener and its target) should try both.
+    """
+    found: list[Resolver] = []
+    for module, arguments, scope in _NATIVE_TABLE:
+        if not module.matches(url):
+            continue
+        resolved = {name: _argument(name, context, scope) for name in arguments}
+        found.append(module.resolver(**resolved))
+    return tuple(found)
+
+
+def _argument(name: str, context: ChainContext, scope: str) -> Any:
+    """One keyword for an adapter's factory, taken from the context.
+
+    ``options`` is handed over *scoped to the adapter's own name* rather than whole: the caller
+    (:func:`app.jobs._adapter_options`) writes ``{"reddit": {...}}``, so this adapter sees the inner
+    mapping and never the outer one. That keeps per-site knowledge out of both directions — the
+    registry does not know which key an adapter wants, and the caller does not know which argument
+    name an adapter's factory happens to use.
+    """
+    match name:
+        case "cookies_file":
+            return context.cookies_file
+        case "timeout":
+            return context.timeout
+        case "preference":
+            return context.preference
+        case "options":
+            return dict(context.options.get(scope, {}))
+        case _:  # pragma: no cover - a table row naming an argument nothing provides
+            raise AssertionError(f"no source for adapter argument {name!r}")
+
+
+#: ``(module, the keyword arguments its factory takes, its options scope)``. The order is the order
+#: they are tried in, and the scope is how an adapter's slice of configuration is addressed.
+_NATIVE_TABLE: tuple[tuple[Any, tuple[str, ...], str], ...] = (
+    (youtube, ("preference", "timeout", "cookies_file"), "youtube"),
+    (terabox, ("cookies_file", "timeout"), "terabox"),
+    (cyberdrop, ("cookies_file", "timeout"), "cyberdrop-family"),
+    (doodstream, ("cookies_file", "timeout"), "doodstream"),
+    (streamtape, ("cookies_file", "timeout"), "streamtape"),
+    (mixdrop, ("cookies_file", "timeout"), "mixdrop"),
+    (streamwish, ("cookies_file", "timeout"), "streamwish"),
+    (vidmonstr, ("cookies_file", "timeout"), "vidmonstr"),
+    (vidara, ("cookies_file", "timeout"), "vidara"),
+    (luluvdoo, ("cookies_file", "timeout"), "luluvdoo"),
+    (bysejikuar, ("cookies_file", "timeout"), "bysejikuar"),
+    (mega, ("cookies_file", "timeout"), "mega"),
+    (twitter, ("cookies_file", "timeout"), "twitter"),
+    (reddit, ("options", "timeout"), "reddit"),
+    (tiktok, ("cookies_file", "timeout"), "tiktok"),
+    (douyin, ("cookies_file", "timeout"), "douyin"),
+    (threads, ("cookies_file", "timeout"), "threads"),
+    (bluesky, ("cookies_file", "timeout"), "bluesky"),
+    (pinterest, ("cookies_file", "timeout"), "pinterest"),
+    (tumblr, ("cookies_file", "timeout"), "tumblr"),
+    (snapchat, ("cookies_file", "timeout"), "snapchat"),
+    (linkedin, ("cookies_file", "timeout"), "linkedin"),
+    (capcut, ("cookies_file", "timeout"), "capcut"),
+    (dailymotion, ("cookies_file", "timeout"), "dailymotion"),
+    (kuaishou, ("cookies_file", "timeout"), "kuaishou"),
+    (soundcloud, ("cookies_file", "timeout"), "soundcloud"),
+    (spotify, ("cookies_file", "timeout"), "spotify"),
+)
+
+
 def chain_for(url: str, context: ChainContext | None = None) -> tuple[Resolver, ...]:
     """The ordered attempts for one link.
 
@@ -108,7 +232,16 @@ def chain_for(url: str, context: ChainContext | None = None) -> tuple[Resolver, 
     host = probe.host_of(url)
 
     chain: list[Resolver] = list(settings.natives)
-    if is_video_host(host):
+    # A caller-supplied adapter wins over the table for the same host: that is how a test drives one
+    # adapter without a network, and how a future per-user override would work.
+    claimed = {resolver.name for resolver in chain}
+    chain.extend(
+        resolver for resolver in native_resolvers(url, settings) if resolver.name not in claimed
+    )
+
+    # Engine fallbacks. yt-dlp for the video hosts it resolves natively (D5), then gallery-dl for
+    # everything else; the delegate runs after both (D38).
+    if is_video_host(host) and YTDLP not in claimed:
         chain.append(ytdlp_resolver(settings))
     chain.append(gallerydl_resolver(settings))
     return tuple(chain)

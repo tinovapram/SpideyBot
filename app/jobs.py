@@ -28,11 +28,12 @@ What is left here is bookkeeping, and three pieces of it are the reason this mod
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
+from pyrogram import Client
 from sqlalchemy import select
 
 from app import catalog, paths, quota, tiers, workers
@@ -41,7 +42,7 @@ from app.config import Settings
 from app.models import Job, JobItem
 from downloader import flow, registry
 from downloader.fetcher import FetchedFile
-from telegram import delivery
+from telegram import delivery, status
 
 log = logging.getLogger(__name__)
 
@@ -49,64 +50,11 @@ log = logging.getLogger(__name__)
 DELIVERED = "uploaded"
 FAILED = "failed"
 
-
-@dataclass(frozen=True)
-class JobDialogue:
-    """The messages a finished job produces, before anything is sent.
-
-    Returning the text rather than sending it keeps the wording decisions testable on their own, and
-    keeps this module from being the second place that knows catalog's format strings.
-    """
-
-    body: str
-    delivered: int
-    failed: int
-
-
-def final_message(outcome: flow.LinkResult, *, total: int) -> JobDialogue:
-    """FR-7.9's replacement message, in the shapes the spec fixes.
-
-    The failure block is appended rather than sent separately (FR-9.4), so a job with 17 successes
-    and 3 failures stays one message.
-    """
-    delivered = len(outcome.files)
-    failed = len(outcome.failures)
-    block = catalog.failure_block(list(outcome.failures))
-
-    if outcome.refused is not None:
-        body = catalog.limit_exceeded_message(
-            actual_mb=outcome.refused.actual_mb, limit_mb=outcome.refused.limit_mb
-        )
-        return JobDialogue(body=body, delivered=0, failed=0)
-
-    if outcome.cancelled:
-        return JobDialogue(body=catalog.DOWNLOAD_CANCELLED, delivered=0, failed=failed)
-
-    if outcome.empty_share:
-        return JobDialogue(body=catalog.EMPTY_SHARE, delivered=0, failed=0)
-
-    if delivered == 0:
-        reason = outcome.reason or catalog.NO_FILES_SENT
-        body = catalog.ERROR_OCCURRED.format(error=reason)
-        return JobDialogue(body=f"{block}\n{body}" if block else body, delivered=0, failed=failed)
-
-    body = catalog.DONE_WITH_FILES.format(
-        sent=delivered, total=max(total, delivered), size=_mb(outcome.bytes_written)
-    )
-    return JobDialogue(
-        body=f"{body}\n{block}" if block else body, delivered=delivered, failed=failed
-    )
-
-
-def _mb(count: int) -> str:
-    """Whole megabytes for the done message, which shows ``{size} MB`` (spec §7.6)."""
-    return f"{count / (1024 * 1024):.1f}".rstrip("0").rstrip(".")
-
-
 def build_handler(
     settings: Settings,
     *,
     sender_for: delivery.SenderFor,
+    client: Client,
     chain_for: Callable[..., tuple[flow.Resolver, ...]] = registry.chain_for,
     delegate_for: Callable[..., flow.DelegatingFetch | None] = registry.delegate_for,
 ) -> workers.JobHandler:
@@ -122,9 +70,25 @@ def build_handler(
         context = registry.ChainContext(
             preference=settings.download.video_preference,
             cookies_file=_cookies(user_id),
+            options=_adapter_options(settings),
         )
         already = await _ledger(job.id)
 
+        # FR-7.1: one message per job, edited in place. It is the message /dl already posted, so the
+        # renderer is told its id rather than allowed to create a second one.
+        status_renderer = status.create_status_renderer(
+            client,
+            chat_id=job.status_chat_id or user_id,
+            job_id=job.id,
+            link=job.link,
+            message_id=job.status_message_id,
+            config=status.StatusConfig(
+                render_interval=settings.ux.render_interval,
+                anim_interval=settings.ux.anim_interval,
+            ),
+        )
+
+        log.info("Starting download_link for job %s", job.id)
         outcome = await flow.download_link(
             job.link,
             paths.job_tmp_dir(job.id),
@@ -132,14 +96,31 @@ def build_handler(
             chain=chain_for(job.link, context),
             delegate=delegate_for(context),
             should_stop=lambda: keeper.stop_requested,
-            on_phase=lambda phase: _note_phase(job.id, phase),
+            on_phase=_phase_hook(status_renderer),
+            on_progress=status_renderer.progress,
+            on_notice=status_renderer.notice,
         )
+        log.info(
+            "job %s: %d file(s), %d failure(s), cancelled=%s, refused=%s, empty=%s, reason=%s",
+            job.id,
+            len(outcome.files),
+            len(outcome.failures),
+            outcome.cancelled,
+            outcome.refused is not None,
+            outcome.empty_share,
+            outcome.reason,
+        )
+
+        # FR-7.4's failure count is known now rather than during the download, because the pipeline
+        # collects failures per file instead of streaming them.
+        await status_renderer.failures(len(outcome.failures))
 
         # Ledger first, then send: a file sent but not recorded would be delivered twice on the next
         # attempt (FR-8.5), which is the worse of the two failures.
         fresh = [item for item in outcome.files if _identity(item) not in already]
         delivered: tuple[delivery.Delivered, ...] = ()
         if fresh:
+            await status_renderer.start_uploading(len(fresh))
             delivered = await delivery.deliver(
                 fresh,
                 chat_id=job.status_chat_id or user_id,
@@ -147,6 +128,7 @@ def build_handler(
                 reply_to_message_id=job.status_message_id,
                 caption_of=delivery.default_caption,
                 album_size=settings.ux.album_size,
+                on_upload=status_renderer.uploaded,
             )
 
         await _record(
@@ -156,11 +138,11 @@ def build_handler(
             skipped=[item for item in outcome.files if item not in fresh],
         )
         await _charge(user_id, outcome)
-        await _notify(
-            sender_for,
-            job,
-            final_message(outcome, total=len(outcome.files) + len(outcome.failures)),
-        )
+
+        # FR-7.9: the final result *replaces* the progress message rather than following it. The
+        # renderer owns that message, so the replacement happens there and this handler sends
+        # nothing of its own.
+        await status_renderer.finish(outcome)
 
         if outcome.cancelled:
             return workers.JobOutcome(ok=False, reason="cancelled", retry=False)
@@ -178,10 +160,62 @@ def build_handler(
     return handle
 
 
+def _phase_hook(renderer: status.StatusRenderer) -> Callable[[str], Awaitable[None]]:
+    """Translate the pipeline's phase names into the status message's (FR-7.3).
+
+    The pipeline only owns the first two phases; ``uploading`` and ``done`` are the worker's, driven
+    by the delivery steps the handler performs.
+    """
+
+    async def report(phase: str) -> None:
+        mapped = status.Phase.DOWNLOADING if phase == "downloading" else status.Phase.RESOLVING
+        await renderer.phase(mapped)
+
+    return report
+
+
 def _cookies(user_id: int) -> Path | None:
     """This user's cookie file, when they have set one (D8/FR-14)."""
     path = paths.cookie_path(user_id)
     return path if path.is_file() else None
+
+
+def _adapter_options(settings: Settings) -> dict[str, Any]:
+    """Configuration an adapter or an engine needs, as plain values.
+
+    Two scopes, both keyed by the name the strategy is known by: an adapter reads its own name
+    (``reddit``), and gallery-dl reads ``gallery-dl``. The registry passes the matching slice
+    through untouched (D39), so this is the one place that knows both what a consumer wants and
+    where configuration keeps it — and the values are flat, because an adapter should not have to
+    know that credentials live in a ``Settings`` model.
+
+    ``gallery-dl``'s slice is already in *its* vocabulary (``extractor.reddit.client-id``) rather
+    than in ours, because that string is a key in someone else's configuration file and translating
+    it twice would only add a place to get it wrong.
+    """
+    options: dict[str, Any] = {}
+
+    reddit: dict[str, Any] = {}
+    if settings.reddit_praw_client_id is not None:
+        reddit["client_id"] = settings.reddit_praw_client_id.get_secret_value()
+    if settings.reddit_praw_client_secret is not None:
+        reddit["client_secret"] = settings.reddit_praw_client_secret.get_secret_value()
+    if reddit:
+        options["reddit"] = reddit
+
+    extractor: dict[str, str] = {}
+    if settings.gdl_reddit_client_id is not None:
+        extractor["extractor.reddit.client-id"] = (
+            settings.gdl_reddit_client_id.get_secret_value()
+        )
+    if settings.gdl_reddit_refresh_token is not None:
+        extractor["extractor.reddit.refresh-token"] = (
+            settings.gdl_reddit_refresh_token.get_secret_value()
+        )
+    if extractor:
+        options["gallery-dl"] = extractor
+
+    return options
 
 
 async def _note_phase(job_id: int, phase: str) -> None:
@@ -293,17 +327,3 @@ async def _charge(user_id: int, outcome: flow.LinkResult) -> None:
         if not outcome.files:
             # Nothing was delivered, so the day's download is handed back rather than spent.
             await quota.release_download(session, user_id)
-
-
-async def _notify(sender_for: delivery.SenderFor, job: Job, dialogue: JobDialogue) -> None:
-    """The one message a job ends with (FR-7.9)."""
-    chat_id = job.status_chat_id or job.user_id
-    sender = await delivery.resolve_sender(sender_for, chat_id)
-    try:
-        await sender.send_message(
-            chat_id=chat_id,
-            text=dialogue.body,
-            reply_to_message_id=job.status_message_id,
-        )
-    except Exception:  # noqa: BLE001 - a user who blocked the bot must not fail their job twice
-        log.warning("could not report the result of job %s", job.id, exc_info=True)

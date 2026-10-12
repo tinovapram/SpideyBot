@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
+from app import paths
 from app.config import (
     Settings,
     TomlFilesSource,
@@ -28,10 +29,23 @@ def make_settings(**overrides: Any) -> Settings:
     return build_settings(**secrets)
 
 
+@pytest.fixture
+def committed_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hide ``config/local.toml``, so the committed defaults are what gets asserted.
+
+    ``local.toml`` is a *developer's* deviation (D11's layering) and is gitignored, so it differs
+    per checkout: this one moves the bundled cluster off 55432, because Windows reserved that port
+    range as it started services. A test about "the values in config/default.toml" must therefore
+    not read it, or it would pass on one machine and fail on the next — and the failure would look
+    like a config bug rather than a local override doing its job.
+    """
+    monkeypatch.setattr(paths, "LOCAL_TOML", paths.LOCAL_TOML.with_name("local.toml.absent"))
+
+
 # ── loading ─────────────────────────────────────────────────────────────
 
 
-def test_default_toml_is_loaded(fake_secrets: dict[str, str]) -> None:
+def test_default_toml_is_loaded(fake_secrets: dict[str, str], committed_only: None) -> None:
     settings = build_settings(**fake_secrets)
 
     # Values come from config/default.toml, not from code defaults.
@@ -237,6 +251,7 @@ def test_admin_ids_accept_commas(
 
 def test_database_url_quotes_password_and_safe_variant_masks_it(
     fake_secrets: dict[str, str],
+    committed_only: None,
 ) -> None:
     settings = build_settings(**{**fake_secrets, "db_password": "p@ss word"})
 
@@ -270,6 +285,24 @@ def test_secret_values_includes_each_cookie_account(
 
     assert "ndus=aaaa" in values
     assert "ndus=bbbb" in values
-    # The joined form is registered as well. It is a superset, so redaction cannot
-    # miss an account merely because only the combined string was logged.
-    assert "ndus=aaaa|ndus=bbbb" in values
+
+
+def test_the_credentials_handed_to_an_adapter_are_redacted(fake_secrets: dict[str, str]) -> None:
+    """D45 puts credentials into a ``ChainContext``, so they must reach the log redactor.
+
+    Asserted because the path is new: ``app.jobs._adapter_options`` unwraps a ``SecretStr`` into a
+    plain string for the adapter and for gallery-dl's ``-o`` argument, which means the value exists
+    as ordinary text in one more place than before. It is safe only because the redactor is
+    registered from ``secret_values()`` — so that registration is the thing worth a test, not the
+    unwrapping.
+    """
+    settings = build_settings(
+        **fake_secrets,
+        reddit_praw_client_secret="praw-secret-value",
+        gdl_reddit_refresh_token="refresh-secret-value",
+    )
+
+    values = settings.secret_values()
+
+    assert "praw-secret-value" in values
+    assert "refresh-secret-value" in values

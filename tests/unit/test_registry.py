@@ -7,7 +7,12 @@ anything: the composition is this module's whole job, and it is verifiable witho
 
 from __future__ import annotations
 
+import importlib
+import pkgutil
 from pathlib import Path
+from typing import Any
+
+import pytest
 
 from downloader import probe, registry
 from downloader.contracts import Resolution
@@ -22,20 +27,23 @@ def native(name: str = "terabox") -> Resolver:
 
 
 def test_a_video_link_tries_ytdlp_before_gallerydl() -> None:
-    """D5: gallery-dl can reach YouTube only through a marker that carries no media."""
+    """D5: gallery-dl can reach YouTube only through a marker that carries no media.
+    
+    Now with native youtube resolver first (D6), then yt-dlp library, then gallery-dl.
+    """
     chain = registry.chain_for("https://www.youtube.com/watch?v=x")
 
-    assert registry.chain_names(chain) == (registry.YTDLP, registry.GALLERYDL)
+    assert registry.chain_names(chain) == ("youtube", registry.YTDLP, registry.GALLERYDL)
 
 
 def test_a_short_video_link_is_recognised() -> None:
-    assert registry.chain_names(registry.chain_for("https://youtu.be/x"))[0] == registry.YTDLP
+    assert registry.chain_names(registry.chain_for("https://youtu.be/x"))[0] == "youtube"
 
 
 def test_a_subdomain_is_recognised() -> None:
     chain = registry.chain_for("https://m.youtube.com/watch?v=x")
 
-    assert registry.chain_names(chain)[0] == registry.YTDLP
+    assert registry.chain_names(chain)[0] == "youtube"
 
 
 def test_a_lookalike_host_is_not_a_video_host() -> None:
@@ -98,6 +106,23 @@ def test_a_cookie_file_reaches_the_engine() -> None:
     assert "--cookies" not in without
 
 
+def test_an_extractor_credential_reaches_the_engine_as_an_option() -> None:
+    """Reddit needs a client id, and it travels as ``-o`` rather than in a config file.
+
+    A committed config file was the original plan (D26); an option is better because it cannot be
+    shadowed by whatever the operator has in their own gallery-dl configuration, which is the same
+    reason the ytdl flag is passed this way.
+    """
+    command = probe.gallerydl_command(
+        "https://www.reddit.com/r/x/comments/1/y",
+        extractor_options={"extractor.reddit.client-id": "abc"},
+    )
+
+    assert "-o" in command
+    assert "extractor.reddit.client-id=abc" in command
+    assert command[-1] == "https://www.reddit.com/r/x/comments/1/y"
+
+
 def test_the_context_carries_the_preference_and_the_cookiefile_into_the_resolver() -> None:
     """The chain is built from the context, so a per-user setting cannot be forgotten later."""
     context = registry.ChainContext(preference="quality", cookies_file=Path("u/1.txt"))
@@ -117,3 +142,125 @@ def test_is_video_host_matches_subdomains_but_not_lookalikes() -> None:
     assert registry.is_video_host("m.youtube.com") is True
     assert registry.is_video_host("notyoutube.com") is False
     assert registry.is_video_host("youtube.com.evil.test") is False
+
+
+# ── the native table, and the host knowledge in it ───────────────────────────
+
+
+#: One URL per adapter, so a new adapter's *absence* from the chain is a test failure rather than a
+#: discovery made by a user whose link quietly fell through to gallery-dl.
+HOST_FOR_ADAPTER: dict[str, str] = {
+    "youtube": "https://www.youtube.com/watch?v=x",
+    "terabox": "https://www.terabox.com/s/abc",
+    "cyberdrop-family": "https://cyberdrop.me/a/abc",
+    "doodstream": "https://dood.stream/d/abc",
+    "streamtape": "https://streamtape.com/v/abc",
+    "mixdrop": "https://mixdrop.co/e/abc",
+    "streamwish": "https://streamwish.to/e/abc",
+    "vidmonstr": "https://vidmonstr.com/v/abc",
+    "vidara": "https://vidara.com/v/abc",
+    "luluvdoo": "https://luluvdoo.com/v/abc",
+    "bysejikuar": "https://bysejikuar.com/v/abc",
+    "mega": "https://mega.nz/file/abc",
+    "twitter": "https://twitter.com/user/status/1",
+    "reddit": "https://www.reddit.com/r/x/comments/1/y",
+    "tiktok": "https://www.tiktok.com/@user/video/1",
+    "douyin": "https://www.douyin.com/video/1",
+    "threads": "https://www.threads.net/@user/post/1",
+    "bluesky": "https://bsky.app/profile/user/post/1",
+    "pinterest": "https://www.pinterest.com/pin/1/",
+    "tumblr": "https://staff.tumblr.com/post/1",
+    "snapchat": "https://www.snapchat.com/spotlight/1",
+    "linkedin": "https://www.linkedin.com/posts/1",
+    "capcut": "https://www.capcut.com/watch/1",
+    "dailymotion": "https://www.dailymotion.com/video/1",
+    "kuaishou": "https://www.kuaishou.com/short-video/1",
+    "soundcloud": "https://soundcloud.com/user/track",
+    "spotify": "https://open.spotify.com/track/1",
+}
+
+
+@pytest.mark.parametrize(("name", "link"), sorted(HOST_FOR_ADAPTER.items()))
+def test_every_adapter_is_reachable_by_its_own_host(name: str, link: str) -> None:
+    """Each native adapter claims at least the host it was written for.
+
+    The failing mode this prevents is silent: a host no row claims falls through to gallery-dl, so
+    the user gets nothing (or the wrong thing) rather than an error naming the adapter that should
+    have handled it.
+    """
+    chain = registry.chain_names(registry.chain_for(link))
+
+    assert name in chain, f"{name} is not in the chain for {link}: {chain}"
+    assert chain[0] == name, "the native adapter runs before either engine"
+
+
+def test_no_two_adapters_claim_the_same_host() -> None:
+    """Two rows claiming one host is how a chain ends up trying the wrong adapter first."""
+    claims: dict[str, list[str]] = {}
+    for name, link in HOST_FOR_ADAPTER.items():
+        host = probe.host_of(link)
+        claims.setdefault(host, []).append(name)
+
+    duplicated = {host: names for host, names in claims.items() if len(names) > 1}
+    assert duplicated == {}, f"more than one adapter names these hosts: {duplicated}"
+
+
+def test_every_module_in_the_sites_package_is_wired_into_the_table() -> None:
+    """A module that exists but is not in the table is dead code pretending to be an adapter."""
+    package = importlib.import_module("downloader.sites")
+    modules = {
+        name
+        for _, name, _ in pkgutil.iter_modules(package.__path__)
+        # `bridge` is shared plumbing and `__init__` is the package itself: neither is an adapter.
+        if name not in {"bridge", "__init__"}
+    }
+    wired = {module.__name__.rsplit(".", 1)[-1] for module, _, _ in registry._NATIVE_TABLE}
+
+    assert modules - wired == set(), (
+        "these site modules are never tried: they are missing from registry._NATIVE_TABLE"
+    )
+    assert wired - modules == set(), "the table names modules that do not exist"
+
+
+def test_an_options_scope_is_reachable_from_the_context() -> None:
+    """D12's seam: an adapter's credentials arrive under its own name, and the registry never reads
+    them. Asserted on Reddit because it is the only adapter that needs one, so a regression here is
+    a silent 'Reddit refused every client id' at runtime rather than a test failure."""
+    captured: dict[str, Any] = {}
+
+    class Spy:
+        name = "reddit"
+
+        @staticmethod
+        def matches(url: str) -> bool:
+            return True
+
+        @staticmethod
+        def resolver(*, options: dict[str, Any], timeout: float) -> Resolver:
+            captured.update(options)
+
+            async def attempt(_: str) -> Resolution:
+                return Resolution(engine="reddit", source_url="u")
+
+            return Resolver(name="reddit", attempt=attempt)
+
+    import downloader.registry as module
+
+    original = module._NATIVE_TABLE
+    module._NATIVE_TABLE = ((Spy, ("options", "timeout"), "reddit"),)
+    try:
+        context = registry.ChainContext(options={"reddit": {"client_id": "abc"}})
+        registry.native_resolvers("https://www.reddit.com/r/x/comments/1/y", context)
+    finally:
+        module._NATIVE_TABLE = original
+
+    assert captured == {"client_id": "abc"}, (
+        "the adapter should see its own slice, not the whole options mapping"
+    )
+
+
+def test_the_table_is_the_whole_chain_for_a_native_host() -> None:
+    """A native host still gets the engines behind it, so an adapter's failure is not the end."""
+    chain = registry.chain_names(registry.chain_for("https://streamtape.com/v/abc"))
+
+    assert chain == ("streamtape", registry.GALLERYDL)

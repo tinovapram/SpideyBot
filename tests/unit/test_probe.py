@@ -318,7 +318,9 @@ async def test_resolve_uses_the_library_for_youtube() -> None:
 async def test_resolve_uses_gallery_dl_for_other_hosts() -> None:
     calls: list[str] = []
 
-    async def fake_gallerydl(url: str, *, timeout: float, cookies_file=None):
+    async def fake_gallerydl(
+        url: str, *, timeout: float, cookies_file=None, extractor_options=None
+    ):
         calls.append("gallerydl")
         return WIKIMEDIA
 
@@ -334,7 +336,9 @@ async def test_resolve_uses_gallery_dl_for_other_hosts() -> None:
 async def test_resolve_raises_the_extractors_own_reason() -> None:
     """A user should see why, not a traceback (FR-9)."""
 
-    async def fake_gallerydl(url: str, *, timeout: float, cookies_file=None):
+    async def fake_gallerydl(
+        url: str, *, timeout: float, cookies_file=None, extractor_options=None
+    ):
         return NOT_FOUND
 
     with pytest.raises(ResolveError) as raised:
@@ -348,7 +352,9 @@ async def test_resolve_raises_the_extractors_own_reason() -> None:
 async def test_resolve_marks_a_folder_only_share_as_empty() -> None:
     """E4 gets its own message, so the flow must be able to tell it from a failure."""
 
-    async def fake_gallerydl(url: str, *, timeout: float, cookies_file=None):
+    async def fake_gallerydl(
+        url: str, *, timeout: float, cookies_file=None, extractor_options=None
+    ):
         return json.dumps([[2, {"category": "x", "page": "y"}]])
 
     with pytest.raises(ResolveError) as raised:

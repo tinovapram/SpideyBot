@@ -63,6 +63,8 @@ RECORD_DIRECTORY = 2
 RECORD_FILE = 3
 RECORD_ERROR = -1
 
+#: A runner is injectable so a test can drive the parsers without a subprocess. The keyword set is
+#: ``(url, timeout=…, cookies_file=…, extractor_options=…)``, all optional beyond the URL.
 GallerydlRunner = Callable[..., Awaitable[str]]
 YtdlpRunner = Callable[..., Awaitable[Mapping[str, Any]]]
 
@@ -96,6 +98,7 @@ def gallerydl_command(
     *,
     executable: str = GALLERYDL_EXECUTABLE,
     cookies_file: Path | None = None,
+    extractor_options: Mapping[str, str] | None = None,
 ) -> list[str]:
     """The gallery-dl invocation, as a list so nothing is interpolated through a shell.
 
@@ -105,8 +108,14 @@ def gallerydl_command(
 
     ``--cookies`` is how a user's own cookie file reaches a host that needs one (D8, FR-14). It is
     passed only when the caller resolved a file, because gallery-dl fails on a path that is absent.
+
+    ``extractor_options`` is how a *credential* reaches an extractor — Reddit's client id, for
+    instance — again as ``-o`` rather than through a config file, for the same reason: an option on
+    the command line cannot be shadowed by whatever the operator has in ``~/.config/gallery-dl``.
     """
     command = [executable, "-j", "--simulate", "-o", YTDL_EXTRACTOR_FLAG]
+    for key, value in (extractor_options or {}).items():
+        command += ["-o", f"{key}={value}"]
     if cookies_file is not None:
         command += ["--cookies", str(cookies_file)]
     return [*command, url]
@@ -329,6 +338,7 @@ async def _run_gallerydl(
     timeout: float = DEFAULT_RESOLVE_TIMEOUT,
     executable: str = GALLERYDL_EXECUTABLE,
     cookies_file: Path | None = None,
+    extractor_options: Mapping[str, str] | None = None,
 ) -> str:
     """Run gallery-dl and return stdout. Raises :class:`ResolveError` only for *process* failures.
 
@@ -337,7 +347,12 @@ async def _run_gallerydl(
     :func:`parse_gallerydl`, which reads what actually happened.
     """
     process = await asyncio.create_subprocess_exec(
-        *gallerydl_command(url, executable=executable, cookies_file=cookies_file),
+        *gallerydl_command(
+            url,
+            executable=executable,
+            cookies_file=cookies_file,
+            extractor_options=extractor_options,
+        ),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -395,6 +410,7 @@ async def resolve_gallerydl(
     preference: Preference = "compatible",
     timeout: float = DEFAULT_RESOLVE_TIMEOUT,
     cookies_file: Path | None = None,
+    extractor_options: Mapping[str, str] | None = None,
     run: GallerydlRunner | None = None,
 ) -> Resolution:
     """Resolve through gallery-dl alone.
@@ -404,7 +420,12 @@ async def resolve_gallerydl(
     no media"; a :class:`ResolveError` means the attempt failed — the distinction E4 and E2 need.
     """
     runner = run or _run_gallerydl
-    stdout = await runner(url, timeout=timeout, cookies_file=cookies_file)
+    stdout = await runner(
+        url,
+        timeout=timeout,
+        cookies_file=cookies_file,
+        extractor_options=extractor_options,
+    )
     parsed = parse_gallerydl(stdout, preference=preference, source_url=url)
     if not parsed.files:
         raise ResolveError(parsed.reason or "nothing downloadable at that link", empty=parsed.empty)
