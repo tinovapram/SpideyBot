@@ -675,6 +675,53 @@ async def test_an_hls_item_without_ffmpeg_says_so(
         await fetcher.fetch(hls_item(hls, "hls/index.m3u8"), tmp_path / "stream.mp4")
 
 
+async def test_a_merge_with_a_playlist_half_keeps_both_streams(
+    hls: FixtureServer, media: Path, staging: Path
+) -> None:
+    """The shape Reddit resolves to: a video *playlist* plus a plain audio file.
+
+    Found live, and the bug it caused was silent: the dispatch used to look for "an hls transfer" on
+    the whole item and send everything down the playlist path, which ignored the audio transfer and
+    delivered a video with no sound. The transport belongs to the transfer, not the item.
+    """
+    audio = (hls.root / "audio.m4a")
+    audio.write_bytes((media / "audio.m4a").read_bytes())
+    item = ResolvedFile(
+        transfers=(
+            Transfer(url(hls, "file/hls/index.m3u8"), "hls"),
+            Transfer(url(hls, "file/audio.m4a"), "audio"),
+        ),
+        filename="reddit.mp4",
+        media_kind="video",
+    )
+
+    result = await fetcher.fetch(item, staging / "reddit.mp4", limit_bytes=50 * MB)
+
+    assert result.merged is True
+    assert streams_in(result.path) == ["audio", "video"], "both halves survived the merge"
+
+
+async def test_a_merge_with_a_playlist_half_still_counts_both_streams_against_the_cap(
+    hls: FixtureServer, media: Path, staging: Path
+) -> None:
+    """D31: the cap is the file's, so the playlist half's bytes count towards it too."""
+    (hls.root / "audio.m4a").write_bytes((media / "audio.m4a").read_bytes())
+    item = ResolvedFile(
+        transfers=(
+            Transfer(url(hls, "file/hls/index.m3u8"), "hls"),
+            Transfer(url(hls, "file/audio.m4a"), "audio"),
+        ),
+        filename="reddit.mp4",
+        media_kind="video",
+    )
+
+    with pytest.raises(SizeLimitExceeded) as caught:
+        await fetcher.fetch(item, staging / "reddit.mp4", limit_bytes=1024)
+
+    assert caught.value.written_bytes > 1024
+    assert list(staging.iterdir()) == []
+
+
 # ── the chain guard: nobody hands the fetcher a playlist it will not consume ──
 
 

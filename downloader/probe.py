@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,6 +38,7 @@ from downloader.contracts import (
     ResolvedFile,
     ResolveError,
     Transfer,
+    TransferRole,
     kind_for,
 )
 from downloader.selection import Preference, choose, from_formats
@@ -57,6 +59,10 @@ YTDL_EXTRACTOR_FLAG = "extractor.ytdl.enabled=true"
 
 DEFAULT_RESOLVE_TIMEOUT = 180.0
 DEFAULT_FILENAME = "download"
+
+#: A stream whose URL is a playlist rather than a file. Matched case-insensitively on the path, not
+#: just the end of the string, because several hosts hang a query string (``?bytestart=…``) off one.
+_PLAYLIST_URL = re.compile(r"\.m3u8(?:[?#]|$)", re.IGNORECASE)
 
 #: Record codes gallery-dl emits. Only 3 carries media; the rest are structure or errors.
 RECORD_DIRECTORY = 2
@@ -280,6 +286,22 @@ def files_from_ytdlp(
     return [item] if (item := _file_from_ytdlp_info(info, preference, source_url)) else []
 
 
+def _role_for(url: str, *, has_video: bool, has_audio: bool) -> TransferRole:
+    """What a yt-dlp-resolved stream *is*, so the fetcher knows how to consume it (D43).
+
+    A URL that is a playlist is `hls` whatever it carries, because the fetcher's choice of transport
+    is about the container rather than the payload: one manifest, fetched by ffmpeg. Everything else
+    keeps the video/audio distinction the merge path needs.
+    """
+    if _PLAYLIST_URL.search(url):
+        return "hls"
+    if has_video:
+        return "video"
+    if has_audio:
+        return "audio"
+    return "file"
+
+
 def _file_from_ytdlp_info(
     info: Mapping[str, Any],
     preference: Preference,
@@ -293,7 +315,14 @@ def _file_from_ytdlp_info(
     roles: list[Transfer] = [
         Transfer(
             url=stream.url or "",
-            role="video" if stream.has_video else ("audio" if stream.has_audio else "file"),
+            # A playlist is a manifest, not a stream to save: it gets the `hls` role so the fetcher
+            # consumes it with ffmpeg (D43). Found live — a Reddit video resolves through yt-dlp to
+            # `v.redd.it/…/CMAF_720.m3u8`, and the role was hardcoded `video` because the YouTube
+            # merge was the only case considered. Without this, that URL reaches the plain download
+            # path and is refused there as a playlist.
+            role=_role_for(
+                stream.url or "", has_video=stream.has_video, has_audio=stream.has_audio
+            ),
             filesize=stream.filesize,
         )
         for stream in selection.streams

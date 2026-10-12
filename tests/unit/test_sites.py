@@ -15,6 +15,7 @@ what the live smoke matrix in the plan is for.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -712,6 +713,148 @@ async def test_reddit_reports_a_post_with_nothing_downloadable(submission: Any) 
     message = await expect_error(reddit, "https://www.reddit.com/r/x/comments/1/y")
 
     assert "nothing downloadable" in message
+
+
+# ── Reddit: an identity chain that has to actually fall through ──────────────
+
+
+class FakeReddit:
+    """A stand-in for the ``praw`` module that refuses whichever identities a test names.
+
+    ``Reddit(...)`` does not contact Reddit in reality either — PRAW constructs lazily and the
+    *first API call* is what authenticates. Modelling that is the point of this double: a client
+    whose ``auth.scopes()`` raises is exactly the 401 the live API returned for the third public
+    pair, and the adapter has to notice it and try the next candidate.
+    """
+
+    def __init__(self, refuse: set[str] | None = None) -> None:
+        self.refuse = refuse or set()
+        self.constructed: list[dict[str, Any]] = []
+        self.validated: list[str] = []
+
+    def Reddit(self, **kwargs: Any) -> Any:
+        self.constructed.append(kwargs)
+        module = self
+        client_id = kwargs["client_id"]
+
+        class Client:
+            read_only = False
+
+            def __init__(self) -> None:
+                self.auth = self
+
+            def scopes(self) -> set[str]:
+                module.validated.append(client_id)
+                if client_id in module.refuse:
+                    raise RuntimeError("received 401 HTTP response")
+                return {"*"}
+
+        return Client()
+
+
+@pytest.fixture
+def praw(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Install a fake ``praw`` for one test."""
+
+    def install(*, refuse: set[str] | None = None) -> FakeReddit:
+        fake = FakeReddit(refuse)
+        monkeypatch.setitem(sys.modules, "praw", fake)
+        return fake
+
+    return install
+
+
+def test_the_public_reddit_pairs_are_used_when_nothing_is_configured(praw: Any) -> None:
+    """The adapter has to work on a checkout with no Reddit app registered (V5 relied on this)."""
+    fake = praw()
+
+    client = reddit._client({}, 30.0)
+
+    assert client is not None
+    first = fake.constructed[0]
+    assert (first["client_id"], first["client_secret"]) == reddit._FALLBACK_APPS[0]
+    assert "refresh_token" not in first, "application-only, since there is no configured login"
+
+
+def test_every_public_pair_is_tried_before_giving_up(praw: Any) -> None:
+    """The list is a chain, not a single hardcoded identity: each one is attempted in turn."""
+    fake = praw(refuse={reddit._FALLBACK_APPS[0][0], reddit._FALLBACK_APPS[1][0]})
+
+    reddit._client({}, 30.0)
+
+    assert [entry["client_id"] for entry in fake.constructed] == [
+        pairing[0] for pairing in reddit._FALLBACK_APPS
+    ]
+
+
+def test_a_dead_pair_falls_through_to_the_next_one(praw: Any) -> None:
+    """The bug this fixes: without validating, the first candidate always 'wins' and a 401 is only
+    discovered later — as 'Reddit would not answer' rather than as an attempt at the next identity.
+
+    The identity that fails here is the *first* one, so the second has to be reached with a real
+    request (the live API confirms the third public pair answers 401 today).
+    """
+    fake = praw(refuse={"icuiw6HNK21QoQ"})
+
+    client = reddit._client({}, 30.0)
+
+    assert client is not None
+    assert fake.validated == ["icuiw6HNK21QoQ", "b70jdVnmRpFmVc12GvVuAw"]
+
+
+def test_every_pair_being_refused_is_a_resolve_error(praw: Any) -> None:
+    praw(refuse={pairing[0] for pairing in reddit._FALLBACK_APPS})
+
+    with pytest.raises(ResolveError, match="would not accept any available client id"):
+        reddit._client({}, 30.0)
+
+
+def test_a_configured_pair_is_tried_before_the_public_ones(praw: Any) -> None:
+    fake = praw()
+
+    reddit._client({"client_id": "mine", "client_secret": "secret"}, 30.0)
+
+    assert fake.constructed[0]["client_id"] == "mine"
+
+
+def test_a_configured_pair_matching_a_public_one_is_not_retried(praw: Any) -> None:
+    """De-duplication: otherwise setting one of the public ids explicitly doubles the requests."""
+    fake = praw()
+
+    reddit._client({"client_id": "icuiw6HNK21QoQ", "client_secret": "x"}, 30.0)
+
+    assert [entry["client_id"] for entry in fake.constructed].count("icuiw6HNK21QoQ") == 1
+
+
+def test_a_refresh_token_is_an_account_login_and_is_tried_first(praw: Any) -> None:
+    fake = praw()
+
+    reddit._client({"client_id": "mine", "refresh_token": "rt"}, 30.0)
+
+    assert fake.constructed[0]["refresh_token"] == "rt"
+    assert fake.constructed[0]["client_id"] == "mine"
+
+
+def test_a_refused_refresh_token_falls_back_to_application_only(praw: Any) -> None:
+    """A revoked token must cost the operator the account login, not the whole adapter."""
+    fake = praw(refuse={"mine"})
+
+    client = reddit._client({"client_id": "mine", "refresh_token": "rt"}, 30.0)
+
+    assert client is not None
+    assert [entry["client_id"] for entry in fake.constructed] == [
+        "mine",
+        "icuiw6HNK21QoQ",
+    ], "the same identity is retried without the token, then the public pairs"
+
+
+def test_a_missing_praw_is_reported_rather_than_raising_import_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(sys.modules, "praw", None)
+
+    with pytest.raises(ResolveError, match="praw is not installed"):
+        reddit._client({}, 30.0)
 
 
 # ── the chain: a dead bridge must not be the end of the job ──────────────────

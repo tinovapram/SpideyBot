@@ -254,6 +254,41 @@ def test_an_info_dict_produces_one_file_with_two_transfers() -> None:
     assert file.source_url == "https://www.youtube.com/watch?v=aqz-KE-bpKQ"
 
 
+def test_a_playlist_stream_is_resolved_as_an_hls_transfer() -> None:
+    """Found live: a Reddit video resolves through yt-dlp to ``v.redd.it/…/CMAF_720.m3u8``.
+
+    The role was hardcoded ``video`` because the YouTube merge was the only case considered, so that
+    URL reached the plain download path and was refused there as a playlist (D43). The role has to
+    follow the *container*: one manifest, consumed by ffmpeg.
+    """
+    info = {
+        "title": "Reddit clip",
+        "formats": [
+            {
+                "url": "https://v.redd.it/abc/CMAF_720.m3u8?bytestart=0",
+                "ext": "mp4",
+                "vcodec": "avc1.64001f",
+                "acodec": "none",
+            }
+        ],
+    }
+
+    file = probe.files_from_ytdlp(info)[0]
+
+    assert file.primary.role == "hls"
+    assert file.filename == "Reddit clip.mp4", "the output of ffmpeg is an MP4"
+
+
+def test_a_playlist_url_with_a_query_string_is_still_recognised() -> None:
+    """Several hosts hang a query string off the manifest, so the match cannot anchor at the end."""
+    playlist = "https://v.redd.it/a/CMAF_720.m3u8?bytestart=0"
+
+    assert probe._role_for(playlist, has_video=True, has_audio=False) == "hls"
+    assert probe._role_for("https://cdn.test/v.mp4", has_video=True, has_audio=False) == "video"
+    assert probe._role_for("https://cdn.test/a.m4a", has_video=False, has_audio=True) == "audio"
+    assert probe._role_for("https://cdn.test/f.bin", has_video=False, has_audio=False) == "file"
+
+
 def test_quality_preference_delivers_a_document_with_a_reason() -> None:
     """D28's fallback: the file is delivered, but not as a video that would fail to play."""
     files = probe.files_from_ytdlp(YTDL_INFO, preference="quality")

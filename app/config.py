@@ -341,6 +341,10 @@ class Settings(BaseSettings):
     gdl_reddit_refresh_token: SecretStr | None = None
     reddit_praw_client_id: SecretStr | None = None
     reddit_praw_client_secret: SecretStr | None = None
+    # An account-level login for the native adapter, tried before the application-only route because
+    # it carries the operator's own identity and rate limit. Reddit's public installed-app pairs are
+    # used when nothing is configured, so this is only needed to get *more* than they allow.
+    reddit_praw_refresh_token: SecretStr | None = None
 
     # live-test switches; live mode is an environment concern, not bot behaviour
     test_mode: bool = False

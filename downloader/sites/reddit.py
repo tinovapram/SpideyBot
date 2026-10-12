@@ -1,9 +1,11 @@
 """Reddit native resolver — PRAW for the post, yt-dlp for a video's merge.
 
 Behaviour grounded in V5 `downloader/site/reddit.py`. Reddit is the one host here that needs an
-*account-level* credential before it will answer at all, and the shape of the previous
-implementation is kept: try the configured credentials, then Reddit's own installed-app pairs, and
-give up with a reportable reason rather than a crash.
+identity before it will answer at all, and the chain is V5's: a configured refresh token (an
+account-level login) → configured client credentials → Reddit's **public installed-app pairs**.
+Those pairs are what make this adapter work on a checkout with no Reddit app registered; they are
+application identities rather than secrets, and each is *validated with a real request* so a dead
+one falls through to the next instead of surfacing as "Reddit would not answer".
 
 Four kinds of post, all handled because they need different routes:
 
@@ -22,6 +24,7 @@ exactly this — so the registry still never reads configuration.
 
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 import urllib.parse
@@ -38,9 +41,13 @@ ENGINE = "reddit"
 _HOSTS = ("reddit.com", "redd.it", "redditmedia.com")
 
 #: Reddit's public "installed app" pairs, taken from the previous implementation. They are shared
-#: application identities, not secrets: they identify the *client*, and every unauthenticated Reddit
-#: client uses one. Tried last, so an operator's own credentials always win, and each attempt is
-#: logged with the id it used so a rate-limited pair can be spotted.
+#: application identities rather than secrets: they identify the *client*, and every unauthenticated
+#: Reddit client uses one. Tried after any configured credentials, so an operator's own identity
+#: always wins, and each attempt is logged with the id it used so a refused pair can be spotted.
+#:
+#: Measured 2026-10 against the live API: the first two authenticate, the third answers 401. Kept
+#: because a dead last candidate costs one failed request only when everything before it has already
+#: failed, and Reddit may bring it back.
 _FALLBACK_APPS: tuple[tuple[str, str], ...] = (
     ("icuiw6HNK21QoQ", "pzdmKpdnB_JBO0eVkL1IZoxu3vdpug"),
     ("b70jdVnmRpFmVc12GvVuAw", "yD_McmeM_yocK0IZYaBeUg8RSBsuqQ"),
@@ -65,8 +72,12 @@ async def attempt(
 
     ``client`` is accepted for signature parity with the other adapters and is unused: PRAW owns its
     own transport, so there is no session of ours to inject. A test stubs :func:`_submission`.
+
+    The authentication happens in a worker thread because it is a *blocking* HTTP request — PRAW is
+    synchronous, and now that a candidate is validated eagerly (see :func:`_client`) that request
+    would otherwise run on the event loop thread, stalling every other job in the worker.
     """
-    reddit = _client(options or {}, timeout)
+    reddit = await asyncio.to_thread(_client, options or {}, timeout)
     submission = await _submission(reddit, url)
     return await _files_of(submission, url)
 
@@ -76,8 +87,6 @@ async def _submission(reddit: Any, url: str) -> Any:
 
     def fetch() -> Any:
         return reddit.submission(url=url)
-
-    import asyncio
 
     # PRAW is synchronous, so it is run off the loop rather than blocking the worker's other jobs.
     try:
@@ -175,39 +184,89 @@ async def _link(submission: Any, url: str, title: str) -> Resolution:
 
 
 def _client(options: dict[str, Any], timeout: float) -> Any:
-    """A PRAW client from the first credential pair that authenticates.
+    """A PRAW client from the first identity that a request actually accepts.
 
-    ``options`` carries what configuration supplied; the borrowed pairs are the last resort. Every
-    failure is logged with the client id that failed, because "Reddit said no" is useless on its own
-    and the interesting question is always *which* application identity was refused.
+    The chain is V5's, and the *validation* is the part that makes it a chain at all: PRAW
+    constructs a client without contacting Reddit, so a bad pair only fails on the first API call.
+    Skipping the check would mean the first candidate always "wins" and a dead identity is never
+    noticed — the user would get "Reddit would not answer" instead of the next pair being tried.
+
+    Two routes, in V5's order:
+
+    1. **Refresh token**, when one is configured. It is an account-level login, so it is tried
+       first: it is what an operator gives us if they want their own identity and its rate limit.
+    2. **Application-only**, which is what Reddit's public "installed app" pairs can do. Those
+       pairs are application identities rather than secrets — every unauthenticated Reddit client
+       uses one — and are shared, so they are rate-limited harder than anything you register
+       yourself.
+
+    Measured 2026-10 against the live API: the first two pairs authenticate (scopes ``{'*'}``) and
+    the third answers **401**. It is kept as the last candidate because a dead pair costs one failed
+    request *only* when the earlier ones have already failed, and Reddit may re-enable it; the
+    measurement is recorded here so the next person does not have to repeat it. Every failure is
+    logged with the client id that failed, because "Reddit said no" is useless on its own and the
+    interesting question is always *which* identity was refused.
     """
     try:
         import praw
     except ImportError as error:  # pragma: no cover - declared in requirements.txt
         raise ResolveError("praw is not installed, so Reddit links cannot be resolved") from error
 
-    pairs: list[tuple[str, str]] = []
-    configured = options.get("client_id")
-    if configured:
-        pairs.append((str(configured), str(options.get("client_secret") or "")))
-    pairs.extend(_FALLBACK_APPS)
+    pairs = _candidate_pairs(options)
+    user_agent = str(options.get("user_agent") or "SpideyBot/1.0 (+https://github.com/SpideyBot)")
+    refresh_token = options.get("refresh_token")
+
+    if refresh_token:
+        for client_id, client_secret in pairs:
+            try:
+                client = praw.Reddit(
+                    client_id=client_id,
+                    client_secret=client_secret,
+                    refresh_token=str(refresh_token),
+                    user_agent=user_agent,
+                    timeout=timeout,
+                )
+                client.auth.scopes()
+                log.info("resolved with Reddit via refresh token, client id %s", client_id)
+                return client
+            except Exception as error:  # noqa: BLE001 - try the next identity
+                log.warning("Reddit refused the refresh token for %s: %s", client_id, error)
 
     for client_id, client_secret in pairs:
         try:
             client = praw.Reddit(
                 client_id=client_id,
                 client_secret=client_secret,
-                user_agent=options.get("user_agent") or "SpideyBot/1.0",
+                user_agent=user_agent,
                 timeout=timeout,
             )
-            # Authenticates eagerly, so a bad pair fails here rather than inside the resolve.
             client.read_only = True
+            # The one call that proves the pair works: app-only OAuth happens here, so a 401 lands
+            # in the except below and the loop moves on.
+            client.auth.scopes()
             log.info("using Reddit client id %s", client_id)
             return client
         except Exception as error:  # noqa: BLE001 - try the next identity
             log.warning("Reddit refused client id %s: %s", client_id, error)
 
-    raise ResolveError("Reddit refused every available client id")
+    raise ResolveError("Reddit would not accept any available client id")
+
+
+def _candidate_pairs(options: dict[str, Any]) -> list[tuple[str, str]]:
+    """The identities to try, in order: yours first, then the shared public ones (V5's order).
+
+    A configured pair is de-duplicated against the public list, so an operator who sets one of the
+    public ids explicitly does not cause it to be attempted twice.
+    """
+    pairs: list[tuple[str, str]] = []
+    configured = options.get("client_id")
+    if configured:
+        pairs.append((str(configured), str(options.get("client_secret") or "")))
+
+    for public in _FALLBACK_APPS:
+        if public not in pairs:
+            pairs.append(public)
+    return pairs
 
 
 def _gallery_extension(item: dict[str, Any]) -> str:

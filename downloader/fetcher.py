@@ -60,6 +60,10 @@ HLS_POLL_INTERVAL = 0.5
 #: would miss.
 _PLAYLIST_HEAD = 16
 
+#: Containers an HLS download may be written as. Anything else defaults to MP4, because a playlist's
+#: segments remux into it without a transcode.
+_CONTAINERS = frozenset({"mp4", "mkv", "webm", "mov", "ts"})
+
 #: A browser fingerprint, because several hosts serve a 403 to a plain Python user agent. curl_cffi
 #: impersonates a real client at the TLS level, which is why it was chosen over aiohttp (R13).
 DEFAULT_IMPERSONATE = "chrome"
@@ -191,21 +195,12 @@ async def fetch(
     client = session or requests.AsyncSession()
 
     try:
-        if any(transfer.role == "hls" for transfer in item.transfers):
-            # An HLS item is one deliverable made of one manifest, and the manifest is not the
-            # media: ffmpeg has to walk the playlist and fetch the segments. Decided before the
-            # transfer count, because a playlist and its segments are still *one* transfer here.
-            written = await _download_hls(
-                item,
-                destination,
-                limit_bytes=limit_bytes,
-                progress=progress,
-                impersonate=impersonate,
-                should_stop=should_stop,
-            )
-            merged = True
-        elif len(item.transfers) == 1:
-            written = await _download_one(
+        if len(item.transfers) == 1:
+            # Which transport a transfer needs is a property of the *transfer*, decided in
+            # `_fetch_part` — not of the item. Doing it here for the whole item was a live bug: a
+            # Reddit video resolves to a video playlist *plus* a plain audio file, and routing the
+            # item through the playlist path silently dropped the audio.
+            written = await _fetch_part(
                 client,
                 item.transfers[0],
                 destination,
@@ -217,7 +212,7 @@ async def fetch(
                 sole_transfer=True,
                 should_stop=should_stop,
             )
-            merged = False
+            merged = item.transfers[0].role == "hls"
         else:
             written, merged = await _download_and_merge(
                 client,
@@ -259,8 +254,16 @@ async def _download_and_merge(
     impersonate: str | None,
     should_stop: Callable[[], bool] | None = None,
 ) -> tuple[int, bool]:
-    """Fetch both streams, then combine them with ffmpeg."""
-    video = next((t for t in item.transfers if t.role == "video"), None)
+    """Fetch both streams, then combine them with ffmpeg.
+
+    A stream may be a playlist: Reddit resolves a video to ``…/CMAF_720.m3u8`` *plus* a plain
+    ``…/CMAF_AUDIO_128.mp4``, so the two halves of one merge can need different transports. Which is
+    why each part goes through :func:`_fetch_part` rather than straight to the byte copier.
+    """
+    # An `hls` transfer counts as the video half: it is one stream carrying video, and the playlist
+    # is only the way to obtain it. An audio-only playlist cannot reach here, because a lone
+    # transfer does not merge.
+    video = next((t for t in item.transfers if t.role in ("video", "hls")), None)
     audio = next((t for t in item.transfers if t.role == "audio"), None)
     if video is None or audio is None:
         # Not a merge we understand. Better to say so than to guess which stream is which.
@@ -270,7 +273,7 @@ async def _download_and_merge(
     audio_path = destination.with_name(destination.name + ".part1")
     parts = [video_path, audio_path]
     try:
-        video_bytes = await _download_one(
+        video_bytes = await _fetch_part(
             client,
             video,
             video_path,
@@ -281,7 +284,7 @@ async def _download_and_merge(
             base_total=item.expected_bytes,
             should_stop=should_stop,
         )
-        await _download_one(
+        await _fetch_part(
             client,
             audio,
             audio_path,
@@ -301,6 +304,49 @@ async def _download_and_merge(
             _discard(part)
 
     return bytes_written, True
+
+
+async def _fetch_part(
+    client: Any,
+    transfer: Transfer,
+    path: Path,
+    *,
+    limit_bytes: int | None,
+    progress: ProgressHook | None,
+    timeout: float,
+    impersonate: str | None,
+    base_done: int = 0,
+    base_total: int | None = None,
+    sole_transfer: bool = False,
+    should_stop: Callable[[], bool] | None = None,
+) -> int:
+    """Produce one transfer's bytes at ``path``, by the transport its role calls for.
+
+    The single place that knows a playlist is not a file (D43), so both callers — a lone transfer
+    and each half of a merge — get the behaviour without repeating the decision.
+    """
+    if transfer.role == "hls":
+        return await _download_hls(
+            transfer,
+            path,
+            limit_bytes=limit_bytes,
+            progress=progress,
+            base_done=base_done,
+            should_stop=should_stop,
+        )
+    return await _download_one(
+        client,
+        transfer,
+        path,
+        limit_bytes=limit_bytes,
+        progress=progress,
+        timeout=timeout,
+        impersonate=impersonate,
+        base_done=base_done,
+        base_total=base_total,
+        sole_transfer=sole_transfer,
+        should_stop=should_stop,
+    )
 
 
 async def _download_one(
@@ -439,15 +485,18 @@ def _content_length(response: Any) -> int | None:
 
 
 async def _download_hls(
-    item: ResolvedFile,
+    transfer: Transfer,
     destination: Path,
     *,
     limit_bytes: int | None,
     progress: ProgressHook | None,
-    impersonate: str | None,
+    base_done: int = 0,
     should_stop: Callable[[], bool] | None = None,
 ) -> int:
-    """Consume an HLS manifest with ffmpeg, watching the output for the cap (D31).
+    """Consume one HLS manifest with ffmpeg, watching the output for the cap (D31).
+
+    Takes a transfer rather than a whole item, because a merge can have a playlist as one of its two
+    halves (Reddit resolves exactly that way): the transport is a property of the transfer.
 
     An ``.m3u8`` is a playlist: fetching it as bytes produces a text file, which is what the
     resolvers that hand one back would otherwise be delivering. ffmpeg walks the playlist, fetches
@@ -462,14 +511,17 @@ async def _download_hls(
     The child is **killed**, not merely abandoned, when the cap is passed or the user cancels: an
     ffmpeg left running would keep pulling segments after the user was told the job stopped.
     """
-    transfer = item.primary
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is None:
         raise FetchError("ffmpeg is required to download an HLS stream, and was not found")
 
     headers = headers_for(transfer.url)
-    if impersonate:
-        headers = {**headers, "User-Agent": headers.get("User-Agent", "Mozilla/5.0")}
+
+    # The output container is stated rather than inferred, because the destination may be a part
+    # file (`reddit.mp4.part0`) whose suffix ffmpeg cannot map to a muxer — it answers
+    # "Error opening output files: Invalid argument". MP4 is the default because that is what a
+    # playlist's segments remux into without a transcode.
+    container = _container_for(destination)
 
     command = [
         ffmpeg,
@@ -484,13 +536,12 @@ async def _download_hls(
                             if key.lower() != "user-agent"),
         "-i", transfer.url,
         "-c", "copy",
-        str(destination),
     ]
-    # ``+faststart`` is a muxer option rather than a codec one, and only the MP4 muxer has it — the
-    # same guard the merge path uses, for the same reason. It is what lets Telegram start playing
-    # before the whole file has arrived.
-    if destination.suffix.lower() == ".mp4":
-        command[-1:-1] = ["-movflags", "+faststart"]
+    # ``+faststart`` is a muxer option rather than a codec one, and only the MP4 muxer has it. It is
+    # what lets Telegram start playing before the whole file has arrived.
+    if container == "mp4":
+        command += ["-movflags", "+faststart"]
+    command += ["-f", container, str(destination)]
 
     process = await asyncio.create_subprocess_exec(
         *command,
@@ -507,11 +558,11 @@ async def _download_hls(
 
             if should_stop is not None and should_stop():
                 raise TransferCancelled()
-            if limit_bytes is not None and written > limit_bytes:
-                raise SizeLimitExceeded(limit_bytes, written)
+            if limit_bytes is not None and base_done + written > limit_bytes:
+                raise SizeLimitExceeded(limit_bytes, base_done + written)
             if progress is not None and written - reported >= PROGRESS_STEP_BYTES:
                 reported = written
-                await _emit(progress, transfer, written, None, 0, None)
+                await _emit(progress, transfer, written, None, base_done, None)
 
         if process.returncode != 0:
             detail = (await process.stderr.read()).decode("utf-8", "replace").strip().splitlines()
@@ -523,16 +574,27 @@ async def _download_hls(
         # Checked once more after ffmpeg exits, because a short stream can finish inside a single
         # poll interval — and then the loop above would never have had the chance to refuse it.
         written = _size_of(destination)
-        if limit_bytes is not None and written > limit_bytes:
-            raise SizeLimitExceeded(limit_bytes, written)
+        if limit_bytes is not None and base_done + written > limit_bytes:
+            raise SizeLimitExceeded(limit_bytes, base_done + written)
         if progress is not None:
-            await _emit(progress, transfer, written, None, 0, None)
+            await _emit(progress, transfer, written, None, base_done, None)
     except BaseException:
         _kill(process)
         _discard(destination)
         raise
 
     return written
+
+
+def _container_for(path: Path) -> str:
+    """The muxer to use for an HLS output, from the name when it is recognisable and MP4 otherwise.
+
+    A part file's suffix (`.part0`) is not a container, and ffmpeg refuses the output outright
+    rather than guessing. MP4 is the right default: playlist segments are normally fMP4 or TS, and
+    both remux into it with ``-c copy``.
+    """
+    suffix = path.suffix.lower().lstrip(".")
+    return suffix if suffix in _CONTAINERS else "mp4"
 
 
 def _size_of(path: Path) -> int:

@@ -200,6 +200,8 @@ def _adapter_options(settings: Settings) -> dict[str, Any]:
         reddit["client_id"] = settings.reddit_praw_client_id.get_secret_value()
     if settings.reddit_praw_client_secret is not None:
         reddit["client_secret"] = settings.reddit_praw_client_secret.get_secret_value()
+    if settings.reddit_praw_refresh_token is not None:
+        reddit["refresh_token"] = settings.reddit_praw_refresh_token.get_secret_value()
     if reddit:
         options["reddit"] = reddit
 
