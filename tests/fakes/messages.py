@@ -10,6 +10,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+#: How a status-message replacement is recorded (FR-7.9). Named because two places compare against
+#: it: the recording client, and every test that needs to tell an edit from a send.
+EDIT = "edit_message_text"
+
 
 class FakeUser:
     def __init__(
@@ -109,11 +113,31 @@ class RecordingClient:
     """
 
     def __init__(self, *, fail: set[str] | None = None) -> None:
-        self.sent: list[SentMessage] = []
+        #: Everything the job put in the chat, in the order it happened. ``sent`` and ``edits`` are
+        #: views over this, so "what did the user see, and in what order" stays answerable — a
+        #: status replacement that arrived between two file sends must not be sorted to the end.
+        self.events: list[SentMessage] = []
         self.fail = fail or set()
         self._next_id = 1000
         self._next_group = 0
         self.closed = False
+
+    # ── what the tests read ──────────────────────────────────────────────
+
+    @property
+    def sent(self) -> list[SentMessage]:
+        """The messages that delivered something, in order."""
+        return [event for event in self.events if event.method != EDIT]
+
+    @property
+    def edits(self) -> list[SentMessage]:
+        """FR-7.1's in-place status updates, in order."""
+        return [event for event in self.events if event.method == EDIT]
+
+    @property
+    def status_texts(self) -> list[str]:
+        """Only the status message's bodies, for asserting on FR-7's phases and rows."""
+        return [event.text for event in self.edits if event.text]
 
     # ── the sender protocol delivery depends on ──────────────────────────
 
@@ -144,11 +168,25 @@ class RecordingClient:
             message = SentMessage("send_media_group", {**kwargs, "media": [item]}, self._next_id)
             message.group = group
             messages.append(message)
-        self.sent.extend(messages)
+        self.events.extend(messages)
         return messages
 
     async def send_message(self, **kwargs: Any) -> SentMessage:
         return self._record("send_message", kwargs)
+
+    async def edit_message_text(self, **kwargs: Any) -> SentMessage:
+        """An edit is not a send: it carries no files and no reply anchor.
+
+        Recorded in the same event list for ordering, but excluded from ``sent`` — a test asking
+        "did everything reply to the command?" (FR-8.4) must not be answered by an edit, which
+        cannot reply to anything.
+        """
+        name = self._name_in(kwargs)
+        if name is not None and name in self.fail:
+            raise RuntimeError(f"Telegram refused {name}")
+        message = SentMessage(EDIT, kwargs, int(kwargs.get("message_id") or 0))
+        self.events.append(message)
+        return message
 
     # ── what the tests read ──────────────────────────────────────────────
 
@@ -158,7 +196,7 @@ class RecordingClient:
             raise RuntimeError(f"Telegram refused {name}")
         self._next_id += 1
         message = SentMessage(method, kwargs, self._next_id)
-        self.sent.append(message)
+        self.events.append(message)
         return message
 
     @staticmethod
@@ -189,8 +227,14 @@ class RecordingClient:
 
     @property
     def texts(self) -> list[str]:
-        """Every plain message's text, which is where the done and failure copy lands."""
-        return [message.text for message in self.sent if message.text]
+        """Every message the job produced, in the order the user saw them.
+
+        Sends and status-message replacements are both in here, because a caller asking "what did
+        the user end up seeing?" does not care which mechanism carried it. Order comes from
+        ``events``, so a status replacement between two file sends stays between them — and FR-7.9's
+        final body, which is always last, is what makes ``texts[-1]`` the job's result.
+        """
+        return [event.text for event in self.events if event.text]
 
     @property
     def messages_for(self, name: str) -> list[str]:

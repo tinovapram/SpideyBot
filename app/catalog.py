@@ -291,6 +291,13 @@ def cancel_message(*, kind: CancelKind, job_id: int) -> str:
 
 # ── the download lifecycle (FR-3, FR-9, spec 7.3 and 7.7) ───────────────
 
+QUEUING_DOWNLOAD = (
+    "⏳ **SpideyBot: Queuing download…**\n"
+    "  ID: `{id}`\n"
+    "  Link: {link}\n"
+    "  Position: {position}"
+)
+
 LIMIT_EXCEEDED = (
     "⚠️ **SpideyBot: Limit Exceeded.** Total share size is `{actual} MB`, "
     "exceeding your limit of `{limit}`."
@@ -319,6 +326,34 @@ LIMIT_EXCEEDED_REASON = "passed the {limit} MB limit while downloading"
 #: FR-7.3's phases, in the order they happen. Delivery adds the last two.
 PHASE_RESOLVING = "Resolving"
 PHASE_DOWNLOADING = "Downloading"
+PHASE_UPLOADING = "Uploading"
+PHASE_DONE = "Done"
+
+# ── the live status message (FR-7) ──────────────────────────────────────
+# The layout belongs to telegram/status.py; the sentences belong here, like every other string the
+# user reads (D23). FR-7.2 fixes three zones: a header, rows, and a persistent footer.
+#
+# Prefixed ``JOB_`` on purpose: ``STATUS_*`` above already means `/status`'s listing, and a second
+# ``STATUS_HEADER`` would have silently replaced it — which it did, once, and AC-6 caught it.
+
+JOB_HEADER = "🔄 **SpideyBot: {phase}{ellipsis}**"
+JOB_ID_LINE = "  ID: `{id}`"
+JOB_LINK_LINE = "  Link: {link}"
+#: FR-7.4's "current transfer byte progress", with the total when the host reported one.
+JOB_TRANSFER = "  {name}\n  {bar} {percent}% ({done}/{total})"
+JOB_TRANSFER_UNSIZED = "  {name}\n  {done} transferred"
+JOB_FILES_DOWNLOADED = "  Downloaded: {done}/{total} files"
+#: FR-7.5's per-file upload context.
+JOB_UPLOADING_FILE = "  Uploading (file {index}/{total})"
+JOB_FILES_UPLOADED = "  Uploaded: {done}/{total} files"
+JOB_FILES_SENT = "  Sent: {done}/{total} files"
+JOB_FILES_FAILED = "  Failed: {count} file(s)"
+#: E2's fallback notice, shown in the message rather than only in the log: the user's link is being
+#: retried by a different engine, and that is the reason the job looks like it restarted.
+JOB_NOTICE = "  ⚠️ {notice}"
+#: FR-7.2's persistent footer. Present in every phase, including the failure shapes, because the
+#: moment a user wants to cancel is the moment the job looks stuck.
+JOB_FOOTER = "  /cancel {id} to stop"
 
 
 @dataclass(frozen=True)

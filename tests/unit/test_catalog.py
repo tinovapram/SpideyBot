@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import ast
 import dataclasses
+import pathlib
 
 import pytest
 
@@ -440,3 +442,45 @@ def test_the_done_message_reports_counts_and_size() -> None:
     line = catalog.DONE_WITH_FILES.format(sent=7, total=10, size="512")
 
     assert line == "✅ **SpideyBot: Done!** Sent 7/10 files (512 MB)."
+
+
+def test_no_catalogue_name_is_defined_twice() -> None:
+    """A second assignment silently replaces the first, and the user sees the wrong string.
+
+    This is not hypothetical: the live status message's header was added as ``STATUS_HEADER``, which
+    is also `/status`'s listing header, so AC-6 started rendering the job's phase instead. The test
+    that caught it compares a rendered string; this one says *why*, and catches the next one before
+    it reaches a user.
+    """
+    source = pathlib.Path(catalog.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    assigned: list[str] = [
+        target.id
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    ]
+    duplicates = sorted({name for name in assigned if assigned.count(name) > 1})
+
+    assert duplicates == [], f"defined more than once: {duplicates}"
+
+
+def test_no_announced_constant_is_also_an_annotated_one() -> None:
+    """``X = ...`` and ``X: str = ...`` are two definitions too, and easier to miss."""
+    source = pathlib.Path(catalog.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    assigned = {
+        target.id
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    }
+    annotated = {
+        node.target.id
+        for node in tree.body
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+    }
+
+    assert assigned & annotated == set()

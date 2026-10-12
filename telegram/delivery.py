@@ -61,6 +61,11 @@ class Sender(Protocol):
 #: How a file's caption is built. The caller owns the wording (D23) and the source link (FR-8.3).
 CaptionOf = Callable[[FetchedFile], str | None]
 
+#: Progress through the upload, as ``(files_uploaded, files_total)``. FR-7.5 asks the status message
+#: for per-file upload context (``Uploading (file 7/25)``), and this module is the only place that
+#: knows how far the upload got — so it reports, and the status message decides the wording.
+UploadHook = Callable[[int, int], Awaitable[None] | None]
+
 #: How the sender is fetched for a chat. A callable rather than a value because the client for a
 #: user is looked up per job — a bot client, or that user's own session (D10, P5).
 SenderFor = Callable[[int], Sender | Awaitable[Sender]]
@@ -115,15 +120,22 @@ async def deliver(
     reply_to_message_id: int | None = None,
     caption_of: CaptionOf | None = None,
     album_size: int = ALBUM_SIZE,
+    on_upload: UploadHook | None = None,
 ) -> tuple[Delivered, ...]:
     """Send every file, in order, in albums of at most ``album_size``.
 
     Returns what was sent, so the caller can ledger it. Raises nothing for an individual failure:
     FR-9.1 says one bad file must not stop the others, and the caller gets the successes back to
     report the rest as failures.
+
+    ``on_upload`` is called after each album with how many files have reached Telegram, so the
+    status message can show FR-7.5's per-file context. It counts *delivered* files rather than
+    attempted ones, because the number the user is watching should only go up when something
+    actually arrived.
     """
     sender = await resolve_sender(sender_for, chat_id)
     delivered: list[Delivered] = []
+    total = len(files)
     index = 0
 
     while index < len(files):
@@ -149,9 +161,19 @@ async def deliver(
                 )
             )
         index += len(batch)
+        await _report(on_upload, len(delivered), total)
 
     log.info("delivered %d file(s) to %s", len(delivered), chat_id)
     return tuple(delivered)
+
+
+async def _report(hook: UploadHook | None, done: int, total: int) -> None:
+    """Call the upload hook, tolerating one that is a plain function rather than a coroutine."""
+    if hook is None:
+        return
+    result = hook(done, total)
+    if isinstance(result, Awaitable):
+        await result
 
 
 async def _send_one(

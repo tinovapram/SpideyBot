@@ -99,9 +99,11 @@ async def run_job(
         sender_for=lambda _: client,
         chain_for=lambda *_: chain,
         delegate_for=lambda *_: delegate,
+        client=client,
     )
 
-    await workers.execute(job.id, settings, handler)
+    result = await workers.execute(job.id, settings, handler)
+    assert result is not None
 
     async with db_module.session() as fresh:
         finished = await fresh.get(Job, job.id)
@@ -381,6 +383,7 @@ async def test_a_second_attempt_does_not_deliver_the_same_file_again(
         sender_for=lambda _: client,
         chain_for=lambda *_: chain_of(item),
         delegate_for=lambda *_: None,
+        client=client,
     )
     await workers.execute(job.id, settings, handler)
 
