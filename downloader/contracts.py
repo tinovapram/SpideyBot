@@ -20,7 +20,10 @@ from dataclasses import dataclass
 from typing import Literal
 
 MediaKind = Literal["photo", "video", "audio", "document"]
-TransferRole = Literal["video", "audio", "file"]
+#: ``hls`` is a *manifest*, not media: the fetcher consumes it with ffmpeg, which is why it is a
+#: role of its own rather than a ``video`` transfer. Treating an ``.m3u8`` as a plain download (the
+#: obvious mistake) writes a text playlist to disk and names it ``.mp4``.
+TransferRole = Literal["video", "audio", "file", "hls"]
 
 #: What the delivery layer can send as media rather than as a plain file.
 PHOTO_EXTENSIONS = frozenset({"jpg", "jpeg", "png", "webp", "gif", "bmp", "heic"})

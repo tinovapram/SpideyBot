@@ -51,6 +51,15 @@ PROGRESS_STEP_BYTES = 256 * 1024
 
 DEFAULT_TIMEOUT = 120.0
 
+#: How often an HLS download's output is measured. This is the progress interval *and* the cap's
+#: reaction time: what it costs to be wrong is a few hundred milliseconds of overshoot.
+HLS_POLL_INTERVAL = 0.5
+
+#: How many bytes of a response are inspected for a playlist signature. ``#EXTM3U`` is the first
+#: line of every HLS manifest, so a handful is enough — and nothing is buffered that a large file
+#: would miss.
+_PLAYLIST_HEAD = 16
+
 #: A browser fingerprint, because several hosts serve a 403 to a plain Python user agent. curl_cffi
 #: impersonates a real client at the TLS level, which is why it was chosen over aiohttp (R13).
 DEFAULT_IMPERSONATE = "chrome"
@@ -182,7 +191,20 @@ async def fetch(
     client = session or requests.AsyncSession()
 
     try:
-        if len(item.transfers) == 1:
+        if any(transfer.role == "hls" for transfer in item.transfers):
+            # An HLS item is one deliverable made of one manifest, and the manifest is not the
+            # media: ffmpeg has to walk the playlist and fetch the segments. Decided before the
+            # transfer count, because a playlist and its segments are still *one* transfer here.
+            written = await _download_hls(
+                item,
+                destination,
+                limit_bytes=limit_bytes,
+                progress=progress,
+                impersonate=impersonate,
+                should_stop=should_stop,
+            )
+            merged = True
+        elif len(item.transfers) == 1:
             written = await _download_one(
                 client,
                 item.transfers[0],
@@ -322,9 +344,23 @@ async def _download_one(
         overall_total = expected if sole_transfer else base_total
 
         with path.open("wb") as handle:
+            head = b""
             async for chunk in response.aiter_content():
                 if not chunk:
                     continue
+                if len(head) < _PLAYLIST_HEAD:
+                    # A playlist can only be spotted from its own bytes, and this is the only place
+                    # that sees them. Doing it here turns "delivered a text file named .mp4" into a
+                    # reported failure (FR-9), which is the difference the `hls` role cannot cover
+                    # on its own: a bridge can hand back a fresh `.m3u8` URL under a name nobody
+                    # asked the resolver to classify.
+                    head += chunk[:_PLAYLIST_HEAD]
+                    if head.lstrip().startswith(b"#EXTM3U"):
+                        _discard(path)
+                        raise FetchError(
+                            "that URL is an HLS playlist, not a file; it has to be resolved as an "
+                            "hls transfer so ffmpeg can fetch its segments"
+                        )
                 handle.write(chunk)
                 written += len(chunk)
 
@@ -400,6 +436,121 @@ def _content_length(response: Any) -> int | None:
     except TypeError, ValueError:
         return None
     return value if value > 0 else None
+
+
+async def _download_hls(
+    item: ResolvedFile,
+    destination: Path,
+    *,
+    limit_bytes: int | None,
+    progress: ProgressHook | None,
+    impersonate: str | None,
+    should_stop: Callable[[], bool] | None = None,
+) -> int:
+    """Consume an HLS manifest with ffmpeg, watching the output for the cap (D31).
+
+    An ``.m3u8`` is a playlist: fetching it as bytes produces a text file, which is what the
+    resolvers that hand one back would otherwise be delivering. ffmpeg walks the playlist, fetches
+    the segments and remuxes them, and ``-c copy`` keeps that to a demux rather than a transcode.
+
+    Progress and the size cap both come from **watching the output file**, exactly as the delegated
+    last resort does (:mod:`downloader.cyberdropdl`): an HLS stream has no ``Content-Length``, so
+    there is nothing to measure up front and D31's running cap is the only enforcement available.
+    That also means the row this reports is bytes, with no percentage — a deliberate absence rather
+    than an invented number (D30).
+
+    The child is **killed**, not merely abandoned, when the cap is passed or the user cancels: an
+    ffmpeg left running would keep pulling segments after the user was told the job stopped.
+    """
+    transfer = item.primary
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        raise FetchError("ffmpeg is required to download an HLS stream, and was not found")
+
+    headers = headers_for(transfer.url)
+    if impersonate:
+        headers = {**headers, "User-Agent": headers.get("User-Agent", "Mozilla/5.0")}
+
+    command = [
+        ffmpeg,
+        "-hide_banner",
+        "-nostdin",
+        "-loglevel", "error",
+        "-y",
+        # Input options: the segment hosts check Referer as strictly as the page did, which is why
+        # the same headers the page fetched with are replayed here.
+        "-user_agent", headers.get("User-Agent", "Mozilla/5.0"),
+        "-headers", "".join(f"{key}: {value}\r\n" for key, value in headers.items()
+                            if key.lower() != "user-agent"),
+        "-i", transfer.url,
+        "-c", "copy",
+        str(destination),
+    ]
+    # ``+faststart`` is a muxer option rather than a codec one, and only the MP4 muxer has it — the
+    # same guard the merge path uses, for the same reason. It is what lets Telegram start playing
+    # before the whole file has arrived.
+    if destination.suffix.lower() == ".mp4":
+        command[-1:-1] = ["-movflags", "+faststart"]
+
+    process = await asyncio.create_subprocess_exec(
+        *command,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
+    written = 0
+    reported = 0
+    try:
+        while process.returncode is None:
+            await asyncio.sleep(HLS_POLL_INTERVAL)
+            written = _size_of(destination)
+
+            if should_stop is not None and should_stop():
+                raise TransferCancelled()
+            if limit_bytes is not None and written > limit_bytes:
+                raise SizeLimitExceeded(limit_bytes, written)
+            if progress is not None and written - reported >= PROGRESS_STEP_BYTES:
+                reported = written
+                await _emit(progress, transfer, written, None, 0, None)
+
+        if process.returncode != 0:
+            detail = (await process.stderr.read()).decode("utf-8", "replace").strip().splitlines()
+            raise FetchError(
+                "the HLS stream could not be downloaded: "
+                f"{detail[-1][:200] if detail else 'unknown error'}"
+            )
+
+        # Checked once more after ffmpeg exits, because a short stream can finish inside a single
+        # poll interval — and then the loop above would never have had the chance to refuse it.
+        written = _size_of(destination)
+        if limit_bytes is not None and written > limit_bytes:
+            raise SizeLimitExceeded(limit_bytes, written)
+        if progress is not None:
+            await _emit(progress, transfer, written, None, 0, None)
+    except BaseException:
+        _kill(process)
+        _discard(destination)
+        raise
+
+    return written
+
+
+def _size_of(path: Path) -> int:
+    """The output's current size, or 0 while ffmpeg has not created it yet."""
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def _kill(process: asyncio.subprocess.Process) -> None:
+    """Stop a child that would otherwise keep downloading what we just refused."""
+    if process.returncode is not None:
+        return
+    try:
+        process.kill()
+    except ProcessLookupError:  # pragma: no cover - it exited between the check and the kill
+        return
 
 
 async def _merge(video: Path, audio: Path, destination: Path) -> int:

@@ -8,6 +8,8 @@ so the pipeline's tests drive the same one rather than a second copy of it.
 
 from __future__ import annotations
 
+import ast
+import pathlib
 import shutil
 import subprocess
 from pathlib import Path
@@ -24,6 +26,7 @@ from downloader.fetcher import (
     FetchError,
     FetchProgress,
     SizeLimitExceeded,
+    TransferCancelled,
 )
 from tests.fakes.server import FixtureServer, url
 
@@ -529,3 +532,203 @@ async def test_a_missing_ffmpeg_is_reported_rather_than_crashing(
 
     assert "required" in str(caught.value)
     assert list(tmp_path.iterdir()) == []
+
+
+# ── HLS: a manifest is not a file (the reason `hls` is a transfer role) ───
+
+
+def hls_item(server: FixtureServer, playlist: str, **overrides: object) -> ResolvedFile:
+    """An item whose one transfer is a playlist, which is what a native adapter hands back."""
+    fields: dict[str, object] = {
+        "transfers": (Transfer(url(server, f"file/{playlist}"), "hls"),),
+        "filename": "stream.mp4",
+        "media_kind": "video",
+    }
+    fields.update(overrides)
+    return ResolvedFile(**fields)  # type: ignore[arg-type]
+
+
+@pytest.fixture
+def hls(server: FixtureServer, media: Path) -> FixtureServer:
+    """The fixture server, with a real HLS playlist and segment under ``hls/``.
+
+    Generated rather than hand-written: a synthetic playlist would let a wrong implementation pass,
+    because only a real demuxer can say whether what came out is playable.
+    """
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg is required to produce an HLS stream")
+    directory = server.root / "hls"
+    directory.mkdir(parents=True, exist_ok=True)
+    _ffmpeg(
+        "-i", str(media / "video.mp4"),
+        "-c", "copy",
+        "-f", "hls",
+        "-hls_time", "1",
+        "-hls_list_size", "0",
+        "-hls_segment_filename", str(directory / "seg%d.ts"),
+        str(directory / "index.m3u8"),
+    )
+    return server
+
+
+async def test_an_hls_item_arrives_as_a_playable_file(hls: FixtureServer, tmp_path: Path) -> None:
+    """The manifest is walked by ffmpeg, so what lands is media rather than the playlist text."""
+    destination = tmp_path / "stream.mp4"
+
+    result = await fetcher.fetch(hls_item(hls, "hls/index.m3u8"), destination)
+
+    assert result.bytes_written > 0
+    assert result.merged is True, "an HLS file came out of ffmpeg, not out of a plain download"
+    assert streams_in(destination) == ["video"]
+
+
+async def test_a_playlist_fetched_as_a_plain_file_is_refused(
+    hls: FixtureServer, staging: Path
+) -> None:
+    """The bug the ``hls`` role exists to prevent, caught at the only place that can see it.
+
+    A bridge can hand back a fresh ``.m3u8`` URL under a name no resolver classified as a playlist,
+    so the role alone is not enough: the response's own bytes are checked when it arrives. Reporting
+    a failure is the honest outcome — the alternative is delivering a text file named ``.mp4`` that
+    the user sees as a broken video.
+    """
+    destination = staging / "plain.mp4"
+
+    with pytest.raises(FetchError, match="HLS playlist") as caught:
+        await fetcher.fetch(
+            ResolvedFile(
+                transfers=(Transfer(url(hls, "file/hls/index.m3u8"), "file"),),
+                filename="plain.mp4",
+            ),
+            destination,
+        )
+
+    assert "hls transfer" in str(caught.value), "the message says what to do about it"
+    assert not destination.exists(), "the playlist was not left on disk as though it were media"
+
+
+async def test_an_hls_download_reports_bytes_without_a_percentage(
+    hls: FixtureServer, tmp_path: Path
+) -> None:
+    """D30: no ``Content-Length`` exists for a playlist, so no total is invented."""
+    seen: list[FetchProgress] = []
+
+    async def record(update: FetchProgress) -> None:
+        seen.append(update)
+
+    await fetcher.fetch(hls_item(hls, "hls/index.m3u8"), tmp_path / "stream.mp4", progress=record)
+
+    assert seen, "the transfer reported something"
+    assert all(update.overall_total is None for update in seen)
+    assert seen[-1].overall_done > 0
+
+
+async def test_the_cap_refuses_an_hls_stream_that_is_too_large(
+    hls: FixtureServer, tmp_path: Path
+) -> None:
+    """D31: with no size up front, the running cap is the only enforcement there is."""
+    destination = tmp_path / "stream.mp4"
+
+    with pytest.raises(SizeLimitExceeded) as caught:
+        await fetcher.fetch(hls_item(hls, "hls/index.m3u8"), destination, limit_bytes=1)
+
+    assert caught.value.written_bytes > 1
+    assert not destination.exists(), "the oversized partial is discarded"
+
+
+async def test_a_cancelled_hls_download_kills_ffmpeg_and_leaves_nothing(
+    hls: FixtureServer, staging: Path
+) -> None:
+    """FR-11.6: the child must be killed, or it keeps pulling segments we just refused."""
+    destination = staging / "stream.mp4"
+
+    with pytest.raises(TransferCancelled):
+        await fetcher.fetch(
+            hls_item(hls, "hls/index.m3u8"),
+            destination,
+            should_stop=lambda: True,
+        )
+
+    assert not destination.exists()
+    assert list(staging.iterdir()) == [], "no partial survives a cancellation"
+
+
+async def test_a_broken_playlist_is_a_failure_rather_than_an_empty_file(
+    hls: FixtureServer, staging: Path
+) -> None:
+    (hls.root / "hls" / "broken.m3u8").write_bytes(b"#EXTM3U\n#EXTINF:1,\nmissing.ts\n")
+    destination = staging / "stream.mp4"
+
+    with pytest.raises(FetchError) as caught:
+        await fetcher.fetch(hls_item(hls, "hls/broken.m3u8"), destination)
+
+    assert "HLS stream could not be downloaded" in str(caught.value)
+    assert list(staging.iterdir()) == [], "a failed conversion leaves no partial behind"
+
+
+async def test_an_hls_item_without_ffmpeg_says_so(
+    hls: FixtureServer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(fetcher.shutil, "which", lambda name: None)
+
+    with pytest.raises(FetchError, match="ffmpeg"):
+        await fetcher.fetch(hls_item(hls, "hls/index.m3u8"), tmp_path / "stream.mp4")
+
+
+# ── the chain guard: nobody hands the fetcher a playlist it will not consume ──
+
+
+def test_no_adapter_asks_for_a_playlist_to_be_saved_as_a_file() -> None:
+    """A ``.m3u8`` transfer must carry the ``hls`` role.
+
+    This is the regression guard for the bug that motivated the role: three ported adapters returned
+    a playlist as ``role="video"``, which the fetcher would have written to disk as a text file
+    named ``.mp4``. The check reads the adapters themselves, so a new one cannot reintroduce it and
+    pass because its unit tests happened to assert nothing about the role.
+
+    Only this direction is checked. The opposite (an ``hls`` role on a direct URL) is not a bug —
+    ffmpeg reads a plain file just as happily — and one adapter legitimately does both from one code
+    path when a bridge may answer with either.
+    """
+    package = pathlib.Path(fetcher.__file__).parent / "sites"
+    offenders: list[str] = []
+
+    for path in sorted(package.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
+            if name != "media":
+                continue
+            arguments = dict(zip(("url", "filename"), node.args, strict=False))
+            arguments.update({keyword.arg: keyword.value for keyword in node.keywords})
+            if _is_playlist_expression(arguments.get("url")) and (
+                _role_of(arguments.get("role")) != "hls"
+            ):
+                offenders.append(f"{path.name}: {ast.unparse(node)}")
+
+    assert offenders == [], f"a playlist would be saved as a file in: {offenders}"
+
+
+def _role_of(node: ast.expr | None) -> str:
+    """The literal role passed to ``media``, defaulting to the ``file`` that ``media`` uses."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return "file"
+
+
+def _is_playlist_expression(node: ast.expr | None) -> bool:
+    """Whether the URL handed to ``media`` is a resolved HLS playlist.
+
+    Two shapes are accepted, because both appear in the adapters: a variable whose *name* says so
+    (``hls_url``), and a literal ``.m3u8``. A name-based read is coarse, which is the point — it
+    fails loudly on the naming an adapter would use if it were handling a playlist.
+    """
+    if node is None:
+        return False
+    if isinstance(node, ast.Name):
+        return "hls" in node.id.lower() or "playlist" in node.id.lower()
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return ".m3u8" in node.value
+    return False
