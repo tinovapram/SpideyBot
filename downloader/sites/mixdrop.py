@@ -15,6 +15,7 @@ import logging
 import re
 import urllib.parse
 from pathlib import Path
+from typing import Any
 
 from downloader.contracts import Resolution, ResolveError
 from downloader.flow import Resolver
@@ -45,13 +46,14 @@ async def attempt(
     *,
     cookies_file: Path | None = None,
     timeout: float = DEFAULT_TIMEOUT,
+    client: Any | None = None,
 ) -> Resolution:
-    client = bridge.session_for(timeout, referer="https://mixdrop.co/")
+    session = client or bridge.session_for(timeout, referer="https://mixdrop.co/")
     try:
-        await bridge.load_cookies(client, cookies_file, default_domain=".mixdrop.co")
+        await bridge.load_cookies(session, cookies_file, default_domain=".mixdrop.co")
 
         # Step 1: fetch page
-        html = await bridge.get_text(client, url)
+        html = await bridge.get_text(session, url)
 
         if "File not found" in html or "deleted" in html.lower():
             raise ResolveError("File not found or deleted on MixDrop")
@@ -68,7 +70,8 @@ async def attempt(
             "mixdrop", url, [bridge.media(direct_url, filename, role="video", source_url=url)]
         )
     finally:
-        await bridge.close(client)
+        if client is None:
+            await bridge.close(session)
 
 
 def _extract_direct_url(html: str) -> str | None:

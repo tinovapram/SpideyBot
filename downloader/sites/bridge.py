@@ -222,6 +222,30 @@ async def _text(
     return response.text
 
 
+async def get_final_url(
+    client: Any,
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+    timeout: float | None = None,
+) -> str:
+    """GET a URL and return where it ended up, for a share link that is only a redirect.
+
+    The body is thrown away: the caller wants the destination — an id lives in its path or query,
+    and following the redirect is the only way to learn it. Reported as ``ResolveError`` like every
+    other transport failure, because "this resolver could not do it" is the chain's contract.
+    """
+    kwargs: dict[str, Any] = {"headers": headers or {}, "allow_redirects": True}
+    if timeout is not None:
+        kwargs["timeout"] = timeout
+
+    try:
+        response = await client.get(url, **kwargs)
+    except Exception as error:  # noqa: BLE001 - the transport's message is the useful one
+        raise ResolveError(f"could not follow the share link: {error}") from error
+    return str(getattr(response, "url", url))
+
+
 async def get_json(client: Any, url: str, **kwargs: Any) -> Any:
     """GET an endpoint that answers with JSON."""
     return _as_json(await get_text(client, url, **kwargs), url)

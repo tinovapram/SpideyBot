@@ -33,10 +33,8 @@ from downloader.fetcher import FetchedFile, ProgressHook
 from downloader.flow import DelegatingFetch, Resolver
 from downloader.selection import Preference
 from downloader.sites import (
-    bluesky,
     bysejikuar,
     capcut,
-    cyberdrop,
     dailymotion,
     doodstream,
     douyin,
@@ -194,7 +192,6 @@ def _argument(name: str, context: ChainContext, scope: str) -> Any:
 _NATIVE_TABLE: tuple[tuple[Any, tuple[str, ...], str], ...] = (
     (youtube, ("preference", "timeout", "cookies_file"), "youtube"),
     (terabox, ("cookies_file", "timeout"), "terabox"),
-    (cyberdrop, ("cookies_file", "timeout"), "cyberdrop-family"),
     (doodstream, ("cookies_file", "timeout"), "doodstream"),
     (streamtape, ("cookies_file", "timeout"), "streamtape"),
     (mixdrop, ("cookies_file", "timeout"), "mixdrop"),
@@ -209,7 +206,6 @@ _NATIVE_TABLE: tuple[tuple[Any, tuple[str, ...], str], ...] = (
     (tiktok, ("cookies_file", "timeout"), "tiktok"),
     (douyin, ("cookies_file", "timeout"), "douyin"),
     (threads, ("cookies_file", "timeout"), "threads"),
-    (bluesky, ("cookies_file", "timeout"), "bluesky"),
     (pinterest, ("cookies_file", "timeout"), "pinterest"),
     (tumblr, ("cookies_file", "timeout"), "tumblr"),
     (snapchat, ("cookies_file", "timeout"), "snapchat"),

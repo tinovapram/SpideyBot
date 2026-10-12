@@ -18,6 +18,7 @@ import logging
 import re
 import urllib.parse
 from pathlib import Path
+from typing import Any
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -50,13 +51,14 @@ async def attempt(
     *,
     cookies_file: Path | None = None,
     timeout: float = DEFAULT_TIMEOUT,
+    client: Any | None = None,
 ) -> Resolution:
-    client = bridge.session_for(timeout, referer="https://bysejikuar.com/")
+    session = client or bridge.session_for(timeout, referer="https://bysejikuar.com/")
     try:
-        await bridge.load_cookies(client, cookies_file, default_domain=".bysejikuar.com")
+        await bridge.load_cookies(session, cookies_file, default_domain=".bysejikuar.com")
 
         # Step 1: fetch page
-        html = await bridge.get_text(client, url)
+        html = await bridge.get_text(session, url)
 
         if "File not found" in html or "deleted" in html.lower():
             raise ResolveError("File not found or deleted on Bysejikuar")
@@ -83,7 +85,8 @@ async def attempt(
             "bysejikuar", url, [bridge.media(hls_url, filename, role="hls", source_url=url)]
         )
     finally:
-        await bridge.close(client)
+        if client is None:
+            await bridge.close(session)
 
 
 def _extract_encrypted(html: str) -> str | None:

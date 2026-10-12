@@ -20,6 +20,7 @@ import logging
 import re
 import urllib.parse
 from pathlib import Path
+from typing import Any
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from curl_cffi import requests
@@ -54,13 +55,14 @@ async def attempt(
     *,
     cookies_file: Path | None = None,
     timeout: float = DEFAULT_TIMEOUT,
+    client: Any | None = None,
 ) -> Resolution:
-    client = bridge.session_for(timeout, referer="https://mega.nz/")
+    session = client or bridge.session_for(timeout, referer="https://mega.nz/")
     try:
-        await bridge.load_cookies(client, cookies_file, default_domain=".mega.nz")
+        await bridge.load_cookies(session, cookies_file, default_domain=".mega.nz")
 
         # Step 1: fetch page
-        html = await bridge.get_text(client, url)
+        html = await bridge.get_text(session, url)
 
         if "File not found" in html or "deleted" in html.lower():
             raise ResolveError("File not found or deleted on MEGA")
@@ -83,7 +85,7 @@ async def attempt(
             filename = _decrypt_attr(file_attr_b64, file_key_b64) or filename
 
         # Step 5: request download URL from MEGA API
-        download_url = await _get_download_url(client, file_id, file_key_b64)
+        download_url = await _get_download_url(session, file_id, file_key_b64)
         if not download_url:
             raise ResolveError("Failed to get MEGA download URL")
 
@@ -99,7 +101,8 @@ async def attempt(
             ),
         )
     finally:
-        await client.close()
+        if client is None:
+            await bridge.close(session)
 
 
 def _extract_file_id(url: str) -> str | None:

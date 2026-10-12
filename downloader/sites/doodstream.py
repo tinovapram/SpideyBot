@@ -18,6 +18,7 @@ import logging
 import re
 import urllib.parse
 from pathlib import Path
+from typing import Any
 
 from downloader.contracts import Resolution, ResolveError
 from downloader.flow import Resolver
@@ -48,10 +49,11 @@ async def attempt(
     *,
     cookies_file: Path | None = None,
     timeout: float = DEFAULT_TIMEOUT,
+    client: Any | None = None,
 ) -> Resolution:
-    client = bridge.session_for(timeout, referer="https://dood.stream/")
+    session = client or bridge.session_for(timeout, referer="https://dood.stream/")
     try:
-        await bridge.load_cookies(client, cookies_file, default_domain=".dood.stream")
+        await bridge.load_cookies(session, cookies_file, default_domain=".dood.stream")
 
         # Step 1: normalize to embed URL
         parsed = urllib.parse.urlparse(url)
@@ -60,7 +62,7 @@ async def attempt(
         embed_url = f"{base}/e/{video_id}"
 
         # Step 2: fetch embed page
-        html = await bridge.get_text(client, embed_url)
+        html = await bridge.get_text(session, embed_url)
 
         if "File was deleted" in html or "file not found" in html.lower():
             raise ResolveError("File was deleted or not found on Doodstream")
@@ -72,7 +74,7 @@ async def attempt(
 
         # Step 4: call getlink API
         api_url = f"{base}/api/stream/getlink"
-        result = await bridge.post_json(client, api_url, json_body={"pass_md5": pass_md5})
+        result = await bridge.post_json(session, api_url, json_body={"pass_md5": pass_md5})
 
         if not result.get("success") or not result.get("result"):
             raise ResolveError(f"Doodstream API failed: {result.get('msg', 'unknown error')}")
@@ -83,7 +85,7 @@ async def attempt(
             raise ResolveError("No direct URL in Doodstream API response")
 
         # Step 6: follow redirect to get final URL (CDN)
-        head = await client.head(direct_url, allow_redirects=True)
+        head = await session.head(direct_url, allow_redirects=True)
         final_url = str(head.url)
 
         filename = bridge.filename_for(_extract_title(html) or video_id, extension=".mp4")
@@ -92,7 +94,8 @@ async def attempt(
             "doodstream", url, [bridge.media(final_url, filename, role="video", source_url=url)]
         )
     finally:
-        await bridge.close(client)
+        if client is None:
+            await bridge.close(session)
 
 
 def _extract_pass_md5(html: str) -> str | None:

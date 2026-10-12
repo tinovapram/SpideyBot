@@ -23,7 +23,6 @@ import pytest
 
 from downloader.contracts import Resolution, ResolvedFile, ResolveError, Transfer
 from downloader.sites import (
-    bluesky,
     bridge,    capcut,
     dailymotion,
     douyin,
@@ -43,6 +42,38 @@ from downloader.sites import (
 MP4 = "https://cdn.test/video.mp4"
 JPG = "https://cdn.test/photo.jpg"
 MP3 = "https://cdn.test/track.mp3"
+
+#: A Kuaishou manifest as the share page carries it: one group holding two encodings of one video,
+#: each stating its own bitrate and size. The numbers are from a real page, because the ranking is
+#: the thing under test and a made-up pair (1 against 2) would not catch a sort that reversed.
+KUAISHOU_BIG = "https://cdn.test/720p-avc.mp4"
+KUAISHOU_REPS: list[dict[str, Any]] = [
+    {
+        "qualityType": "720p",
+        "videoCodec": "avc",
+        "avgBitrate": "1164",
+        "fileSize": "1348400",
+        "hidden": "False",
+        "url": KUAISHOU_BIG,
+    },
+    {
+        "qualityType": "720p",
+        "videoCodec": "hevc",
+        "avgBitrate": "454",
+        "fileSize": "528665",
+        "hidden": "False",
+        "url": "https://cdn.test/720p-hevc.mp4",
+    },
+]
+KUAISHOU_MANIFEST: dict[str, Any] = {
+    "manifest": {"adaptationSet": [{"duration": 9300, "id": 1, "representation": KUAISHOU_REPS}]}
+}
+
+
+def kuaishou_page(**photo: Any) -> FakeResponse:
+    """A Kuaishou share page, whose state sits in the markup under an obfuscated top-level key."""
+    state = {"tusjoh.0sftu0uj:": {"result": 1, "photo": {"photoId": "1", **photo}}}
+    return FakeResponse(text=f"<script>window.INIT_STATE = {json.dumps(state)}</script>")
 
 
 class FakeResponse:
@@ -171,14 +202,101 @@ async def test_dailymotion_finds_a_url_nested_in_its_answer() -> None:
     assert_media(only(resolution), filename="Clip.mp4", url=MP4, kind="video")
 
 
-async def test_kuaishou_reads_the_video_url_field() -> None:
+async def test_kuaishou_picks_the_highest_bitrate_representation() -> None:
+    """A share page holds several encodings of one video; the best one is what was asked for."""
     resolution = await resolve(
         kuaishou,
-        "https://www.kuaishou.com/short-video/1",
-        FakeResponse(payload={"videoUrl": MP4, "title": "KS"}),
+        "https://www.kuaishou.com/short-video/3xwzr5dveyqc5fa",
+        kuaishou_page(caption="萌妹子", **KUAISHOU_MANIFEST),
     )
 
-    assert_media(only(resolution), filename="KS.mp4", url=MP4, kind="video")
+    file = only(resolution)
+    assert_media(file, filename="萌妹子.mp4", url=KUAISHOU_BIG, kind="video")
+    # The manifest states the size, which is what lets the size gate refuse an oversize video before
+    # any transfer starts (E3) — the mirrors carry no size at all.
+    assert file.filesize == 1348400
+
+
+async def test_kuaishou_ignores_a_hidden_representation() -> None:
+    """The state writes booleans as *strings*, so ``bool("False")`` is true and ``bool("True")`` is
+    true as well. Both mistakes are silent — one ships a worse file, the other ships none — so both
+    directions are checked here: a hidden rep is skipped even when it is the highest bitrate, and a
+    representation marked ``"False"`` stays eligible."""
+    hidden = {
+        "qualityType": "1080p",
+        "avgBitrate": "9000",
+        "fileSize": "999",
+        "hidden": "True",
+        "url": "https://cdn.test/hidden.mp4",
+    }
+    manifest = {"adaptationSet": [{"id": 1, "representation": [hidden, *KUAISHOU_REPS]}]}
+
+    resolution = await resolve(
+        kuaishou,
+        "https://www.kuaishou.com/short-video/3xwzr5dveyqc5fa",
+        kuaishou_page(manifest=manifest),
+    )
+
+    assert_media(only(resolution), filename="Kuaishou_Video.mp4", url=KUAISHOU_BIG, kind="video")
+
+
+async def test_kuaishou_follows_a_share_link_for_the_photo_id() -> None:
+    """A ``v.kuaishou.com`` link is only a redirect: the id exists nowhere else, and the share page
+    will not answer without it."""
+    photo_page = "https://kph1tf76.m.chenzhongtech.com/fw/photo/3xi5u3rzf5qrgq4?cc=share_copylink"
+    session = FakeSession(
+        FakeResponse(text="", url=photo_page),
+        kuaishou_page(caption="Clip", **KUAISHOU_MANIFEST),
+    )
+
+    await kuaishou.attempt("https://v.kuaishou.com/8qIlZu", client=session)
+
+    _method, url, _kwargs = session.calls[1]
+    assert url == "https://v.m.chenzhongtech.com/fw/photo/3xi5u3rzf5qrgq4"
+
+
+async def test_kuaishou_falls_back_to_the_mirrors_without_a_manifest() -> None:
+    resolution = await resolve(
+        kuaishou,
+        "https://www.kuaishou.com/short-video/3xwzr5dveyqc5fa",
+        kuaishou_page(
+            caption="Clip",
+            manifest={"adaptationSet": []},
+            mainMvUrls=[{"cdn": "mirror", "url": MP4}],
+        ),
+    )
+
+    file = only(resolution)
+    assert_media(file, filename="Clip.mp4", url=MP4, kind="video")
+    assert file.filesize is None
+
+
+async def test_kuaishou_reports_an_unavailable_post_and_a_page_change_differently() -> None:
+    """Two different futures hide behind one failure: the post is gone (nothing to fix) or Kuaishou
+    changed its page (something to fix). The messages have to say which."""
+    gone = await expect_error(
+        kuaishou,
+        "https://www.kuaishou.com/short-video/3xwzr5dveyqc5fa",
+        FakeResponse(text="<html><body>no state here</body></html>"),
+    )
+    assert "state" in gone
+
+    unavailable = await expect_error(
+        kuaishou,
+        "https://www.kuaishou.com/short-video/3xwzr5dveyqc5fa",
+        kuaishou_page(caption="Clip"),
+    )
+    assert "no photo" in unavailable
+
+
+async def test_kuaishou_refuses_a_link_that_names_no_photo() -> None:
+    message = await expect_error(
+        kuaishou,
+        "https://www.kuaishou.com/profile/somebody",
+        FakeResponse(text="", url="https://www.kuaishou.com/profile/somebody"),
+    )
+
+    assert "not a Kuaishou video link" in message
 
 
 async def test_linkedin_reads_the_download_url_field() -> None:
@@ -403,58 +521,6 @@ async def test_tiktok_reports_a_post_with_no_links() -> None:
     assert "no download link" in message
 
 
-async def test_bluesky_reads_an_attachments_action_button_not_its_thumbnail() -> None:
-    """The ``img`` is a preview; the media is what the row's button points at."""
-    html = """
-    <section class="download_result_section">
-      <div class="download__item__caption__text">A bluesky post</div>
-      <div class="download_item">
-        <div class="image_wrapper"><img src="https://cdn.test/thumb.jpg"></div>
-        <a class="download__item__info__actions__button" href="https://cdn.test/full.jpg">Save</a>
-      </div>
-    </section>
-    """
-    resolution = await resolve(
-        bluesky, "https://bsky.app/profile/user/post/1", FakeResponse(text=html)
-    )
-
-    assert_media(
-        only(resolution),
-        filename="A bluesky post.jpg",
-        url="https://cdn.test/full.jpg",
-        kind="photo",
-    )
-
-
-async def test_bluesky_prefers_a_video_over_a_still() -> None:
-    html = """
-    <section class="download_result_section">
-      <div class="download__item__caption__text">With video</div>
-      <div class="download_item">
-        <div class="video_wrapper"><video src="https://cdn.test/b.mp4" poster="https://cdn.test/p.jpg"></video></div>
-      </div>
-      <div class="download_item">
-        <div class="image_wrapper"><img src="https://cdn.test/t.jpg"></div>
-        <a class="download__item__info__actions__button" href="https://cdn.test/full.jpg">Save</a>
-      </div>
-    </section>
-    """
-    resolution = await resolve(
-        bluesky, "https://bsky.app/profile/user/post/1", FakeResponse(text=html)
-    )
-
-    assert [file.media_kind for file in resolution.files] == ["video", "photo"]
-    assert resolution.files[0].primary.url == "https://cdn.test/b.mp4"
-
-
-async def test_bluesky_reports_a_page_it_does_not_recognise() -> None:
-    message = await expect_error(
-        bluesky, "https://bsky.app/profile/user/post/1", FakeResponse(text="<html></html>")
-    )
-
-    assert "no result section" in message
-
-
 async def test_pinterest_unwraps_the_redirect_and_takes_the_best_row() -> None:
     html = """
     <h1>Pin title</h1>
@@ -565,6 +631,24 @@ async def test_twitter_reports_a_text_only_post_as_empty() -> None:
             "https://twitter.com/user/status/123",
             FakeResponse(payload={"text": "just words", "media_extended": []}),
             FakeResponse(payload={"status": "ok", "data": "<html></html>"}),
+        )
+
+    assert caught.value.empty is True
+
+
+async def test_twitter_keeps_the_empty_verdict_when_the_bridge_also_fails() -> None:
+    """Found by the live smoke matrix, on a real text-only post (``twitter.com/jack/status/20``).
+
+    The API read the post and said it holds nothing; savetwitter then broke. Reporting *that* would
+    tell the user the download failed when the true answer is that there was never anything to
+    download — and E4's message is a different one (D23).
+    """
+    with pytest.raises(ResolveError) as caught:
+        await resolve(
+            twitter,
+            "https://twitter.com/user/status/123",
+            FakeResponse(payload={"text": "just setting up my twttr", "media_extended": []}),
+            FakeResponse(status_code=500),
         )
 
     assert caught.value.empty is True

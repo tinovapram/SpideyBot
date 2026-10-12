@@ -64,22 +64,23 @@ async def attempt(
     *,
     cookies_file: Path | None = None,
     timeout: float = DEFAULT_TIMEOUT,
+    client: Any | None = None,
 ) -> Resolution:
     """Resolve a TeraBox share into direct file transfers."""
     if cookies_file is None or not cookies_file.exists():
         raise ResolveError("TeraBox requires a logged-in cookie file (ndus/ndut)")
 
-    client = bridge.session_for(timeout)
+    session = client or bridge.session_for(timeout)
     try:
-        await bridge.load_cookies(client, cookies_file, default_domain=".terabox.com")
+        await bridge.load_cookies(session, cookies_file, default_domain=".terabox.com")
 
         # Step 1: resolve short link to full share page
-        share_url = await _resolve_share_url(client, url)
+        share_url = await _resolve_share_url(session, url)
         if not share_url:
             raise ResolveError("Could not resolve TeraBox share URL")
 
         # Step 2: fetch share page and extract file list
-        resp = await client.get(share_url)
+        resp = await session.get(share_url)
         html = resp.text
 
         files = _extract_filelist(html)
@@ -89,7 +90,7 @@ async def attempt(
         # Step 3: sign each dlink (requires ndus/ndut cookies)
         resolved: list[ResolvedFile] = []
         for item in files:
-            signed = await _sign_dlink(client, item["dlink"])
+            signed = await _sign_dlink(session, item["dlink"])
             if not signed:
                 log.warning("Failed to sign TeraBox dlink for %s", item["name"])
                 continue
@@ -107,29 +108,30 @@ async def attempt(
 
         return Resolution(engine="terabox", source_url=url, files=tuple(resolved))
     finally:
-        await client.close()
+        if client is None:
+            await bridge.close(session)
 
 
-async def _resolve_share_url(client: requests.AsyncSession, url: str) -> str | None:
+async def _resolve_share_url(session: requests.AsyncSession, url: str) -> str | None:
     """Follow redirects to the canonical share page."""
     parsed = urllib.parse.urlparse(url)
     host = parsed.hostname or ""
 
     # Already a full share page?
     if "/s/" in parsed.path or "surl=" in parsed.query:
-        resp = await client.get(url, allow_redirects=True)
+        resp = await session.get(url, allow_redirects=True)
         return str(resp.url)
 
     # Short link like terabox.com/s/abc123
     if parsed.path.startswith("/s/"):
-        resp = await client.get(url, allow_redirects=True)
+        resp = await session.get(url, allow_redirects=True)
         return str(resp.url)
 
     # Try the sharing/link endpoint
     short = parsed.path.rstrip("/").split("/")[-1]
     if short:
         api_url = f"https://{host}/sharing/link?surl={short}"
-        resp = await client.get(api_url, allow_redirects=True)
+        resp = await session.get(api_url, allow_redirects=True)
         return str(resp.url)
 
     return None

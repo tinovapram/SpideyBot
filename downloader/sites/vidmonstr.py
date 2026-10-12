@@ -16,6 +16,7 @@ import logging
 import re
 import urllib.parse
 from pathlib import Path
+from typing import Any
 
 from downloader.contracts import Resolution, ResolveError
 from downloader.flow import Resolver
@@ -46,13 +47,14 @@ async def attempt(
     *,
     cookies_file: Path | None = None,
     timeout: float = DEFAULT_TIMEOUT,
+    client: Any | None = None,
 ) -> Resolution:
-    client = bridge.session_for(timeout, referer="https://vidmonstr.com/")
+    session = client or bridge.session_for(timeout, referer="https://vidmonstr.com/")
     try:
-        await bridge.load_cookies(client, cookies_file, default_domain=".vidmonstr.com")
+        await bridge.load_cookies(session, cookies_file, default_domain=".vidmonstr.com")
 
         # Step 1: fetch page
-        html = await bridge.get_text(client, url)
+        html = await bridge.get_text(session, url)
 
         if "File not found" in html or "deleted" in html.lower():
             raise ResolveError("File not found or deleted on Vidmonstr")
@@ -69,7 +71,7 @@ async def attempt(
         base = f"{parsed.scheme}://{parsed.hostname}"
         api_url = f"{base}/api/stream.php"
         result = await bridge.post_json(
-            client, api_url, data={"iframeId": iframe_id, "token": token}
+            session, api_url, data={"iframeId": iframe_id, "token": token}
         )
 
         if not result.get("success") or not result.get("source"):
@@ -86,7 +88,8 @@ async def attempt(
             "vidmonstr", url, [bridge.media(direct_url, filename, role="video", source_url=url)]
         )
     finally:
-        await bridge.close(client)
+        if client is None:
+            await bridge.close(session)
 
 
 def _extract_iframe_id(html: str) -> str | None:

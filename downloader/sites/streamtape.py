@@ -16,6 +16,7 @@ import logging
 import re
 import urllib.parse
 from pathlib import Path
+from typing import Any
 
 from downloader.contracts import Resolution, ResolveError
 from downloader.flow import Resolver
@@ -46,13 +47,14 @@ async def attempt(
     *,
     cookies_file: Path | None = None,
     timeout: float = DEFAULT_TIMEOUT,
+    client: Any | None = None,
 ) -> Resolution:
-    client = bridge.session_for(timeout, referer="https://streamtape.com/")
+    session = client or bridge.session_for(timeout, referer="https://streamtape.com/")
     try:
-        await bridge.load_cookies(client, cookies_file, default_domain=".streamtape.com")
+        await bridge.load_cookies(session, cookies_file, default_domain=".streamtape.com")
 
         # Step 1: fetch page
-        html = await bridge.get_text(client, url)
+        html = await bridge.get_text(session, url)
 
         if "File not found" in html or "deleted" in html.lower():
             raise ResolveError("File not found or deleted on StreamTape")
@@ -70,7 +72,7 @@ async def attempt(
         get_video_url = f"{base}/get_video?token={token}&stream=1"
 
         # Step 4: follow redirect to final URL
-        head = await client.head(get_video_url, allow_redirects=True)
+        head = await session.head(get_video_url, allow_redirects=True)
         final_url = str(head.url)
 
         filename = bridge.filename_for(
@@ -81,7 +83,8 @@ async def attempt(
             "streamtape", url, [bridge.media(final_url, filename, role="video", source_url=url)]
         )
     finally:
-        await bridge.close(client)
+        if client is None:
+            await bridge.close(session)
 
 
 def _extract_norobotlink(html: str) -> str | None:

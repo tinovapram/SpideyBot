@@ -152,7 +152,6 @@ def test_is_video_host_matches_subdomains_but_not_lookalikes() -> None:
 HOST_FOR_ADAPTER: dict[str, str] = {
     "youtube": "https://www.youtube.com/watch?v=x",
     "terabox": "https://www.terabox.com/s/abc",
-    "cyberdrop-family": "https://cyberdrop.me/a/abc",
     "doodstream": "https://dood.stream/d/abc",
     "streamtape": "https://streamtape.com/v/abc",
     "mixdrop": "https://mixdrop.co/e/abc",
@@ -167,7 +166,7 @@ HOST_FOR_ADAPTER: dict[str, str] = {
     "tiktok": "https://www.tiktok.com/@user/video/1",
     "douyin": "https://www.douyin.com/video/1",
     "threads": "https://www.threads.net/@user/post/1",
-    "bluesky": "https://bsky.app/profile/user/post/1",
+
     "pinterest": "https://www.pinterest.com/pin/1/",
     "tumblr": "https://staff.tumblr.com/post/1",
     "snapchat": "https://www.snapchat.com/spotlight/1",
@@ -264,3 +263,109 @@ def test_the_table_is_the_whole_chain_for_a_native_host() -> None:
     chain = registry.chain_names(registry.chain_for("https://streamtape.com/v/abc"))
 
     assert chain == ("streamtape", registry.GALLERYDL)
+
+
+# ── the contract every wired adapter must honour ─────────────────────────────
+
+
+class DeadTransport:
+    """A session whose every call fails, so an adapter cannot reach anything.
+
+    Used to prove each adapter *fails cleanly* rather than what it resolves: the chain catches
+    ``ResolveError`` and moves on, so anything else — a ``TypeError``, an ``AttributeError``, a
+    dataclass raised as an exception — escapes the chain and fails the whole job. It also counts its
+    calls, because an adapter that ignored the injected session and built its own would be reaching
+    the real network behind the test's back.
+    """
+
+    def __init__(self) -> None:
+        self.headers: dict[str, str] = {}
+        self.cookies = self
+        self.calls: list[str] = []
+
+    def set(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+    async def get(self, *args: Any, **kwargs: Any) -> Any:
+        self.calls.append("get")
+        raise OSError("the transport is down")
+
+    async def post(self, *args: Any, **kwargs: Any) -> Any:
+        self.calls.append("post")
+        raise OSError("the transport is down")
+
+    async def head(self, *args: Any, **kwargs: Any) -> Any:
+        self.calls.append("head")
+        raise OSError("the transport is down")
+
+    async def close(self) -> None:
+        return None
+
+
+# Adapters that refuse before touching any transport, and why. Listed rather than inferred, because
+# the reason is per site: TeraBox reads the cookie *values* (`ndus`/`ndut`) and gives up when they
+# are absent, so with no cookie file there is nothing for a transport to do.
+_REFUSES_BEFORE_ANY_REQUEST = {"terabox": "needs a logged-in cookie file (ndus/ndut)"}
+
+
+@pytest.mark.parametrize(
+    ("module", "arguments", "scope"),
+    registry._NATIVE_TABLE,
+    ids=lambda row: getattr(row, "__name__", ""),
+)
+async def test_every_wired_adapter_fails_cleanly(
+    module: Any, arguments: tuple[str, ...], scope: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each adapter, unable to reach its site, must raise ``ResolveError`` and nothing else.
+
+    This is the guard for a real crash: the first port of the Cyberdrop adapter raised a
+    ``DelegatingFetch`` dataclass as though it were an exception, so every Cyberdrop link produced a
+    ``TypeError`` that the chain could not catch — the job failed instead of falling through to the
+    engines. Nothing caught it because the registry's tests only ever inspected chain *names*, and
+    no test had ever called an adapter.
+
+    ``ResolveError`` is also accepted for a different reason per host — "no cookies", "the bridge is
+    down", "empty post" — all of which are the same contract from the chain's point of view.
+    """
+    from downloader.contracts import ResolveError
+
+    name = module.__name__.rsplit(".", 1)[-1]
+
+    # Only the arguments the adapter actually declares, and only the values the registry itself
+    # passes, so a signature change breaks this test rather than being papered over by a default.
+    kwargs: dict[str, Any] = {}
+    for argument in arguments:
+        if argument == "timeout":
+            kwargs["timeout"] = 30.0
+        elif argument == "options":
+            kwargs["options"] = {}
+        # `cookies_file` is left out on purpose: without one, an adapter that needs a login fails
+        # before it builds a request, which is the cheapest way to prove it reports that cleanly.
+
+    # The two adapters that own their transport cannot be reached through an injected session, so
+    # the transport they do use is broken instead.
+    transport: DeadTransport | None = None
+    if name == "youtube":
+
+        async def dead_resolve(*args: Any, **kwargs: Any) -> Any:
+            raise ResolveError("the video resolver is unavailable")
+
+        monkeypatch.setattr(registry.probe, "resolve_ytdlp", dead_resolve)
+    elif name == "reddit":
+
+        def dead_client(*args: Any, **kwargs: Any) -> Any:
+            raise ResolveError("Reddit would not accept any available client id")
+
+        monkeypatch.setattr(module, "_client", dead_client)
+    else:
+        transport = DeadTransport()
+        kwargs["client"] = transport
+
+    with pytest.raises(ResolveError):
+        await module.attempt("https://example.test/whatever", **kwargs)
+
+    if transport is not None and name not in _REFUSES_BEFORE_ANY_REQUEST:
+        assert transport.calls, (
+            f"{name} never used the session it was handed, so it is either ignoring the switch's "
+            f"client or reaching the network on its own"
+        )

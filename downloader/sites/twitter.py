@@ -53,13 +53,26 @@ async def attempt(
 ) -> Resolution:
     async with bridge.opened(client, timeout=timeout) as session:
         await bridge.load_cookies(session, cookies_file, default_domain=".x.com")
+        # The bridge is still tried after an "empty post" verdict — it sometimes sees a protected or
+        # age-gated reply the API cannot — but if it fails too, the API's verdict is the one to
+        # report: "nothing in that post" is true and actionable, where "savetwitter could not
+        # resolve that post" says only that a second site also had trouble.
+        empty: ResolveError | None = None
         try:
             return await _through_the_api(session, url)
         except ResolveError as error:
             # Logged rather than swallowed silently: a post that only resolves the second way is a
             # signal that the API route has changed, worth seeing before it breaks outright.
             log.info("vxtwitter could not resolve %s (%s); trying savetwitter", url, error)
-        return await _through_the_bridge(session, url)
+            if error.empty:
+                empty = error
+
+        try:
+            return await _through_the_bridge(session, url)
+        except ResolveError:
+            if empty is not None:
+                raise empty from None
+            raise
 
 
 async def _through_the_api(session: Any, url: str) -> Resolution:
