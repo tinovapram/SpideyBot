@@ -251,6 +251,10 @@ class _FakeUserClient:
         self.is_connected = False
         self.is_initialized = False
         self.stopped = False
+        self.handlers: list[tuple[object, object]] = []
+
+    def add_handler(self, handler: object, group: object = None) -> None:
+        self.handlers.append((handler, group))
 
     async def connect(self) -> bool:
         self.is_connected = True

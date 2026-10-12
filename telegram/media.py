@@ -50,6 +50,10 @@ Progress = Callable[[int, int], Awaitable[None] | None]
 #: Whether the job has been cancelled (FR-11.6).
 StopCheck = Callable[[], bool]
 
+#: The chat a saved file goes to: Telegram's own "me" (Saved Messages). Both FR-5 and FR-6 file what
+#: they save there, and the string is the API's, not ours.
+SELF = "me"
+
 
 @dataclass(frozen=True)
 class Fetched:
@@ -388,6 +392,39 @@ async def _messages(client: Any, chat: Any, ids: Sequence[int]) -> list[Any]:
     if result is None:
         return []
     return list(result) if isinstance(result, list) else [result]
+
+
+async def send_to_self(
+    client: Any,
+    message: Any,
+    *,
+    caption: str,
+    scratch: Path,
+) -> str:
+    """Keep one message's media in the user's own Saved Messages (FR-5.5, FR-6.3).
+
+    ``chat_id="me"`` is Telegram's self-chat, which is where both features file what they save: the
+    command that triggered them may have been typed in someone else's chat, and replying there — as
+    the user or as the bot — would be a surprise with consequences the user cannot undo. Downloading
+    first and re-sending keeps the copy *ours* (a forwarded message shows the original sender, which
+    for a saved file is exactly what the user did not ask for) and gives the caption a place to go.
+
+    Returns the path it wrote, so a caller can clean up or report a size.
+    """
+    scratch.mkdir(parents=True, exist_ok=True)
+    path = await client.download_media(message, file_name=str(scratch))
+    if not path:
+        raise RuntimeError("Telegram returned no file for that message")
+
+    kind = _kind(message)
+    sender = {
+        "photo": client.send_photo,
+        "video": client.send_video,
+        "audio": client.send_audio,
+        "document": client.send_document,
+    }[kind]
+    await sender(chat_id=SELF, **{kind: path}, caption=caption)
+    return str(path)
 
 
 async def _history(client: Any, chat: Any, limit: int) -> list[Any]:

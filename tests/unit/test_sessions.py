@@ -17,7 +17,7 @@ from pyrogram import errors
 
 from app import config, paths
 from app.config import Settings
-from telegram import sessions
+from telegram import magic, sessions, timer
 
 USER = 501
 
@@ -43,10 +43,16 @@ class FakeUserClient:
         self.connects = 0
         self.stops = 0
         self.closed = False
+        #: ``(handler, group)`` pairs, so a test can ask what a live session is *listening* for —
+        #: FR-5's magic word and FR-6's auto-save are attached here, and nothing else would.
+        self.handlers: list[tuple[Any, Any]] = []
         self._authorized = authorized
         self._connect_error = connect_error
         self._me_error = me_error
         self._me = me
+
+    def add_handler(self, handler: Any, group: Any = None) -> None:
+        self.handlers.append((handler, group))
 
     async def connect(self) -> bool:
         self.connects += 1
@@ -433,3 +439,45 @@ def test_the_pool_lookup_is_injectable(settings) -> None:
         assert sessions.get_pool() is pool
     finally:
         sessions.set_pool(None)
+
+
+# ── what a live session listens for (FR-5, FR-6) ────────────────────────
+
+
+async def test_connecting_attaches_the_magic_word_and_auto_save(settings, stored) -> None:
+    """Both react to the *user's* own messages, so they only exist on a live user client."""
+    pool, factory, _ = pool_for(settings)
+
+    await pool.get(USER)
+
+    groups = [group for _handler, group in factory.clients[USER].handlers]
+    assert groups == [magic.MAGIC_GROUP, timer.TIMER_GROUP]
+
+
+async def test_the_features_are_attached_before_the_dispatcher_starts(settings, stored) -> None:
+    """A handler added after ``initialize()`` would miss whatever arrived in between."""
+    pool, factory, _ = pool_for(settings)
+
+    await pool.get(USER)
+
+    assert factory.clients[USER].handlers, "attached"
+    assert factory.clients[USER].is_initialized, "and the dispatcher started after them"
+
+
+async def test_a_fetch_only_pool_attaches_nothing(settings, stored) -> None:
+    """The escape hatch the fetch-only paths (and their tests) rely on."""
+    factory = FakeFactory()
+    pool = sessions.SessionPool(settings, factory=factory, register_features=False)
+
+    await pool.get(USER)
+
+    assert factory.clients[USER].handlers == []
+
+
+async def test_a_failed_connect_attaches_nothing(settings, stored) -> None:
+    pool, factory, _ = pool_for(settings, me_error=errors.AuthKeyUnregistered())
+
+    with pytest.raises(sessions.SessionError):
+        await pool.get(USER)
+
+    assert factory.clients[USER].handlers == []

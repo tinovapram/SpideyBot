@@ -112,6 +112,13 @@ class TgSession:
         #: Message ids whose download fails, so "one file failed, the rest arrived" (FR-9.1) can be
         #: tested at the layer that produces the failure rather than at delivery.
         self._fail_ids = fail_ids or set()
+        #: ``(handler, group)`` pairs. A live session attaches FR-5's magic word and FR-6's
+        #: auto-save, so the fake has to accept them or the pool cannot connect at all.
+        self.handlers: list[tuple[Any, Any]] = []
+
+
+    def add_handler(self, handler: Any, group: Any = None) -> None:
+        self.handlers.append((handler, group))
 
     async def connect(self) -> bool:
         self.is_connected = True

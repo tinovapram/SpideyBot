@@ -466,7 +466,6 @@ ACCOUNT_STATUS = (
 ACCOUNT_HINT = "TeraBox cookies are managed with /setting."
 
 # ── the Telegram download path (FR-4) ───────────────────────────────────
-
 DT_NOT_TELEGRAM = "⚠️ /dt takes Telegram links only. Use /dl for any other site."
 DT_NO_SESSION = (
     "⚠️ You need a Telegram session before downloading from Telegram.\n"
@@ -486,3 +485,23 @@ DT_FOLDER_EMPTY = "ℹ️ Nothing downloadable was found in that folder."
 DT_DONE = "✅ **Sent {sent}/{total} file(s)** from `{chat}` — scanned {scanned} message(s)."
 DT_DONE_ALBUM = "✅ **Sent {sent}/{total} file(s)** from `{chat}` (one album)."
 DT_CAPTION_FALLBACK = "🔗 From {chat}, message {id}"
+
+# ── the reply magic word (FR-5) and auto-save (FR-6) ────────────────────
+#
+# Both speak only in Saved Messages: the command may have been typed in someone else's chat, and a
+# bot that answered there — as the user — would be doing something the user did not ask for.
+
+#: FR-5.4: no reply to act on. The word is named because the user may have changed it (FR-14).
+MAGIC_NO_REPLY = (
+    "⚠️ **Reply to a message that has media, then send `{word}`** to save it here."
+)
+MAGIC_NO_MEDIA = (
+    "⚠️ **That message has no media to save.**\n"
+    "Reply to one with a photo, video or file, then send `{word}`."
+)
+MAGIC_SAVED = "✅ **SpideyBot:** Saved the media from that message."
+MAGIC_FAILED = "❌ **SpideyBot:** Could not save that media (`{reason}`)."
+
+#: FR-6.3: who sent it, which account, and what they wrote.
+TIMER_CAPTION = "📥 Saved from {username} (`{sender_id}`)\n\n{text}"
+TIMER_SAVED = "✅ **SpideyBot:** Saved an incoming private photo/video."

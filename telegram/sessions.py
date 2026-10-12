@@ -120,10 +120,12 @@ class SessionPool:
         *,
         factory: Callable[[int], Any] | None = None,
         clock: Callable[[], float] = time.monotonic,
+        register_features: bool = True,
     ) -> None:
         self._settings = settings
         self._factory = factory or (lambda user_id: build_client(settings, user_id))
         self._clock = clock
+        self._register_features = register_features
         self._live: dict[int, _Live] = {}
 
     # ── what the handlers and the status copy ask ────────────────────────
@@ -159,6 +161,12 @@ class SessionPool:
     def badge(self, user_id: int) -> tuple[bool, bool]:
         """``(has_session, is_live)`` — the two facts the session badge is built from."""
         return self.has_session(user_id), self.is_live(user_id)
+
+    #: True when a *connect* should register the handlers that make a session useful (FR-5, FR-6):
+    #: the magic word and auto-save react to the user's own messages, so they live on this client
+    #: rather than on the bot's. Off only for a client that fetches and nothing else, which is what
+    #: the tests build.
+    register_features: bool = True
 
     # ── connecting and disconnecting ─────────────────────────────────────
 
@@ -213,6 +221,8 @@ class SessionPool:
                     detail="get_me() returned nothing",
                     expired=True,
                 )
+            if self._register_features:
+                self._attach_features(client, user_id)
             await client.initialize()
         except errors.FloodWait as wait:
             await self._discard(client)
@@ -324,6 +334,20 @@ class SessionPool:
                 await self._discard(live.client)
 
     # ── internals ────────────────────────────────────────────────────────
+
+    def _attach_features(self, client: Any, user_id: int) -> None:
+        """Register the two things a live session does on its own (FR-5, FR-6).
+
+        Before ``initialize()``, because that is what starts the dispatcher: a handler added
+        afterwards would miss whatever arrives in between. Imported here rather than at module scope
+        because both modules read the database, so importing them at the top would make
+        ``telegram.sessions`` need ``app.db`` to be configured merely to be imported — exactly the
+        coupling that makes a unit test require a Postgres.
+        """
+        from telegram import magic, timer
+
+        magic.register(client, self._settings, user_id=user_id)
+        timer.register(client, self._settings, user_id=user_id)
 
     async def _make_room(self, user_id: int) -> None:
         """Evict idle clients until one more may be connected, or refuse (R3)."""

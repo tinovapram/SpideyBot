@@ -107,6 +107,8 @@ the automatic fallback.
 | D51 | **`/dt` runs through the same queue as `/dl`** | `handlers/telegram_dl.py` parses and checks the session, then calls `handlers/submission.submit` — the same admission path as `/dl` (FR-3). The job handler branches on the link: a Telegram link is fetched by `telegram/media.fetch` with the *user's* session, everything else by the pipeline, and both produce a `flow.LinkResult` so the ledger, the gate, the albums and the final message are shared | A `/dt` that bypassed the queue would be a second implementation of quota, concurrency and cancellation — and the one thing the spec is explicit about (FR-10.2) is that downloads share one queue. It also made the status message free: the job carries `status_message_id` from `/dt` exactly as from `/dl`, so FR-7's live view works on Telegram jobs without knowing they are different. The branch is on the *link* rather than a stored flag, so a job row survives a restart with nothing to fall out of step |
 | D52 | **A folder link downloads one message per chat** | `t.me/addlist/<slug>` parses into `FolderLink`; the resolver reads the filter through the user's session, and for each chat scans up to `FOLDER_SCAN` (10) recent messages and takes the first with media | FR-4.3 asks for folder support and a folder names *no content*: it is a filter over chats. "Download the folder" is therefore unbounded — it could quietly spend a whole allowance on one click, and no per-link limit can refuse something whose size is unknown until it has been fetched (the opposite of AC-3's rule). One message per chat is bounded, predictable, and reported in FR-4.5's counts (chats scanned), so the user can see exactly what it did. Reconciling that against the spec's wording is an operator decision, not a silent invention |
 | D53 | **The size gate runs on Telegram's own metadata** | `telegram/media.fetch` sums `file_size` from the messages and calls `gate.check_size` **before** requesting anything, and the AC-3 refusal is returned as the same `SizeCheck` the HTTP path returns | Telegram reports real sizes for everything it stores, so unlike an extractor's guess this number is trustworthy — which makes AC-3's "refuse before a byte moves" *stronger* on this path than on the HTTP one, where an unreported size can only be flagged for enforcement during transfer (D31). Returning the gate's own verdict rather than a sentence keeps one refusal message for every source |
+| D54 | **The two reply features live on the user's client, and speak only in Saved Messages** | `telegram/magic.py` and `telegram/timer.py` register `MessageHandler`s on the client the pool connects — before `initialize()`, or they would miss whatever arrives in between — and both file what they save in Saved Messages. The magic word is *compared* per message rather than expressed as a filter | FR-5.3 and FR-6.2 are about the user's own account (their outgoing messages, their incoming private media) and Telegram only sends an account its own updates, so a handler on the bot client would see the wrong half of every conversation. Saved Messages is the only chat either feature may write to: the command may have been typed in someone else's chat, and a bot that answered there — as the user — would do something with consequences the user cannot undo. A filter built from the magic word would have to be rebuilt every time the word changed (FR-14), and a handler that is replaced is one that can be forgotten; one case-insensitive comparison per outgoing message costs nothing |
+| D55 | **`media_unread` is implemented as "arrived while live, and not already saved"** | FR-6.2's unread rule is enforced by Kurigram's `skip_updates` default (on), so media from before this session is never dispatched rather than merely filtered, plus a bounded per-process set of `(chat, message)` pairs for the repeated-update case a reconnect can cause. The residual gap is written down in the module rather than assumed away: media that arrives *while connected* and is then read on another device will still be saved | Pyrogram exposes no `media_unread` field on `Message` (Telethon does, which is why the spec names it), and reading it would mean a `RawUpdateHandler` and a second parser for the same event. What the spec actually protects is the offline backlog of media the user has already seen, and `skip_updates` makes that invisible at the source — a stronger guarantee than filtering it out afterwards. Recording the gap is the point: an approximation that is written down can be revisited; one that is silently treated as exact cannot |
 
 ---
 
@@ -162,7 +164,7 @@ SpideyBot/
                            # the bridge-backed platforms, and the two that read their own site
     bypass/                # FR-18 shortener families
   telegram/
-    clients.py  sessions.py  login.py  links.py  media.py
+    clients.py  sessions.py  login.py  links.py  media.py  magic.py  timer.py
     status.py  delivery.py  progress.py  keyboards.py
   tests/                   # unit/, integration/, acceptance/, fakes/
   migrations/              # Alembic
@@ -562,10 +564,23 @@ walks the conversation including E13/E14/E15 and the timeout; `tests/unit/test_s
 cap, LRU, reaping and what a dead session does to its file.
 
 ### P6 — Reply triggers
-- [ ] Magic word: outgoing single-token match, per-user word, guidance replies, Saved Messages delivery (FR-5)
-- [ ] TimerMedia: incoming private photo/video with `media_unread`, sender caption, toggle, fail-open (FR-6)
+- [x] Magic word: outgoing single-token match, per-user word, guidance replies, Saved Messages
+      delivery (FR-5). `telegram/magic.py`; the handler is attached to the *user's* client when the
+      pool connects it, because FR-5.3's "only the user's own outgoing messages" means Telegram has
+      to send them to that account. The word is matched, not filtered: it can change at any time
+      (FR-14), and a filter built from a changing value is a filter that gets forgotten. All three
+      outcomes — saved, no reply, no media — are said in Saved Messages, the only chat the bot may
+      speak in for this feature
+- [x] TimerMedia: incoming private photo/video with `media_unread`, sender caption, toggle, fail-open
+      (FR-6). `telegram/timer.py`; unset is *not* off (the column is nullable so a default can change
+      later), an unreadable preference stays on (FR-6.4), and a per-process debounce stops a repeated
+      update saving the same photo twice. See D55 for the one part of FR-6.2 the library cannot give us
 
-**Done when:** AC-8 and AC-9 pass, including the "changed magic word disables `WOW`" case.
+**Done when:** AC-8 and AC-9 pass, including the "changed magic word disables `WOW`" case. **Met:**
+`tests/acceptance/test_ac8_ac9_triggers.py` drives both features against a real database and a
+recording user client: the saved case, the changed word (old ignored, new works), an incoming `WOW`
+that is *not* a command, a sentence containing the word, both guidance replies, the toggle off, the
+default-on rule, the group-photo exclusion, the twice-seen debounce, and both failure paths.
 
 ### P7 — Settings, sites, bypass, referrals
 - [ ] `/setting` inline menu: cookie Set / View(masked) / Delete(confirm); TimerMedia toggle; magic word (FR-14)
@@ -870,6 +885,8 @@ rather than the order the plan lists:
 | 3i — native adapters | ✅ committed; 25 wired through `registry._NATIVE_TABLE` — all of V5's modules except `cyberdrop` (D47) and `bluesky` (D49), plus TeraBox, which V5 does not have. Each is a `Resolver` in `ChainContext.natives` with payload tests; the live matrix in §5 records which of them have been *seen* resolving and which are still owed a real link |
 | 5a — the session pool, `/login`, `/logout`, `/account`, `/start` reconnect (D50) | ✅ committed; `telegram/sessions.py` + `telegram/login.py` + `handlers/account.py`/`login.py`, with the identity profile (D16), the cap/LRU and the idle reaping the scheduler now runs every pass |
 | 5b — `/dt` and the Telegram job (D51–D53) | ✅ committed; `telegram/links.py`, `telegram/media.py`, `handlers/telegram_dl.py`, the branch in `app/jobs.py`, and AC-7 verified end to end against a real database and a recording client |
+| 6a — the magic word (FR-5, AC-8) | ✅ committed; `telegram/magic.py`, attached to the user's client by the pool, with every outcome said in Saved Messages |
+| 6b — TimerMedia (FR-6, AC-9) | ✅ committed; `telegram/timer.py` plus `app/prefs.py` (unset ≠ off, and reading fails open), with the `media_unread` gap recorded as D55 |
 
 **The runtime is now wired, which retires the deferral this section used to carry.** `app/runtime.py`
 starts the client, installs the session pool, starts the worker pool and the scheduler, and sweeps
