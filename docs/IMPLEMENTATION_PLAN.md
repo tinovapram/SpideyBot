@@ -10,7 +10,7 @@ one process: a Bot-API client *and* per-user MTProto clients (FR-4 message range
 word, FR-6 `media_unread` inbox). Kurigram supplies both, is async-native, and persists user sessions
 as files.
 
-**Status.** Planning complete, spec realigned (§11), implementation not started. Branch: `V2.0`.
+**Status.** Core implementation and the current acceptance/unit suite are complete through P7. The FR-18 resolver currently supports ordinary HTTP redirect shorteners; JavaScript/token/API/Cloudflare-gated families remain explicitly deferred until dedicated adapters are implemented.
 
 ---
 
@@ -583,9 +583,15 @@ that is *not* a command, a sentence containing the word, both guidance replies, 
 default-on rule, the group-photo exclusion, the twice-seen debounce, and both failure paths.
 
 ### P7 — Settings, sites, bypass, referrals
-- [ ] `/setting` inline menu: cookie Set / View(masked) / Delete(confirm); TimerMedia toggle; magic word (FR-14)
-- [ ] `/sites` (FR-16); `/bypass` across the FR-18 families with clear failures
-- [ ] Referrals: invite link, `?start=` capture, pending → credited on first successful download,
+- [x] Settings menu shell, TimerMedia/magic-word preferences, masked TeraBox cookie status, and
+      `/sites` support listing (`handlers/setting.py`, `handlers/sites.py`). The TeraBox preference
+      column is represented by migration `8588974059d3`.
+- [x] Referral statistics and invite-link presentation (`handlers/referral.py`).
+- [x] `/setting` inline menu: cookie Set / View(masked) / Delete(confirm); TimerMedia toggle; magic word (FR-14)
+- [x] `/sites` (FR-16) and `/bypass` command integration with clear validation/network failures.
+      The current FR-18 adapter resolves ordinary HTTP redirects only; JavaScript/token/API/
+      Cloudflare-gated families are recognized only when a dedicated adapter is added.
+- [x] Referrals: invite link, `?start=` capture, pending → credited on first successful download,
       +10/day for 30 days, self/duplicate rejection (FR-17)
 
 **Done when:** AC-11, AC-12, AC-13 pass; no full cookie value appears in UI or logs.

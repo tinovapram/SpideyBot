@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 from pyrogram import enums
-from pyrogram.handlers import MessageHandler
+from pyrogram.handlers import CallbackQueryHandler, MessageHandler
 
 from app import paths
 from app.config import build_settings
@@ -121,4 +121,4 @@ async def test_every_command_module_registers_as_a_message_handler(
         "cancel_command",
         "status_command",
     } <= registered
-    assert all(isinstance(handler, MessageHandler) for handler in handlers)
+    assert all(isinstance(handler, (MessageHandler, CallbackQueryHandler)) for handler in handlers)

@@ -67,6 +67,21 @@ async def set_timer_media(db: AsyncSession, user_id: int, enabled: bool) -> None
     await _upsert(db, user_id, timer_media=enabled)
 
 
+async def terabox_cookie(db: AsyncSession, user_id: int) -> str | None:
+    """The ``ndus`` cookie, unmasked for use in a request."""
+    try:
+        pref = await db.get(UserPref, user_id)
+    except Exception as failed:
+        log.warning("could not read TeraBox cookie for %s: %s", user_id, failed)
+        return None
+    return pref.terabox_ndus if pref and pref.terabox_ndus else None
+
+
+async def set_terabox_cookie(db: AsyncSession, user_id: int, cookie: str | None) -> None:
+    """Store the ``ndus`` cookie."""
+    await _upsert(db, user_id, terabox_ndus=cookie)
+
+
 async def _upsert(db: AsyncSession, user_id: int, **values: object) -> None:
     """Write one preference, creating the row if this user has none yet.
 

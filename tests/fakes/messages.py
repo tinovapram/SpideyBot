@@ -48,6 +48,42 @@ class SentReply:
         self.text = text
 
 
+class EditableMessage:
+    """A message that can be edited, for testing callback handlers."""
+
+    def __init__(self, chat_id: int, message_id: int, text: str) -> None:
+        self.chat = FakeChat(chat_id)
+        self.id = message_id
+        self.text = text
+        self.edits: list[str] = []
+        self.edit_markups: list[Any] = []
+
+    async def edit_text(self, text: str, reply_markup: Any = None, **_kwargs: Any) -> None:
+        self.edits.append(text)
+        self.edit_markups.append(reply_markup)
+        self.text = text
+
+
+class FakeCallbackQuery:
+    """A callback query from an inline button, for testing callback handlers."""
+
+    def __init__(
+        self,
+        user: FakeUser,
+        data: str,
+        message: EditableMessage | None = None,
+    ) -> None:
+        self.from_user = user
+        self.data = data
+        self.message = message or EditableMessage(user.id, 100, "Original text")
+        self.answers: list[str] = []
+        self.answer_alerts: list[bool] = []
+
+    async def answer(self, text: str = "", show_alert: bool = False, **_kwargs: Any) -> None:
+        self.answers.append(text)
+        self.answer_alerts.append(show_alert)
+
+
 class FakeMessage:
     """Captures what a handler sent, so a test can assert on it."""
 

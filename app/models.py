@@ -236,6 +236,7 @@ class UserPref(Base):
     )
     magic_word: Mapped[str | None] = mapped_column(String(64))
     timer_media: Mapped[bool | None] = mapped_column(Boolean)
+    terabox_ndus: Mapped[str | None] = mapped_column(String(256))
     locale: Mapped[str | None] = mapped_column(String(8))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow, server_default=func.now()
