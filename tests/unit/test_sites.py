@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,7 @@ from downloader.sites import (
     snapchat,
     soundcloud,
     spotify,
+    terabox,
     threads,
     tiktok,
     tumblr,
@@ -1014,6 +1016,388 @@ def restore_stubs() -> Any:
     while _STUBBED:
         module, original = _STUBBED.pop()
         module.resolve_ytdlp = original
+
+
+# ── TeraBox: what V4's parse_surl accepted ───────────────────────────────────
+#
+# Ported from V4, and worth its own tests because the forms are not guessable: the site hands out
+# several, a user can paste the bare id, and a leading `1` has to come off before the API is asked.
+
+SURL = "Roh2t3fSKC3Ga-tHyVclqQ"
+#: The link this adapter was reported failing on: `1024tera.com`, which the host list did not claim.
+SHARE_URL = f"https://www.1024tera.com/sharing/link?surl={SURL}"
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        (f"https://www.1024tera.com/sharing/link?surl={SURL}", SURL),
+        (f"https://www.terabox.com/s/{SURL}", SURL),
+        # The `shorturlinfo` endpoint carries the id as the first query token, not as `surl=…`.
+        (f"https://www.terabox.com/api/shorturlinfo?{SURL}", SURL),
+        (f"https://www.1024tera.com/sharing/link?surl={SURL}&x=1", SURL),
+        (f"surl={SURL}", SURL),
+        (SURL, SURL),
+    ],
+)
+def test_terabox_reads_every_share_id_form_v4_accepted(url: str, expected: str) -> None:
+    assert terabox._parse_surl(url) == expected
+
+
+@pytest.mark.parametrize("url", ["https://example.test/whatever", "", "   ", "https://x.test/s/"])
+def test_terabox_rejects_a_link_with_no_share_id(url: str) -> None:
+    with pytest.raises(ResolveError):
+        terabox._parse_surl(url)
+
+
+def test_terabox_strips_a_leading_one_from_a_long_id() -> None:
+    """The site adds a `1` to longer ids and the API wants it removed — V4's rule, kept."""
+    long_id = "1" + "a" * 21 + "b" * 12
+
+    assert terabox._parse_surl(f"https://www.terabox.com/s/{long_id}") == long_id[1:]
+
+
+def test_terabox_offers_the_prefixed_id_as_a_second_candidate() -> None:
+    """Some shares answer to the `1`-prefixed id and some do not, so the root tries both."""
+    assert terabox._surl_candidates(SURL) == (SURL, "1" + SURL)
+    assert terabox._surl_candidates("1" + SURL) == ("1" + SURL,)
+
+
+async def test_terabox_falls_back_to_the_prefixed_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """If the bare id is refused, the `1`-prefixed one is tried — and the walk then uses whichever
+    answered, which is what V4 did."""
+    session = FakeSession(
+        FakeResponse(text=SHARE_PAGE),
+        FakeResponse(payload={"errno": 2}),  # the bare id
+        listing(share_file("clip.mp4", 1024, dlink=MP4)),  # the prefixed one
+    )
+
+    resolution = await terabox.attempt(SHARE_URL, client=session)
+
+    assert_media(only(resolution), filename="clip.mp4", url=MP4, kind="video")
+    assert session.calls[2][2]["params"]["shorturl"] == "1" + SURL
+
+
+# ── TeraBox: the API, not the page ───────────────────────────────────────────
+#
+# The adapter used to grep the share page for `fn%22%3A%22`/`dp%22%3A%22`; the page carries none of
+# those markers (measured: 0 hits each), so every share reported "No files found". What the page
+# does carry is a URL-encoded `jsToken`, and that is what unlocks the listing API.
+
+TOKEN = "8EF85399A012D62D4B76E6C4" + "B" * 40
+SHARE_PAGE = f"<script>var t=fn%28%22{TOKEN}%22%29</script>"
+BDSTOKEN = "a" * 32
+
+
+def listing(*items: dict[str, Any]) -> FakeResponse:
+    return FakeResponse(payload={"errno": 0, "share_id": "123456789", "uk": "1234567890",
+                                 "list": list(items)})
+
+
+def share_file(name: str, size: int, *, dlink: str | None = None) -> dict[str, Any]:
+    item: dict[str, Any] = {
+        "server_filename": name, "size": str(size), "fs_id": "111", "isdir": "0", "path": f"/{name}"
+    }
+    if dlink:
+        item["dlink"] = dlink
+    return item
+
+
+def share_dir(path: str, *, isdir: Any = "1") -> dict[str, Any]:
+    return {"server_filename": path.rsplit("/", 1)[-1], "isdir": isdir, "path": path, "fs_id": "9"}
+
+
+def account_listing(*items: dict[str, Any]) -> FakeResponse:
+    """`/api/list` on the landing folder: what is in the *account*, not what is in the share.
+
+    Distinct from `listing()` because a share answer carries `share_id`/`uk` and this one carries
+    the account's own `fs_id`s — which is the id a download link has to be asked for.
+    """
+    return FakeResponse(payload={"errno": 0, "list": list(items)})
+
+
+def account_file(name: str, fs_id: str, *, mtime: float | None = None) -> dict[str, Any]:
+    entry: dict[str, Any] = {"server_filename": name, "fs_id": fs_id, "isdir": 0, "size": "1024"}
+    if mtime is not None:
+        entry["server_mtime"] = mtime
+    return entry
+
+
+def test_terabox_claims_the_1024tera_mirror() -> None:
+    """`1024terabox.com` was in the host list and `1024tera.com` was not — the reported share fell
+    through to gallery-dl, which cannot fetch TeraBox at all."""
+    assert terabox.matches(SHARE_URL)
+    assert terabox.matches("https://terabox.com/s/abc")
+    assert terabox.matches("https://m.terabox.app/s/abc")
+    assert not terabox.matches("https://terabox.com.evil.test/s/abc")
+
+
+async def test_terabox_reads_the_token_and_names_the_files() -> None:
+    resolution = await resolve(
+        terabox,
+        SHARE_URL,
+        FakeResponse(text=SHARE_PAGE),
+        listing(share_file("clip.mp4", 1024, dlink=MP4)),
+    )
+
+    assert resolution.engine == "terabox"
+    assert_media(only(resolution), filename="clip.mp4", url=MP4, kind="video")
+
+
+async def test_terabox_descends_into_nested_folders() -> None:
+    """A share root is a folder and folders nest (`…/One/PICT/`), so a fixed depth loses files.
+
+    The middle listing states `isdir` as an int, because TeraBox sends both and a comparison against
+    one spelling silently reads a folder as a file.
+    """
+    resolution = await resolve(
+        terabox,
+        SHARE_URL,
+        FakeResponse(text=SHARE_PAGE),
+        listing(share_dir("/One")),
+        listing(share_dir("/One/PICT", isdir=1)),
+        listing(share_file("photo.jpg", 2048, dlink=JPG)),
+    )
+
+    assert_media(only(resolution), filename="photo.jpg", url=JPG, kind="photo")
+
+
+async def test_terabox_sends_the_token_and_no_cookies_to_the_listing() -> None:
+    """A session cookie on the listing turns `errno 0` into `errno 4000020`, so the page and the
+    listing are fetched anonymously on purpose."""
+    session = FakeSession(FakeResponse(text=SHARE_PAGE), listing(share_file("c.mp4", 1, dlink=MP4)))
+    await terabox.attempt(SHARE_URL, cookies="ndus=abc123", client=session)
+
+    page = session.calls[0][2]
+    api = session.calls[1][2]
+    assert "Cookie" not in page["headers"]
+    assert "Cookie" not in api["headers"]
+    assert api["params"]["jsToken"] == TOKEN
+    assert api["params"]["root"] == "1"
+
+
+async def test_terabox_attaches_the_headers_a_dlink_needs() -> None:
+    """A TeraBox link is issued to a session: without the cookie and a matching `Referer` the
+    fetcher would 403 on a link the resolver had already obtained."""
+    session = FakeSession(
+        FakeResponse(text=SHARE_PAGE),
+        listing(share_file("clip.mp4", 1024, dlink=MP4)),
+    )
+
+    resolution = await terabox.attempt(SHARE_URL, cookies="ndus=abc123", client=session)
+
+    headers = only(resolution).primary.headers
+    assert headers["Cookie"] == "ndus=abc123"
+    assert headers["Referer"].startswith("https://dm.terabox.app/")
+
+
+async def test_terabox_without_a_cookie_asks_for_one() -> None:
+    message = await expect_error(
+        terabox, SHARE_URL, FakeResponse(text=SHARE_PAGE), listing(share_file("clip.mp4", 1024))
+    )
+
+    assert "/setting" in message
+    assert "No files found" not in message
+
+
+async def test_terabox_reports_teraboxs_verification_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The share lists perfectly; it is TeraBox that refuses the link. Saying "no files found" sends
+    the user hunting for a problem with the share that does not exist.
+
+    ``/share/transfer`` answers 400810 and ``/share/download`` 400310 — the same gate on both routes
+    that issue a link, which is why porting V4's account-transfer method does not get around it: the
+    method now runs, and TeraBox refuses the copy.
+    """
+    session = FakeSession(
+        FakeResponse(text=SHARE_PAGE),
+        listing(share_file("clip.mp4", 1024)),
+        FakeResponse(text=f'{{"bdstoken":"{BDSTOKEN}"}}'),
+        FakeResponse(payload={"errno": 0}),
+        account_listing(),
+        FakeResponse(payload={"errno": 400810, "errmsg": "need verify_v2"}),
+    )
+    monkeypatch.setattr(terabox.bridge, "session_for", lambda *a, **k: session)
+
+    with pytest.raises(ResolveError) as caught:
+        await terabox.attempt(SHARE_URL, cookies="ndus=abc123", client=session)
+
+    message = str(caught.value)
+    assert "verify_v2" in message
+    assert "No files found" not in message
+
+
+async def test_terabox_copies_a_file_into_the_account_and_links_to_the_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Method B, ported from V4: no current share listing carries a `dlink`, so the file is copied
+    into the account and the link is asked for *the copy* — whose id the transfer answer gives."""
+    session = FakeSession(
+        FakeResponse(text=SHARE_PAGE),
+        listing(share_file("clip.mp4", 1024)),
+        FakeResponse(text=f'{{"bdstoken":"{BDSTOKEN}"}}'),
+        FakeResponse(payload={"errno": 0}),  # /api/create
+        account_listing(),
+        FakeResponse(payload={"errno": 0, "extra": {"list": [{"to_fs_id": 222}]}}),
+        FakeResponse(payload={"errno": 0, "list": [{"dlink": MP4}]}),
+    )
+    monkeypatch.setattr(terabox.bridge, "session_for", lambda *a, **k: session)
+
+    resolution = await terabox.attempt(SHARE_URL, cookies="ndus=abc123", client=session)
+
+    assert_media(only(resolution), filename="clip.mp4", url=MP4, kind="video")
+    assert only(resolution).primary.headers["Cookie"] == "ndus=abc123"
+    transfer = next(call for call in session.calls if call[1].endswith("/share/transfer"))
+    assert transfer[2]["data"] == {"fsidlist": "[111]", "path": "/downloads"}
+    assert transfer[2]["params"]["shareid"] == "123456789"
+    filemetas = next(call for call in session.calls if "/api/filemetas" in call[1])
+    assert json.loads(filemetas[2]["params"]["fsids"]) == ["222"], "asked for the copy"
+
+
+async def test_terabox_reuses_a_copy_the_account_already_has(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Copying a second time is neither always allowed nor ever needed, so a name already in the
+    landing folder is used as it is — V4's `_get_existing_files()` check, kept."""
+    session = FakeSession(
+        FakeResponse(text=SHARE_PAGE),
+        listing(share_file("clip.mp4", 1024)),
+        FakeResponse(text=f'{{"bdstoken":"{BDSTOKEN}"}}'),
+        FakeResponse(payload={"errno": 0}),
+        account_listing(account_file("clip.mp4", "333")),
+        FakeResponse(payload={"errno": 0, "list": [{"dlink": MP4}]}),
+    )
+    monkeypatch.setattr(terabox.bridge, "session_for", lambda *a, **k: session)
+
+    resolution = await terabox.attempt(SHARE_URL, cookies="ndus=abc123", client=session)
+
+    assert_media(only(resolution), filename="clip.mp4", url=MP4, kind="video")
+    assert not [call for call in session.calls if call[1].endswith("/share/transfer")]
+    filemetas = next(call for call in session.calls if "/api/filemetas" in call[1])
+    assert json.loads(filemetas[2]["params"]["fsids"]) == ["333"]
+
+
+async def test_terabox_treats_a_refused_copy_as_already_there(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`errno` 12 and -33 mean "it is already in your account", which V4 took as success.
+
+    The id then stays the share's own, because V4 did not re-list to find the copy it had just been
+    told about. Kept as it was: the outcome is the same when the name was in the listing, and the
+    transfer response's `to_fs_id` is preferred whenever TeraBox supplies it.
+    """
+    session = FakeSession(
+        FakeResponse(text=SHARE_PAGE),
+        listing(share_file("clip.mp4", 1024)),
+        FakeResponse(text=f'{{"bdstoken":"{BDSTOKEN}"}}'),
+        FakeResponse(payload={"errno": 0}),
+        account_listing(),
+        FakeResponse(payload={"errno": 12, "errmsg": "file already exists"}),
+        FakeResponse(payload={"errno": 0, "list": [{"dlink": MP4}]}),
+    )
+    monkeypatch.setattr(terabox.bridge, "session_for", lambda *a, **k: session)
+
+    resolution = await terabox.attempt(SHARE_URL, cookies="ndus=abc123", client=session)
+
+    assert_media(only(resolution), filename="clip.mp4", url=MP4, kind="video")
+    filemetas = next(call for call in session.calls if "/api/filemetas" in call[1])
+    assert json.loads(filemetas[2]["params"]["fsids"]) == ["111"]
+
+
+async def test_terabox_falls_back_to_the_streaming_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A file with no plain link still has a transcoded manifest — V4's `stream` mode.
+
+    It is handed over as an `hls` transfer so the fetcher runs ffmpeg on it rather than saving a
+    playlist to the user's chat.
+    """
+    manifest = "https://dm.terabox.app/api/streaming?path=%2Fdownloads%2Fclip.mp4"
+    session = FakeSession(
+        FakeResponse(text=SHARE_PAGE),
+        listing(share_file("clip.mp4", 1024)),
+        FakeResponse(text=f'{{"bdstoken":"{BDSTOKEN}"}}'),
+        FakeResponse(payload={"errno": 0}),
+        account_listing(),
+        FakeResponse(payload={"errno": 0, "extra": {"list": [{"to_fs_id": 222}]}}),
+        FakeResponse(payload={"errno": 0, "list": []}),
+        FakeResponse(text="#EXTM3U\n#EXT-X-VERSION:3\n", url=manifest),
+    )
+    monkeypatch.setattr(terabox.bridge, "session_for", lambda *a, **k: session)
+
+    resolution = await terabox.attempt(SHARE_URL, cookies="ndus=abc123", client=session)
+
+    assert_media(only(resolution), filename="clip.mp4", url=manifest, kind="video", role="hls")
+
+
+async def test_terabox_clears_out_copies_the_account_has_finished_with(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every copy Method B makes stays in the account until something removes it. V4 never did, so
+    the account filled with every file it had ever served; here the next visit clears what is old.
+    """
+    session = FakeSession(
+        FakeResponse(text=SHARE_PAGE),
+        listing(share_file("clip.mp4", 1024)),
+        FakeResponse(text=f'{{"bdstoken":"{BDSTOKEN}"}}'),
+        FakeResponse(payload={"errno": 0}),
+        account_listing(
+            account_file("old.mp4", "777", mtime=1_000_000_000),
+            account_file("recent.mp4", "888", mtime=time.time()),
+        ),
+        FakeResponse(payload={"errno": 0}),  # /api/filemanager?opera=delete
+        FakeResponse(payload={"errno": 0, "extra": {"list": [{"to_fs_id": 222}]}}),
+        FakeResponse(payload={"errno": 0, "list": [{"dlink": MP4}]}),
+    )
+    monkeypatch.setattr(terabox.bridge, "session_for", lambda *a, **k: session)
+
+    resolution = await terabox.attempt(SHARE_URL, cookies="ndus=abc123", client=session)
+
+    assert_media(only(resolution), filename="clip.mp4", url=MP4, kind="video")
+    deletes = [call for call in session.calls if call[1].endswith("/api/filemanager")]
+    assert len(deletes) == 1, "only the stale copy was removed"
+    assert deletes[0][2]["params"]["opera"] == "delete"
+    assert deletes[0][2]["data"]["filelist"] == '["777"]'
+
+
+async def test_terabox_keeps_a_copy_it_is_about_to_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The grace period is the point: a copy can be old and still be in use — by a job whose
+    download is running, or by this one reusing it — so age alone must not decide what goes."""
+    session = FakeSession(
+        FakeResponse(text=SHARE_PAGE),
+        listing(share_file("clip.mp4", 1024)),
+        FakeResponse(text=f'{{"bdstoken":"{BDSTOKEN}"}}'),
+        FakeResponse(payload={"errno": 0}),
+        account_listing(account_file("clip.mp4", "333", mtime=1_000_000_000)),
+        FakeResponse(payload={"errno": 0, "list": [{"dlink": MP4}]}),
+    )
+    monkeypatch.setattr(terabox.bridge, "session_for", lambda *a, **k: session)
+
+    resolution = await terabox.attempt(SHARE_URL, cookies="ndus=abc123", client=session)
+
+    assert_media(only(resolution), filename="clip.mp4", url=MP4, kind="video")
+    assert not [call for call in session.calls if call[1].endswith("/api/filemanager")]
+    filemetas = next(call for call in session.calls if "/api/filemetas" in call[1])
+    assert json.loads(filemetas[2]["params"]["fsids"]) == ["333"]
+
+
+async def test_terabox_reports_an_expired_cookie_separately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No account token means the credential is dead, which is a different instruction than the
+    verification gate — and a different one again from having no cookie at all."""
+    session = FakeSession(
+        FakeResponse(text=SHARE_PAGE),
+        listing(share_file("clip.mp4", 1024)),
+        FakeResponse(text="<html>no tokens here</html>"),
+    )
+    monkeypatch.setattr(terabox.bridge, "session_for", lambda *a, **k: session)
+
+    with pytest.raises(ResolveError) as caught:
+        await terabox.attempt(SHARE_URL, cookies="ndus=abc123", client=session)
+
+    assert "expired" in str(caught.value)
 
 
 def test_the_payloads_in_this_file_are_the_shapes_the_adapters_parse() -> None:

@@ -191,7 +191,7 @@ def _argument(name: str, context: ChainContext, scope: str) -> Any:
 #: they are tried in, and the scope is how an adapter's slice of configuration is addressed.
 _NATIVE_TABLE: tuple[tuple[Any, tuple[str, ...], str], ...] = (
     (youtube, ("preference", "timeout", "cookies_file"), "youtube"),
-    (terabox, ("cookies_file", "timeout"), "terabox"),
+    (terabox, ("cookies_file", "options", "timeout"), "terabox"),
     (doodstream, ("cookies_file", "timeout"), "doodstream"),
     (streamtape, ("cookies_file", "timeout"), "streamtape"),
     (mixdrop, ("cookies_file", "timeout"), "mixdrop"),

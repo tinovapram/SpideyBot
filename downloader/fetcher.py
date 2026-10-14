@@ -26,7 +26,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -162,14 +162,20 @@ class FetchedFile:
     caption: str | None = None
 
 
-def headers_for(url: str) -> dict[str, str]:
-    """Browser defaults plus anything this host requires."""
+def headers_for(url: str, extra: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Browser defaults, then anything this host requires, then the resolver's own headers.
+
+    The resolver goes last because it knows something this module cannot: what the host demanded
+    *while resolving* — a cookie, or a `Referer` that must match the page the link came from.
+    """
     host = (urlparse(url).hostname or "").lower()
     headers = dict(BROWSER_HEADERS)
-    for marker, extra in HOST_HEADERS.items():
+    for marker, required in HOST_HEADERS.items():
         if host == marker or host.endswith("." + marker):
-            headers.update(extra)
+            headers.update(required)
             break
+    if extra:
+        headers.update(extra)
     return headers
 
 
@@ -375,7 +381,7 @@ async def _download_one(
     try:
         response = await client.get(
             transfer.url,
-            headers=headers_for(transfer.url),
+            headers=headers_for(transfer.url, transfer.headers),
             timeout=timeout,
             stream=True,
             impersonate=impersonate,
@@ -519,7 +525,7 @@ async def _download_hls(
     if ffmpeg is None:
         raise FetchError("ffmpeg is required to download an HLS stream, and was not found")
 
-    headers = headers_for(transfer.url)
+    headers = headers_for(transfer.url, transfer.headers)
 
     # The output container is stated rather than inferred, because the destination may be a part
     # file (`reddit.mp4.part0`) whose suffix ffmpeg cannot map to a muxer — it answers

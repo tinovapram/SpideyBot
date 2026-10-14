@@ -303,9 +303,10 @@ class DeadTransport:
 
 
 # Adapters that refuse before touching any transport, and why. Listed rather than inferred, because
-# the reason is per site: TeraBox reads the cookie *values* (`ndus`/`ndut`) and gives up when they
-# are absent, so with no cookie file there is nothing for a transport to do.
-_REFUSES_BEFORE_ANY_REQUEST = {"terabox": "needs a logged-in cookie file (ndus/ndut)"}
+# the reason is per site. TeraBox reads the share id out of the URL first, so a link with no share
+# id is rejected without a request — a real share link does use the session, which the terabox tests
+# below assert directly.
+_REFUSES_BEFORE_ANY_REQUEST = {"terabox": "has no share id to resolve"}
 
 
 @pytest.mark.parametrize(

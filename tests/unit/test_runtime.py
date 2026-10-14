@@ -295,7 +295,7 @@ class MissingCapability(FakeCapability):
 
 
 async def test_a_missing_capability_is_reported_rather_than_fatal(
-    wired, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    wired, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Reporting a missing capability must not take startup down with it.
 
@@ -304,6 +304,11 @@ async def test_a_missing_capability_is_reported_rather_than_fatal(
     ``LogRecord`` attribute: passing it through ``extra`` made stdlib logging raise
     ``KeyError: "Attempt to overwrite 'name' in LogRecord"``, so a Linux host without the
     optional fast event loop failed to start instead of logging a warning about it.
+
+    Records are collected through a handler this test owns rather than through ``caplog``: the
+    logging setup here replaces ``root.handlers`` wholesale, so a handler installed by a fixture
+    can be gone by the time this runs — and the point is still to go through stdlib logging, which
+    is where the original ``KeyError`` came from.
     """
     monkeypatch.setattr(
         capabilities,
@@ -313,13 +318,28 @@ async def test_a_missing_capability_is_reported_rather_than_fatal(
             MissingCapability("uvloop", required=False),
         ],
     )
-    caplog.set_level(logging.INFO)
 
-    await runtime.serve(wired)
+    records: list[logging.LogRecord] = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    root = logging.getLogger()
+    collector = _Collect()
+    previous_level = root.level
+    root.addHandler(collector)
+    root.setLevel(logging.INFO)
+    try:
+        await runtime.serve(wired)
+    finally:
+        root.removeHandler(collector)
+        root.setLevel(previous_level)
 
     # The name has to reach the text, not just the record: the stdlib handler formats
     # %(message)s only, so a warning without it says nothing about what is missing.
-    assert "required capability missing: ffmpeg" in caplog.text
-    assert "optional capability absent: uvloop" in caplog.text
-    reported = {record.capability for record in caplog.records if hasattr(record, "capability")}
+    text = "\n".join(record.getMessage() for record in records)
+    assert "required capability missing: ffmpeg" in text
+    assert "optional capability absent: uvloop" in text
+    reported = {getattr(record, "capability", None) for record in records} - {None}
     assert reported == {"ffmpeg", "uvloop"}

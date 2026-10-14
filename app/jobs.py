@@ -36,7 +36,7 @@ from typing import Any
 from pyrogram import Client
 from sqlalchemy import select
 
-from app import catalog, paths, quota, tiers, workers
+from app import catalog, paths, prefs, quota, tiers, workers
 from app import db as db_module
 from app.config import Settings
 from app.models import Job, JobItem
@@ -74,7 +74,7 @@ def build_handler(
         context = registry.ChainContext(
             preference=settings.download.video_preference,
             cookies_file=_cookies(user_id),
-            options=_adapter_options(settings),
+            options=await _adapter_options(settings, user_id=user_id),
         )
         already = await _ledger(job.id)
 
@@ -313,7 +313,7 @@ def _cookies(user_id: int) -> Path | None:
     return path if path.is_file() else None
 
 
-def _adapter_options(settings: Settings) -> dict[str, Any]:
+async def _adapter_options(settings: Settings, *, user_id: int | None = None) -> dict[str, Any]:
     """Configuration an adapter or an engine needs, as plain values.
 
     Two scopes, both keyed by the name the strategy is known by: an adapter reads its own name
@@ -325,6 +325,9 @@ def _adapter_options(settings: Settings) -> dict[str, Any]:
     ``gallery-dl``'s slice is already in *its* vocabulary (``extractor.reddit.client-id``) rather
     than in ours, because that string is a key in someone else's configuration file and translating
     it twice would only add a place to get it wrong.
+
+    ``user_id`` is what makes the TeraBox slice per-user; every other scope is operator-level, so
+    the parameter is optional and its absence simply omits that slice.
     """
     options: dict[str, Any] = {}
 
@@ -350,7 +353,27 @@ def _adapter_options(settings: Settings) -> dict[str, Any]:
     if extractor:
         options["gallery-dl"] = extractor
 
+    if user_id is not None:
+        terabox_cookie = await _terabox_cookie(settings, user_id)
+        if terabox_cookie:
+            options["terabox"] = {"cookies": terabox_cookie}
+
     return options
+
+
+async def _terabox_cookie(settings: Settings, user_id: int) -> str | None:
+    """The TeraBox cookie for this job: the user's own if they set one, else the operator's first.
+
+    The user's own comes first because whichever account the cookie belongs to is the one TeraBox
+    copies files into — a per-user credential keeps one user's downloads out of everyone else's
+    storage, and the operator's `|`-separated list is the fallback for users who never set one.
+    """
+    async with db_module.session() as session:
+        own = await prefs.terabox_cookie(session, user_id)
+    if own:
+        return own
+    accounts = settings.terabox_cookie_accounts()
+    return accounts[0] if accounts else None
 
 
 async def _note_phase(job_id: int, phase: str) -> None:

@@ -15,8 +15,8 @@ from __future__ import annotations
 
 import itertools
 import re
-from collections.abc import Collection
-from dataclasses import dataclass
+from collections.abc import Collection, Mapping
+from dataclasses import dataclass, field
 from typing import Literal
 
 MediaKind = Literal["photo", "video", "audio", "document"]
@@ -116,6 +116,11 @@ class Transfer:
     url: str
     role: TransferRole = "file"
     filesize: int | None = None
+    #: Headers this transfer needs beyond the fetcher's browser defaults and its per-host map — a
+    #: cookie, or a `Referer` that has to match the page the link came from. Only the resolver knows
+    #: what the host demanded *during resolution*, so it is the only party that can supply this.
+    #: Excluded from equality because a mapping is unhashable and a `Transfer` is compared in tests.
+    headers: Mapping[str, str] | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
