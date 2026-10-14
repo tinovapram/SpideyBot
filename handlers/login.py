@@ -17,12 +17,11 @@ Two filter details carry weight:
 
 from __future__ import annotations
 
-from typing import Any
-
 from pyrogram import Client, filters
 from pyrogram.types import Message
 
 from app import config
+from handlers.filterkit import message_filter
 from telegram import login as login_module
 from telegram.sessions import get_pool
 
@@ -52,26 +51,24 @@ def _is_login_step(*, user_id: int | None, text: str | None) -> bool:
     return get_flow().is_awaiting_input(user_id)
 
 
-def _step_filter() -> Any:
-    """A filter over the sender and the text, which is all a conversation step depends on.
+def _step_filter() -> filters.Filter:
+    """Whether this message is an answer to a question the login flow asked.
 
-    The callback takes ``*args`` on purpose. Kurigram has called custom filters both as
-    ``filter(client, update)`` and as ``filter(filter, client, update)`` across versions — the
-    installed one uses the first, while its own docstring still documents the second — and the
-    update is the *last* positional argument either way. Accepting both means a library bump cannot
-    silently turn this filter into a constant ``True``, which is the failure that would matter here:
-    every plain message would be swallowed by a conversation the sender is not in.
+    Built through :func:`handlers.filterkit.message_filter`, which deals with how the installed
+    Kurigram hands a custom filter its arguments — a filter is called as a bound method, so its
+    predicate receives the filter, the client *and* the update. What matters here is only that a
+    plain message from somebody not in a conversation reaches whatever else handles it, rather than
+    being eaten by a login they are not in.
     """
 
-    def check(*args: Any) -> bool:
-        message = args[-1]
-        sender = getattr(message, "from_user", None)
+    async def check(message: Message) -> bool:
+        sender = message.from_user
         return _is_login_step(
             user_id=sender.id if sender else None,
-            text=getattr(message, "text", None),
+            text=message.text,
         )
 
-    return filters.create(check, "LoginStep")
+    return message_filter(check, "LoginStep")
 
 
 @Client.on_message(filters.command("login") & filters.private)

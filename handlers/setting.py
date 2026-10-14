@@ -18,6 +18,7 @@ from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMa
 
 from app import config, prefs
 from app.db import session as db_session
+from handlers.filterkit import message_filter
 
 log = logging.getLogger(__name__)
 
@@ -197,10 +198,17 @@ async def back_main_callback(client: Client, query: CallbackQuery) -> None:
 
 
 def _awaiting_input_filter() -> filters.Filter:
-    """Only messages from users awaiting text input."""
-    async def func(_: Client, message: Message) -> bool:
+    """Only messages from users awaiting text input.
+
+    Built through :func:`handlers.filterkit.message_filter` because the library's calling convention
+    for a custom filter is not obvious and getting it wrong is not a small mistake: the predicate
+    would raise for every private message, leaving the conversation below unreachable.
+    """
+
+    async def awaiting(message: Message) -> bool:
         return message.from_user is not None and message.from_user.id in _AWAITING
-    return filters.create(func)
+
+    return message_filter(awaiting, "AwaitedInput")
 
 
 @Client.on_message(filters.private & filters.text & _awaiting_input_filter())
