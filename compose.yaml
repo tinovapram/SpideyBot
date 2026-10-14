@@ -1,0 +1,49 @@
+# One service, deliberately: the project's bundled PostgreSQL (D3) means there is no database
+# container to orchestrate. The cluster, the password it generated for itself, the plaintext
+# Telegram sessions and the staged downloads all live in /data — inside this container, exactly
+# where a local checkout keeps them under data/ — so the compose file describes one process and
+# one volume rather than a topology.
+#
+# First run, once. `db start` has to share a container with `db migrate`, because the bundled
+# cluster is a child process of whichever container started it: an ephemeral `run` container
+# exits, and with it the server, so migrating from a *second* `run` would find nothing listening.
+# The data itself is in the volume, so the real service simply starts the cluster again.
+#     docker compose build
+#     docker compose run --rm spideybot sh -c "python main.py db init && python main.py db start && python main.py db migrate"
+#     docker compose up -d
+#
+# `db init` is the only step that must happen before the bot starts; after that `up -d` is
+# enough, because `main.py run` starts the cluster itself and refuses to start with a message
+# naming the command to run if the cluster is missing or the schema is behind.
+
+services:
+  spideybot:
+    build: .
+    image: spideybot:latest
+    # Credentials come from .env on the host. `.dockerignore` keeps that file out of the image,
+    # so this is configuration mounted in rather than secrets baked into a layer.
+    # `required: false` so `docker compose build` still works on a fresh clone that has not
+    # copied .env.example to .env yet — the credentials are needed to *run*, not to build.
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      # Everything that must survive `docker compose build`: the cluster, the generated
+      # database password, the Telegram session files and the download staging area.
+      - spideybot-data:/data
+    restart: unless-stopped
+    # The default 10s would SIGKILL mid-download. Shutdown stops the workers, then the
+    # scheduler, then closes sessions; a client closed while a job still held it surfaces as a
+    # download that failed for no visible reason.
+    stop_grace_period: 60s
+    healthcheck:
+      # The image already declares this probe; it is repeated here so the interval is visible
+      # and tunable without rebuilding. Keep the two in step.
+      test: ["CMD", "python", "main.py", "check"]
+      interval: 5m
+      timeout: 30s
+      start_period: 15s
+      retries: 3
+
+volumes:
+  spideybot-data:
