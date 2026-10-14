@@ -21,7 +21,12 @@ from app.models import Base
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # `disable_existing_loggers=False` because the default is `True`, and it means "silence every
+    # logger that already exists" — including this application's. Running a migration in-process
+    # (the test suite does; a future auto-migrate would) therefore switched off all logging for the
+    # rest of the process, so a failure after a migration was reported to nobody. Alembic's own
+    # loggers are still configured from `alembic.ini`; only the silencing is dropped.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 if not config.get_main_option("sqlalchemy.url", None):
     app_config.load_env_file()
