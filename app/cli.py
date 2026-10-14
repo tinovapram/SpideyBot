@@ -9,7 +9,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from app import config, dbprovider, paths
+from app import config, db, dbprovider, paths
 
 
 def _settings() -> config.Settings:
@@ -54,14 +54,9 @@ def _cmd_db_status(args: argparse.Namespace) -> int:
 
 def _cmd_db_migrate(args: argparse.Namespace) -> int:
     from alembic import command
-    from alembic.config import Config as AlembicConfig
 
     settings = _settings()
-    alembic_config = AlembicConfig(str(paths.ALEMBIC_INI))
-    alembic_config.set_main_option("script_location", str(paths.MIGRATIONS_DIR))
-    alembic_config.set_main_option("sqlalchemy.url", dbprovider.resolve_dsn(settings))
-
-    command.upgrade(alembic_config, args.revision)
+    command.upgrade(db.alembic_config(settings), args.revision)
     print(f"migrated to {args.revision}")
     return 0
 
@@ -141,7 +136,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         return int(args.func(args))
-    except (dbprovider.DbProviderError, ValueError) as error:
+    except (db.SchemaOutOfDate, dbprovider.DbProviderError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
 

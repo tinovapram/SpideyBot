@@ -19,17 +19,29 @@ python -m venv .venv
 .\.venv\Scripts\activate
 pip install -r requirements.txt
 
-# Initialise the database (sqlite by default)
+# Create the bundled PostgreSQL cluster (generates its own password)
 python main.py db init
+
+# Start it, then bring the schema to head
+python main.py db start
+python main.py db migrate
 
 # Start the bot
 python main.py run
 ```
 
+`run` starts an existing cluster itself, so only `db migrate` needs repeating after a schema
+change. It refuses to start, naming the command to run, when the cluster has not been created
+or the schema is behind the migrations — both of which would otherwise surface much later as a
+query that failed for no visible reason. To use an external PostgreSQL instead of the bundled
+cluster, set `SPIDEY_DB_PASSWORD` and point the `[db]` section of `config/local.toml` at it;
+the local cluster is then left untouched.
+
 For a full list of DB commands use:
 ```
 python main.py db migrate   # apply pending migrations
-python main.py db reset    # drop & recreate the database
+python main.py db status    # cluster state and the DSN in use
+python main.py db reset --force   # delete the cluster and all its data
 ```
 
 ## Command‑Line Interface

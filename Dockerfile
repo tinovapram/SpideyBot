@@ -1,16 +1,18 @@
 # syntax=docker/dockerfile:1
 
-# Two stages exist for exactly one reason: `tgcrypto` (plan R1).
+# Two stages: the builder materialises a wheelhouse, and the runtime installs from it
+# offline with `--no-index`, which proves the runtime needs no compiler of its own — a
+# compiler in a production image is attack surface and ~300 MB of weight.
 #
-# It last released a wheel for cp311, so on Python 3.14 it must be compiled from a
-# plain-C sdist. That compile needs a C toolchain, which the runtime image must not
-# carry — a compiler in a production image is attack surface and ~300 MB of weight.
-# So the builder produces wheels and the runtime installs them offline with
-# `--no-index`, which also proves the runtime needs no compiler of its own.
+# Compiling the AES accelerator from source is what forced this split in the first place
+# (plan R1): upstream `tgcrypto` last released a wheel for cp311. The accelerator now
+# arrives as `tgcrypto-pyrofork`, which ships a cp314 manylinux wheel, so build-essential
+# below is a safety net for any dependency that still offers only an sdist rather than
+# something the accelerator itself needs.
 #
-# `tgcrypto` is not optional. Kurigram falls back to pure-Python AES if it is
-# missing, and that fallback measured 0.59 MiB/s against 171.4 MiB/s — 291x slower
-# (D1/D27). `spideybot check` fails loudly rather than letting that pass unnoticed.
+# The accelerator is not optional. Kurigram falls back to pure-Python AES if no
+# `tgcrypto` module imports, and that fallback measured 0.59 MiB/s against 171.4 MiB/s
+# — 291x slower (D1/D27). `spideybot check` fails loudly rather than letting that pass.
 
 # ── Stage 1: build wheels ────────────────────────────────────────────────
 FROM python:3.14-slim AS builder
@@ -18,8 +20,10 @@ FROM python:3.14-slim AS builder
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1
 
-# build-essential is the whole point of this stage: gcc plus the libc headers that
-# compiling a C extension needs. The official Python image already ships Python.h.
+# gcc plus the libc headers that compiling a C extension needs — the official Python image
+# already ships Python.h. This stage is discarded, so the toolchain costs the shipped image
+# nothing; it stays as the fallback for any dependency that ships only an sdist, now that
+# the accelerator no longer needs it.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends build-essential \
  && rm -rf /var/lib/apt/lists/*
@@ -56,6 +60,14 @@ RUN --mount=from=builder,source=/wheels,target=/wheels \
 RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin spideybot \
  && mkdir -p /data \
  && chown spideybot:spideybot /data
+
+# postgresql-binaries unpacks its server on first use, into site-packages — which the service
+# account cannot write, so `db init` would fail with a permission error on the directory pip
+# owns. Unpacking it here, where root can, is what makes the bundled provider a real choice
+# inside the container rather than one that only works from a writable checkout.
+RUN SITE=$(python -c "import site; print(site.getsitepackages()[0])") \
+ && python -c "import postgresql_binaries; postgresql_binaries.bin()" \
+ && chown -R spideybot:spideybot "$SITE/postgresql_binaries"
 
 WORKDIR /app
 COPY --chown=spideybot:spideybot . .

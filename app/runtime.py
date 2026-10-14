@@ -29,7 +29,7 @@ from typing import Any
 
 from pyrogram import idle
 
-from app import capabilities, config, jobs, paths, scheduler, workers
+from app import capabilities, config, db, dbprovider, jobs, paths, scheduler, workers
 from app import logging as app_logging
 from app.config import Settings
 from telegram import clients, delivery, sessions
@@ -72,6 +72,7 @@ async def serve(settings: Settings | None = None, *, pool_size: int | None = Non
         },
     )
     _warn_about_capabilities(resolved)
+    await _prepare_database(resolved)
 
     for directory in paths.insecure_secret_dirs():
         log.warning(
@@ -140,14 +141,58 @@ async def _shutdown(
 
 
 def _warn_about_capabilities(settings: Settings) -> None:
-    """Report a missing capability once, loudly, rather than letting a job fail inexplicably."""
+    """Report a missing capability once, loudly, rather than letting a job fail inexplicably.
+
+    The name is formatted into the message as well as passed as ``capability``: the capability
+    is the whole point of the line, and the stdlib handler renders only ``%(message)s``, so a
+    field alone would leave a warning that never says what is missing. The field is left in
+    place for the structured consumers. It must not be called ``name`` either way — that is a
+    reserved ``LogRecord`` attribute, and stdlib logging raises rather than let ``extra``
+    overwrite it, which turned a missing optional capability into a failed startup.
+    """
     for capability in capabilities.probe():
         if capability.ok:
             continue
         if capability.required:
-            log.error("required capability missing", extra={"name": capability.name})
+            log.error(
+                "required capability missing: %s (%s)",
+                capability.name,
+                capability.detail,
+                extra={"capability": capability.name},
+            )
         else:
-            log.info("optional capability absent", extra={"name": capability.name})
+            log.info(
+                "optional capability absent: %s (%s)",
+                capability.name,
+                capability.detail,
+                extra={"capability": capability.name},
+            )
+
+
+async def _prepare_database(settings: Settings) -> None:
+    """Make the database reachable, wired and current before anything asks it for a session.
+
+    Three things this process has to be sure of, in order: the server is up, this process has
+    an engine, and the schema is the one the code was written against. Starting the bundled
+    cluster is idempotent and is skipped entirely when an explicit ``SPIDEY_DB_PASSWORD``
+    points at an external database (D3) — the bot must never manage a server it was not asked
+    to own. Migrations stay the operator's explicit step; what is added here is that a cluster
+    that was never created, or a schema that is behind, is reported as a sentence naming the
+    command that fixes it rather than as a connection error or a mysterious query failure.
+    """
+    if dbprovider.uses_bundled_cluster(settings):
+        if not dbprovider.is_initialised():
+            raise dbprovider.DbProviderError(
+                f"no local database cluster at {paths.PGDATA_DIR}: run `python main.py db init`; "
+                "or set SPIDEY_DB_PASSWORD to use an external database"
+            )
+        if not dbprovider.is_running():
+            log.info("starting the local database cluster")
+            dbprovider.start(settings)
+
+    db.configure(settings)
+    await db.require_current_schema()
+    log.info("database ready (%s)", config.build_dsn_safe(settings.db))
 
 
 def run(settings: Settings | None = None) -> int:

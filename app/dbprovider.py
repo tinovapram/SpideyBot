@@ -354,6 +354,16 @@ def _cluster_password(settings: Settings) -> str:
     )
 
 
+def uses_bundled_cluster(settings: Settings) -> bool:
+    """Whether the DSN comes from the bundled cluster rather than an external server.
+
+    An explicitly configured password is the operator pointing somewhere else (D3), so this
+    process must not start, stop or otherwise touch a local cluster it was not asked to own.
+    """
+    explicit = settings.db_password
+    return explicit is None or not explicit.get_secret_value()
+
+
 def resolve_dsn(settings: Settings) -> str:
     """The DSN to use at runtime.
 

@@ -6,9 +6,23 @@
 
 # ── Telegram ────────────────────────────────────────────────────────
 # Kurigram is a Pyrogram fork; the import name is still `pyrogram`.
-# [fast] adds tgcrypto, whose sdist must be compiled (see README / plan R1);
-# Kurigram silently falls back to pure-Python pyaes if it is unavailable.
-kurigram[fast]>=2.2.26
+kurigram>=2.2.26
+# The AES accelerator, installed explicitly rather than through kurigram's `[fast]`
+# extra: that extra pins upstream `tgcrypto`, whose newest wheel is cp311 and whose
+# plain-C sdist therefore has to be compiled on 3.14. `tgcrypto-pyrofork` is that same
+# C extension re-released with cp314 wheels, so no toolchain is needed on any platform
+# the project runs on. It installs the module name `tgcrypto`, which is the name
+# `pyrogram.crypto.aes` imports, and it keeps the bytearray/in-place CTR state contract
+# that Kurigram's obfuscated2 transports and CDN downloads depend on — a rewrite that
+# takes immutable bytes there imports fine and then fails at runtime instead.
+tgcrypto-pyrofork>=1.2.8
+# `[fast]` was also the only source of the fast event loop, so dropping the extra has to
+# put it back explicitly (D17). uvloop has no Windows build, which is why the split is by
+# platform rather than one line: uvloop on Linux (0.22.1 is the first release with cp314
+# wheels, which the project's Python floor requires) and winuvloop on Windows, where it
+# selects winloop. Both are optimisations, so neither is a required capability.
+uvloop>=0.22.1; sys_platform == "linux"
+winuvloop>=0.2.5; sys_platform == "win32"
 
 # ── Configuration ───────────────────────────────────────────────────
 pydantic-settings>=2.7
@@ -31,6 +45,13 @@ curl_cffi>=0.7
 # regex cannot do reliably. Declared rather than relied on transitively: it arrives today only
 # because an engine depends on it, so an engine upgrade could take it away silently.
 beautifulsoup4>=4.12
+
+# ── Web-bridge crypto ───────────────────────────────────────────────
+# The same adapters also decrypt: AES-GCM in downloader/sites/bysejikuar.py, AES-CBC in
+# mega.py. Declared here because the runtime image installs this file and not pyproject.toml,
+# where it would otherwise be the only declared dependency — without it `main.py run` cannot
+# even import the downloader, while `main.py check` still passes.
+cryptography>=50.0.2
 
 # ── Media extractors ────────────────────────────────────────────────
 yt-dlp>=2025.1.1
