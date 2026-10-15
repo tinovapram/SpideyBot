@@ -71,23 +71,35 @@ async def start_command(client: Client, message: Message) -> None:
     # /start from answering, it must just be reported as gone (the pool deletes it in that case).
     has_session, is_live = await _session_state(sender.id, settings)
 
-    if first_visit:
-        await message.reply_text(
-            catalog.welcome_message(
-                sender.first_name or "there",
-                tier,
-                magic_word=settings.ux.default_magic_word,
-                has_session=has_session,
-                is_live=is_live,
-            ),
-            reply_markup=upgrade_keyboard(settings.ux.upgrade_url),
-        )
-        return
+    welcome = catalog.welcome_message(
+        sender.first_name or "there",
+        tier,
+        magic_word=settings.ux.default_magic_word,
+        has_session=has_session,
+        is_live=is_live,
+    )
 
-    # AC-1: an onboarded user gets the short notice rather than the welcome. No Upgrade
-    # button, because the notice is meant to stay brief.
+    parts = []
+    if first_visit:
+        parts.append("Welcome new user")
+    else:
+        parts.append("Welcome back")
+        if has_session:
+            parts.append("you loged in")
+            parts.append("already start your user session")
+        else:
+            parts.append("'/login to login to your telegram account'")
+
+    parts.append(welcome)
+
+    if not has_session:
+        parts.append("'/login'")
+
+    text = "\n\n".join(parts)
+
     await message.reply_text(
-        catalog.already_started_message(has_session=has_session, is_live=is_live)
+        text,
+        reply_markup=upgrade_keyboard(settings.ux.upgrade_url) if first_visit else None,
     )
 
 
