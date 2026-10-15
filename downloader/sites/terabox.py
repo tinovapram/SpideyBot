@@ -97,6 +97,9 @@ _BDSTOKEN_RE = re.compile(r'bdstoken["\']?\s*[:=]\s*["\']([a-f0-9]{32})["\']', r
 DEFAULT_TIMEOUT = bridge.DEFAULT_TIMEOUT
 
 
+from downloader.terabox import TeraBoxDownloader, TeraBoxError
+
+
 def matches(url: str) -> bool:
     """Whether this resolver handles the link."""
     return bridge.host_matches(url, _HOSTS)
@@ -111,59 +114,45 @@ async def attempt(
     timeout: float = DEFAULT_TIMEOUT,
     client: Any | None = None,
 ) -> Resolution:
-    """Resolve a TeraBox share.
-
-    The two halves use *different* identities, which is what the probes showed: the share page and
-    the listing are anonymous, while a download link needs the account. So this session deliberately
-    carries no cookies, and the account half (V4's Method B) gets its own, cookie-bearing one.
-
-    ``options`` is this adapter's slice of configuration — the registry hands each adapter only its
-    own (D39), and the cookie lives there as ``{"cookies": "ndus=…"}``.
-    """
+    """Resolve a TeraBox share using the V5 TeraBoxDownloader engine."""
     if cookies is None and options:
         cookies = options.get("cookies")
     cookie = _cookie_string(cookies, cookies_file)
 
-    surl = _parse_surl(url)
-
-    session = client or bridge.session_for(timeout)
-    try:
-        if cookie:
-            for part in cookie.split(";"):
-                part = part.strip()
-                if "=" in part:
-                    k, v = part.split("=", 1)
-                    session.cookies.set(k.strip(), v.strip(), domain=".1024tera.com")
-                    session.cookies.set(k.strip(), v.strip(), domain=".terabox.app")
-
-        token = await _share_token(session, surl, timeout=timeout)
-        listing, root = await _walk(session, token, surl, timeout=timeout)
-        if not listing:
-            raise ResolveError("No files found in this TeraBox share", empty=True)
-
-        linked = [item for item in listing if item.get("dlink")]
-        if linked:
-            return _direct(url, linked, cookie)
-
-        if cookie is None:
-            raise ResolveError(
-                "TeraBox only returns download links to a logged-in account: set your TeraBox "
-                "cookie with /setting"
-            )
-
-        files = await _resolve_via_account(
-            token,
-            cookie,
-            listing,
-            share_id=str(root.get("share_id") or ""),
-            uk=str(root.get("uk") or ""),
-            source_url=url,
-            timeout=timeout,
+    if not cookie:
+        raise ResolveError(
+            "TeraBox only returns download links to a logged-in account: set your TeraBox "
+            "cookie with /setting"
         )
-        return Resolution(engine="terabox", source_url=url, files=tuple(files))
-    finally:
-        if client is None:
-            await bridge.close(session)
+
+    try:
+        async with TeraBoxDownloader(cookie=cookie, timeout=int(timeout)) as downloader:
+            result = await downloader.resolve(url, mode="download")
+            if not result.ok or not result.files:
+                raise ResolveError(result.error or "TeraBox returned no files for this share")
+
+            resolved_files = []
+            for f in result.files:
+                if not f.dlink:
+                    continue
+                resolved_files.append(
+                    ResolvedFile(
+                        filename=safe_filename(f.filename),
+                        media_kind=kind_for(f.filename),
+                        filesize=f.size_bytes,
+                        source_url=url,
+                        transfers=(Transfer(url=f.dlink, filesize=f.size_bytes),)
+                    )
+                )
+
+            if not resolved_files:
+                raise ResolveError("TeraBox returned no download links")
+
+            return Resolution(engine="terabox", source_url=url, files=tuple(resolved_files))
+    except ResolveError:
+        raise
+    except Exception as exc:
+        raise ResolveError(f"TeraBox resolution failed: {exc}") from exc
 
 
 #: Ported from V4's `parse_surl`. The cleaning is not cosmetic: TeraBox hands out several URL forms,
@@ -225,9 +214,9 @@ def _is_dir(item: dict[str, Any]) -> bool:
     return str(item.get("isdir")) == "1"
 
 
-def _api_headers(surl: str) -> dict[str, str]:
+def _api_headers(surl: str, cookie: str | None = None) -> dict[str, str]:
     """What the share API expects, because its own page calls it as an XHR."""
-    return {
+    headers = {
         "User-Agent": bridge.USER_AGENT,
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "en-US,en;q=0.9",
@@ -235,6 +224,9 @@ def _api_headers(surl: str) -> dict[str, str]:
         "Origin": f"https://{_API_HOST}",
         "Referer": f"https://{_API_HOST}/sharing/link?surl={surl}&clearCache=1",
     }
+    if cookie:
+        headers["Cookie"] = cookie if "=" in cookie else f"ndus={cookie}"
+    return headers
 
 
 def _find_token(html: str) -> str | None:
@@ -273,6 +265,7 @@ async def _list(
     *,
     root: int,
     folder: str | None = None,
+    cookie: str | None = None,
     timeout: float,
 ) -> dict[str, Any]:
     """One listing call. ``root=1`` lists the share root; ``root=0`` needs a ``dir``."""
@@ -294,7 +287,7 @@ async def _list(
         response = await session.get(
             f"https://{_API_HOST}/share/list",
             params=params,
-            headers=_api_headers(surl),
+            headers=_api_headers(surl, cookie),
             timeout=timeout,
         )
         data = response.json()
@@ -307,33 +300,23 @@ async def _list(
 
 
 async def _root_listing(
-    session: requests.AsyncSession, token: str, surl: str, *, timeout: float
+    session: requests.AsyncSession, token: str, surl: str, cookie: str | None = None, *, timeout: float
 ) -> tuple[dict[str, Any], str]:
-    """The share root, trying V4's two candidate ids.
-
-    V4 tried `short_url` and then its `1`-prefixed form and used whichever answered for every
-    subfolder afterwards, because which one the API accepts varies by share. The last failure is
-    reported rather than swallowed, so a genuinely dead share still says why.
-    """
+    """The share root, trying V4's two candidate ids."""
     failure: ResolveError | None = None
     for candidate in _surl_candidates(surl):
         try:
-            return await _list(session, token, candidate, root=1, timeout=timeout), candidate
+            return await _list(session, token, candidate, root=1, cookie=cookie, timeout=timeout), candidate
         except ResolveError as failed:
             failure = failed
     raise failure or ResolveError("TeraBox refused the share listing")
 
 
 async def _walk(
-    session: requests.AsyncSession, token: str, surl: str, *, timeout: float
+    session: requests.AsyncSession, token: str, surl: str, cookie: str | None = None, *, timeout: float
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Every file in the share, following folders.
-
-    Queued rather than depth-limited: a share root is usually a folder, and a folder can hold more
-    folders — the reported link nests `…/HIJAB BIRU UPDATE…/PICT/`, so a fixed two-level walk would
-    miss files that the listing itself hands over happily.
-    """
-    root, working = await _root_listing(session, token, surl, timeout=timeout)
+    """Every file in the share, following folders."""
+    root, working = await _root_listing(session, token, surl, cookie=cookie, timeout=timeout)
     files = [item for item in root.get("list") or [] if not _is_dir(item)]
     pending = [item.get("path") or "" for item in root.get("list") or [] if _is_dir(item)]
     seen: set[str] = set()
@@ -343,7 +326,7 @@ async def _walk(
         if not folder or folder in seen:
             continue
         seen.add(folder)
-        data = await _list(session, token, working, root=0, folder=folder, timeout=timeout)
+        data = await _list(session, token, working, root=0, folder=folder, cookie=cookie, timeout=timeout)
         for item in data.get("list") or []:
             if _is_dir(item):
                 pending.append(item.get("path") or "")
