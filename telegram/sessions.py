@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import sqlite3
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -402,6 +403,12 @@ def set_pool(pool: SessionPool | None) -> None:
     """Install a pool (tests), or clear it so the next call builds a fresh one."""
     global _POOL
     _POOL = pool
+
+
+
+
+
+
 
 
 _POOL: SessionPool | None = None
