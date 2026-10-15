@@ -128,6 +128,14 @@ async def attempt(
 
     session = client or bridge.session_for(timeout)
     try:
+        if cookie:
+            for part in cookie.split(";"):
+                part = part.strip()
+                if "=" in part:
+                    k, v = part.split("=", 1)
+                    session.cookies.set(k.strip(), v.strip(), domain=".1024tera.com")
+                    session.cookies.set(k.strip(), v.strip(), domain=".terabox.app")
+
         token = await _share_token(session, surl, timeout=timeout)
         listing, root = await _walk(session, token, surl, timeout=timeout)
         if not listing:

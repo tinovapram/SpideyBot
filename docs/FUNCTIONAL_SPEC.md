@@ -699,6 +699,14 @@ Invite links need a public @username for the bot.
   Cancelled: {n}
 ```
 
+### FR-20 — TeraBox Resolution Architecture (Methods A & B)
+1. **Method A (Direct Share Resolution)**:
+   - When a user provides an account `ndus` cookie via `/setting`, the native resolver injects the session cookies into the browser-impersonated HTTP client (`curl_cffi`).
+   - It fetches the sharing page token (`jsToken`), queries the share listing API (`/share/list`), and retrieves direct CDN download links (`dlink`) directly without account copying.
+2. **Method B (Account Transfer Resolver)**:
+   - When direct CDN links are unavailable anonymously, the resolver automatically falls back to Method B.
+   - It obtains the account `bdstoken`, copies shared files into the bot's account storage (`/api/create`, `/share/transfer`), and resolves per-file download links via the account API (`/api/filemetas`), handling server-side verification gates (`need verify_v2`).
+
 ---
 
 ## 8. State model & lifecycle rules
