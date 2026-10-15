@@ -88,7 +88,7 @@ async def start_command(client: Client, message: Message) -> None:
             parts.append("you loged in")
             parts.append("already start your user session")
         else:
-            parts.append("'/login to login to your telegram account'")
+            parts.append("/login to login to your telegram account")
 
     parts.append(welcome)
 
