@@ -7,7 +7,7 @@ SpideyBot is a lightweight Telegram downloader built on top of the Kurigram fram
 * **Short‑link bypass** – custom `RedirectAdapter` handles over‑200 known hosts.
 * **Session security** – `/logout` revokes the Telegram token and cleans local files.
 * **Modular architecture** – split into handlers, downloader, and CLI layers.
-* **Tests** – 796 unit and integration tests that ensure API contract compliance.
+* **Tests** – 840 unit and integration tests that ensure API contract compliance.
 * **Database** – SQLite/PostgreSQL support via Alembic migrations.
 * **Docker** – ready‑to‑use Dockerfile for containerized deployment.
 

@@ -12,6 +12,21 @@
 #     docker compose run --rm spideybot sh -c "python main.py db init && python main.py db start && python main.py db migrate"
 #     docker compose up -d
 #
+# If the build stops immediately with
+#     failed to solve: frontend grpc server closed unexpectedly
+# then nothing here or in the Dockerfile is wrong. Line 1 of the Dockerfile has BuildKit parse it
+# with the `docker/dockerfile:1` frontend image, and that frontend died before it returned a plan —
+# seen after an unclean reboot, and when the box had no room for the frontend container. Repair the
+# builder, then build directly:
+#     sudo systemctl restart docker
+#     docker pull docker/dockerfile:1
+#     docker builder prune -af
+#     DOCKER_BUILDKIT=1 docker build --progress=plain -t spideybot:latest .
+# The tag is not arbitrary: it is this file's `image:`, so a direct build leaves `docker compose up
+# -d` with exactly the image it would otherwise have built for itself. `docker buildx ls` names the
+# builder in use if compose keeps failing while the direct build succeeds — the two do not take the
+# same path.
+#
 # `db init` is the only step that must happen before the bot starts; after that `up -d` is
 # enough, because `main.py run` starts the cluster itself and refuses to start with a message
 # naming the command to run if the cluster is missing or the schema is behind.
