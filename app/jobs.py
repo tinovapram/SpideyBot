@@ -423,16 +423,30 @@ async def _record(
     """Write the ledger: what arrived, what failed, and what a previous attempt already sent."""
     async with db_module.session() as session:
         existing = await session.execute(
-            select(JobItem.idx)
+            select(JobItem.source_url)
             .where(JobItem.job_id == job_id)
-            .order_by(JobItem.idx.desc())
-            .limit(1)
         )
-        next_index = (existing.scalar_one_or_none() or 0) + 1
+        seen = {row[0] for row in existing}
+
+        next_index = (
+            await session.execute(
+                select(JobItem.idx)
+                .where(JobItem.job_id == job_id)
+                .order_by(JobItem.idx.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none() or 0
+
+        def _row(**kwargs: Any) -> JobItem:  # type: ignore[no-untyped-def]
+            """Build a JobItem, skipping rows whose ledger key already exists for this job."""
+            if kwargs["source_url"] in seen:
+                return None  # type: ignore[return-value]
+            seen.add(kwargs["source_url"])
+            return JobItem(**kwargs)  # type: ignore[call-arg]
 
         for item in delivered:
             session.add(
-                JobItem(
+                _row(
                     job_id=job_id,
                     idx=next_index,
                     source_url=ledger_url(item.file),
@@ -448,7 +462,7 @@ async def _record(
 
         for failure in failures:
             session.add(
-                JobItem(
+                _row(
                     job_id=job_id,
                     idx=next_index,
                     # A failure has no resolved URL of its own: it never got that far.
@@ -463,7 +477,7 @@ async def _record(
         # A file a previous attempt delivered is recorded too, so the ledger stays the full record.
         for file in skipped:
             session.add(
-                JobItem(
+                _row(
                     job_id=job_id,
                     idx=next_index,
                     source_url=ledger_url(file),
