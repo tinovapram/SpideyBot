@@ -362,18 +362,17 @@ async def _adapter_options(settings: Settings, *, user_id: int | None = None) ->
 
 
 async def _terabox_cookie(settings: Settings, user_id: int) -> str | None:
-    """The TeraBox cookie for this job: the user's own if they set one, else the operator's first.
+    """Return this user's cookie first, followed by every configured fallback account.
 
     The user's own comes first because whichever account the cookie belongs to is the one TeraBox
-    copies files into — a per-user credential keeps one user's downloads out of everyone else's
-    storage, and the operator's `|`-separated list is the fallback for users who never set one.
+    copies files into. Operator cookies follow as fallbacks so one blocked account does not stop
+    the job; the adapter tries the pipe-delimited accounts in order.
     """
     async with db_module.session() as session:
         own = await prefs.terabox_cookie(session, user_id)
-    if own:
-        return own
-    accounts = settings.terabox_cookie_accounts()
-    return accounts[0] if accounts else None
+    accounts = ([own] if own else []) + settings.terabox_cookie_accounts()
+    unique_accounts = list(dict.fromkeys(cookie.strip() for cookie in accounts if cookie.strip()))
+    return "|".join(unique_accounts) or None
 
 
 async def _note_phase(job_id: int, phase: str) -> None:

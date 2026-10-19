@@ -1270,6 +1270,32 @@ class TeraBoxAccountPool:
             except Exception:
                 pass
 
+    async def __aenter__(self):
+        for account in self.accounts:
+            try:
+                await account.__aenter__()
+            except Exception:
+                pass
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.close()
+
+    async def resolve(
+        self, url: str, mode: str = "download", wait_for_transcoding: bool = False
+    ) -> TeraBoxResult:
+        last_result = None
+        for account in self.ordered_accounts():
+            try:
+                result = await account.resolve(url, mode=mode, wait_for_transcoding=wait_for_transcoding)
+                if result and result.ok and result.files:
+                    return result
+                last_result = result
+            except Exception as exc:
+                self.logger.warning("TeraBox account resolve raised", error=str(exc))
+                last_result = TeraBoxResult(status="failed", error=str(exc))
+        return last_result or TeraBoxResult(status="failed", error="All TeraBox accounts failed")
+
     def __repr__(self) -> str:
         heads = [
             account.account._cookies_dict.get("ndus", "")

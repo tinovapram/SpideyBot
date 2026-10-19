@@ -353,7 +353,7 @@ JOB_FILES_FAILED = "  Failed: {count} file(s)"
 JOB_NOTICE = "  ⚠️ {notice}"
 #: FR-7.2's persistent footer. Present in every phase, including the failure shapes, because the
 #: moment a user wants to cancel is the moment the job looks stuck.
-JOB_FOOTER = "  '/cancel {id}' to stop"
+JOB_FOOTER = "  `/cancel {id}` to stop"
 
 
 @dataclass(frozen=True)

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from pydantic import ValidationError
@@ -274,6 +276,47 @@ def test_terabox_accounts_split_on_pipe_not_semicolon(
     settings = build_settings(**fake_secrets)
 
     assert settings.terabox_cookie_accounts() == ["ndus=a; lang=en", "ndus=b; lang=fr"]
+
+
+@pytest.mark.asyncio
+async def test_job_terabox_cookie_keeps_user_first_and_all_fallbacks(
+    fake_secrets: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app import jobs
+
+    @asynccontextmanager
+    async def fake_session():
+        yield object()
+
+    monkeypatch.setattr(jobs.db_module, "session", fake_session)
+    monkeypatch.setattr(jobs.prefs, "terabox_cookie", AsyncMock(return_value="ndus=user"))
+    settings = build_settings(
+        **fake_secrets,
+        terabox_cookies="ndus=bot1|ndus=bot2|ndus=user",
+    )
+
+    cookies = await jobs._terabox_cookie(settings, user_id=123)
+
+    assert cookies == "ndus=user|ndus=bot1|ndus=bot2"
+
+
+@pytest.mark.asyncio
+async def test_job_terabox_cookie_keeps_all_fallbacks_without_user_cookie(
+    fake_secrets: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app import jobs
+
+    @asynccontextmanager
+    async def fake_session():
+        yield object()
+
+    monkeypatch.setattr(jobs.db_module, "session", fake_session)
+    monkeypatch.setattr(jobs.prefs, "terabox_cookie", AsyncMock(return_value=None))
+    settings = build_settings(**fake_secrets, terabox_cookies="ndus=bot1|ndus=bot2")
+
+    cookies = await jobs._terabox_cookie(settings, user_id=123)
+
+    assert cookies == "ndus=bot1|ndus=bot2"
 
 
 def test_secret_values_includes_each_cookie_account(
