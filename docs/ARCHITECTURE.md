@@ -48,6 +48,7 @@ core/
   db.py            # async engine/session
   quota.py         # check/reserve/consume/reset (atomic)
   ratelimit.py     # per-user token bucket
+  sendgate.py      # per-client upload/send pacing, flood cooldown, retries
   queue.py         # process-local priority queue + worker wake-up
   worker.py        # DownloadManager: claims jobs, drives the flows
   scheduler.py     # background maintenance
@@ -192,6 +193,22 @@ This replaces V3's "every logged-in user stays connected forever".
 - A retry-hint reply is sent when the bucket is empty. Documented as single-process (Redis is
   the multi-worker path).
 
+**Upload and send pacing** — ✅ implemented in [`core/sendgate.py`](../core/sendgate.py) (phase 1;
+adaptive rates in §8 of that note are ⏳). See
+[SEND_RATE_LIMITING.md](./SEND_RATE_LIMITING.md).
+
+- The limited unit is **one prepared media** (one file, whether it is later sent in an album or
+  on its own); sends are paced per chat only.
+- One `SendGate` per Telethon client — a flood on the bot client cannot stall a user session.
+- Media slots (`SPIDEY_MEDIA_CONCURRENCY` on the bot client, the tier's `concurrent` value on a
+  user client) bound transfer concurrency; `SPIDEY_MEDIA_PER_MINUTE` bounds how many media start
+  per minute; a per-chat bucket bounds message RPCs.
+- Shared flood cooldown (one wake-up for all waiters, jittered); retries re-send the
+  already-uploaded media; an expired file reference fails fast (`FileExpiredError`) and
+  transient errors back off exponentially.
+- `core/sessions.py` leases a user client for the job's duration, so the idle sweep and the LRU
+  cap cannot disconnect it mid-upload.
+
 ## 9. Referral system
 
 - Link format: `https://t.me/<bot_username>?start=<code>` where `<code>` is the
@@ -234,6 +251,10 @@ SPIDEY_TERABOX_COOKIES (single or |-delimited), SPIDEY_TERABOX_{JSTOKEN,BDSTOKEN
 SPIDEY_ADMIN_IDS
 SPIDEY_MAX_CONCURRENT_DOWNLOADS, SPIDEY_JOB_MAX_ATTEMPTS, SPIDEY_PROXY_POOL
 SPIDEY_RATE_LIMIT_PER_MINUTE
+SPIDEY_MEDIA_CONCURRENCY, SPIDEY_MEDIA_PER_MINUTE, SPIDEY_MEDIA_BURST
+SPIDEY_SEND_CHAT_PER_MINUTE, SPIDEY_SEND_BURST
+SPIDEY_FLOOD_JITTER_SECONDS, SPIDEY_SEND_MAX_ATTEMPTS
+SPIDEY_SESSIONLESS_WORKER_SLOTS
 SPIDEY_SESSION_MAX_LIVE / _IDLE_SECONDS
 SPIDEY_METRICS_HOST / _PORT
 SPIDEY_TIER_{FREE,PRO,PREMIUM}_*   # limits, priority, concurrent mode

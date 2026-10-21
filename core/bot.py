@@ -13,7 +13,7 @@ import structlog
 from sqlalchemy import text
 from telethon import TelegramClient
 
-from core import config, db, sessions
+from core import config, db, sendgate, sessions
 from core.config import Settings, get_settings
 from core.event_loop import configure_event_loop
 from core.logging import setup_logging
@@ -66,6 +66,7 @@ def initialize() -> None:
         _settings.tg_api_hash,
     )
     bot = client
+    sendgate.label_client(client, "bot")
 
     account_cookies = _settings.terabox_account_cookies()
     if account_cookies:
@@ -137,6 +138,8 @@ async def _handle_shutdown(signal_name: str) -> None:
 
     await sessions.stop_all_clients()
     log.info("User account clients stopped")
+
+    sendgate.reset()
 
     if bot is not None and bot.is_connected():
         await bot.disconnect()

@@ -19,7 +19,7 @@ from typing import Any
 import structlog
 
 from core import queue as Q
-from core import sessions
+from core import sendgate, sessions
 from core.config import get_settings
 from core.cookies import shared_cookies
 from core.db import session_scope
@@ -27,7 +27,7 @@ from core.metrics import get_metrics
 from core.models import User, get_or_create_user
 from core.quota import QuotaExceeded, consume, release_download
 from core.referral import try_credit_on_download
-from core.tiers import HEAVY_SITES, effective_tier
+from core.tiers import HEAVY_SITES, effective_tier, tier_policy
 
 logger = structlog.get_logger(__name__)
 
@@ -461,10 +461,24 @@ class DownloadManager:
         else:
             pass  # site gating removed — all tiers access all sites
 
-        # ── Get user client ─────────────────────────────────────
+        # ── Pin the user client and size its upload budget ──────
         client = sessions.get_client(job.user_id)
+        leased = client is not None
         if client is None:
             client = self.bot
+        if leased:
+            # The idle sweep and the LRU cap must not disconnect mid-upload.
+            sessions.acquire(job.user_id)
+            await sendgate.get_gate(client).set_media_slots(tier_policy(task.tier).concurrent)
+        try:
+            await self._dispatch(job, task, client, log)
+        finally:
+            if leased:
+                sessions.release(job.user_id)
+
+    async def _dispatch(self, job: Any, task: DownloadTask, client: Any, log: Any) -> None:
+        """Run the flow for one job and record its outcome."""
+        entry_id = job.id
 
         # ── Resolve TeraBox downloader (with shared cookies) ────
         terabox = self._terabox_downloader

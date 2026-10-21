@@ -7,6 +7,24 @@
 > Full rewrite for 1000-user scale + tier-based quota.
 > Branch: `V4` · Storage: PostgreSQL · Tiers: free / pro / premium (+ admin bypass)
 
+## Completion status (2026-10-22)
+
+| Phase | Status |
+|:--|:--|
+| 0 — Foundations | ✅ done |
+| 1 — Data layer | ✅ done |
+| 2 — Queue & scheduler | ✅ done |
+| 3 — Downloader core | ✅ done *(naming differs, see below)* |
+| 4 — Sessions | ✅ done |
+| 5 — Handlers | ✅ done *(naming differs, see below)* |
+| 6 — Extras | ◐ retry/backoff ✅ · `/stats` ✅ · **duplicate-link detection ❌ not built** · retention = staging cleanup at startup only ◐ |
+| 7 — Tests, migration, cutover | ✅ done (76 tests, `scripts/migrate_v3_to_v4.py`, Docker build verified) |
+
+Naming differences: `downloader/engines.py` was never created (gallery-dl and yt-dlp live in
+`downloader/gallerydl.py` and the site adapters); `handler/user.py` became `handler/handler.py`;
+`handler/outgoing.py` became `utils/progress.py`. The checkboxes below are left as written for the
+historical record.
+
 ## Objectives
 
 1. Handle **1000 active users** without degrading under burst load.

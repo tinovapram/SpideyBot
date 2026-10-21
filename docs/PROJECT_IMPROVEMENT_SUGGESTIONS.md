@@ -360,6 +360,6 @@ All four must pass locally before pushing, since the CI gate currently cannot re
 ## Related documents
 
 - [ARCHITECTURE.md](./ARCHITECTURE.md) — current system design.
-- [SEND_RATE_LIMITING.md](./SEND_RATE_LIMITING.md) — proposal for pacing uploads/sends and
-  handling `FLOOD_WAIT` across concurrent jobs (not implemented yet).
+- [SEND_RATE_LIMITING.md](./SEND_RATE_LIMITING.md) — pacing of media preparation and sends, and
+  `FLOOD_WAIT` handling across concurrent jobs. ✅ Done (phase 1: `core/sendgate.py`).
 

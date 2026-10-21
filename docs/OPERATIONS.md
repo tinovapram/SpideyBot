@@ -51,3 +51,22 @@ Sensitive fields and URL query parameters are redacted by the structured
 logging processor. `/stats` shows process-local counters, and
 `/metrics` provides Prometheus-compatible text. Queue jobs and these counters
 reset when the process restarts.
+
+## Tuning media and send pacing — ✅ implemented
+
+`core/sendgate.py` paces media preparation and sends (see
+[SEND_RATE_LIMITING.md](./SEND_RATE_LIMITING.md)). When delivery feels slow or
+Telegram starts refusing sends:
+
+| Symptom | Check | Knob |
+|:--|:--|:--|
+| `spideybot_send_flood_waits_total` climbing | which client | lower `SPIDEY_MEDIA_PER_MINUTE`, or `SPIDEY_MEDIA_CONCURRENCY` for the shared bot client |
+| `spideybot_media_wait_seconds_total` large, few floods | token budget too tight | raise `SPIDEY_MEDIA_PER_MINUTE` / `SPIDEY_MEDIA_BURST` |
+| `spideybot_media_in_flight` pinned at the slot limit | uploads queued behind slots | raise `SPIDEY_MEDIA_CONCURRENCY` (bot) or the tier's concurrency |
+| large chats stall while others work | per-chat message budget | `SPIDEY_SEND_CHAT_PER_MINUTE` / `SPIDEY_SEND_BURST` |
+| `user:<id>` floods, bot is fine | that user's own account | nothing to tune — the cooldown is theirs alone |
+
+A flood on the bot client pauses every sessionless user until the cooldown
+expires; users who ran `/login` are unaffected. That asymmetry is intentional —
+it is the incentive to log in.
+

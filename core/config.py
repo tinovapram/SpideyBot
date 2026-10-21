@@ -83,6 +83,20 @@ class Settings(BaseSettings):
     # ── Rate limiting ────────────────────────────────────────────
     rate_limit_per_minute: int = 12
 
+    # ── Media preparation & send pacing (core/sendgate.py) ───────
+    # The limited unit is **one prepared media** (one file the user asked
+    # for), whether it is later sent in an album or on its own.
+    media_concurrency: int = 5  # slots on the bot client; 0 = follow sessionless share
+    media_per_minute: int = 60  # per client
+    media_burst: int = 5  # media that may start at once
+    send_chat_per_minute: int = 20  # message RPCs per chat
+    send_burst: int = 5  # message RPCs that may leave at once
+    flood_jitter_seconds: float = 2.0  # de-synchronises flood retries
+    send_max_attempts: int = 4
+
+    # ── Sessionless jobs (docs/DELIVERY_PIPELINE.md §8) ──────────
+    sessionless_worker_slots: int = 5
+
     # ── User sessions (on-demand lifecycle) ──────────────────────
     session_max_live: int = 50
     session_idle_seconds: int = 600
@@ -147,6 +161,16 @@ class Settings(BaseSettings):
     def terabox_account_cookies(self) -> list[str]:
         """Return one cookie string per TeraBox account to use."""
         return [p.strip() for p in self.terabox_cookies.split("|") if p.strip()]
+
+    def media_slot_budget(self) -> int:
+        """Media slots on the shared bot client.
+
+        ``SPIDEY_MEDIA_CONCURRENCY=0`` follows the sessionless worker share, so
+        the shared clients move together when an operator tunes one of them.
+        """
+        if self.media_concurrency > 0:
+            return self.media_concurrency
+        return max(1, self.sessionless_worker_slots)
 
 
 def _known_env_keys() -> set[str]:

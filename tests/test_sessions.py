@@ -38,12 +38,14 @@ def session_state(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(sessions, "_active_clients", {})
     monkeypatch.setattr(sessions, "_last_used", {})
+    monkeypatch.setattr(sessions, "_leases", {})
     monkeypatch.setattr(sessions.config, "get_settings", lambda: settings)
     monkeypatch.setattr(sessions, "build_client", lambda user_id: clients.setdefault(user_id, _FakeClient(user_id)))
     monkeypatch.setattr("handler.handler.get_handler", lambda: fake_handler)
     yield clients, settings
     sessions._active_clients.clear()
     sessions._last_used.clear()
+    sessions._leases.clear()
 
 
 @pytest.mark.asyncio
@@ -83,6 +85,48 @@ async def test_idle_clients_are_evicted(session_state, monkeypatch: pytest.Monke
 
     assert await sessions.evict_idle_clients() == 1
     assert sessions.active_count() == 0
+
+
+def test_leases_are_reference_counted() -> None:
+    sessions.acquire(5)
+    sessions.acquire(5)
+
+    sessions.release(5)
+    assert sessions.is_leased(5)
+
+    sessions.release(5)
+    assert not sessions.is_leased(5)
+
+
+@pytest.mark.asyncio
+async def test_leased_client_is_not_evicted(session_state, monkeypatch: pytest.MonkeyPatch) -> None:
+    _clients, _settings = session_state
+    assert await sessions.start_client(1)
+    sessions._last_used[1] = 10.0
+    monkeypatch.setattr(sessions.time, "monotonic", lambda: 25.0)
+
+    sessions.acquire(1)
+    assert await sessions.evict_idle_clients() == 0
+    assert sessions.active_count() == 1
+
+    sessions.release(1)
+    assert await sessions.evict_idle_clients() == 1
+
+
+@pytest.mark.asyncio
+async def test_leased_client_is_not_lru_evicted(session_state) -> None:
+    clients, _settings = session_state
+    assert await sessions.start_client(1)
+    assert await sessions.start_client(2)
+    sessions._last_used[1] = 1.0  # oldest, but a job holds it
+    sessions.acquire(1)
+
+    assert await sessions.start_client(3)
+
+    assert clients[1].disconnects == 0
+    assert clients[2].disconnects == 1
+    assert sessions.get_client(3) is clients[3]
+    sessions.release(1)
 
 
 def test_session_file_permissions_are_restricted(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -18,7 +18,7 @@ from cryptography.fernet import Fernet
 from telethon import TelegramClient
 from telethon.sessions import SQLiteSession, StringSession
 
-from core import config
+from core import config, sendgate
 from utils import paths
 
 logger = structlog.get_logger(__name__)
@@ -31,6 +31,7 @@ def _update_metrics() -> None:
 
 _active_clients: dict[int, TelegramClient] = {}
 _last_used: dict[int, float] = {}
+_leases: dict[int, int] = {}
 _fernet: Fernet | None = None
 
 
@@ -146,11 +147,13 @@ def build_client(user_id: int) -> TelegramClient | None:
             return None
     settings = config.get_settings()
     _restrict_file(file_path)
-    return TelegramClient(
+    client = TelegramClient(
         SQLiteSession(str(file_path)),
         int(settings.tg_api_id),
         settings.tg_api_hash,
     )
+    sendgate.label_client(client, f"user:{user_id}")
+    return client
 
 
 def create_login_client(user_id: int) -> TelegramClient:
@@ -188,8 +191,9 @@ async def start_client(user_id: int) -> bool:
 
     max_live = max(1, config.get_settings().session_max_live)
     if len(_active_clients) >= max_live:
-        oldest_user = min(_last_used, key=_last_used.get, default=None)
-        if oldest_user is not None and oldest_user != user_id:
+        candidates = [uid for uid in _last_used if uid != user_id and not is_leased(uid)]
+        oldest_user = min(candidates, key=_last_used.get, default=None)
+        if oldest_user is not None:
             await stop_client(oldest_user)
         else:
             logger.warning("Active client limit reached", limit=max_live)
@@ -249,14 +253,37 @@ def is_client_active(user_id: int) -> bool:
     return get_client(user_id) is not None
 
 
+# ── Leases ────────────────────────────────────────────────────────
+# A job holds a lease for its whole duration so the idle sweep and the LRU
+# cap cannot disconnect a client mid-upload.
+
+def acquire(user_id: int) -> None:
+    """Pin *user_id*'s client against eviction."""
+    _leases[user_id] = _leases.get(user_id, 0) + 1
+
+
+def release(user_id: int) -> None:
+    """Drop one lease taken by :func:`acquire`."""
+    remaining = _leases.get(user_id, 0) - 1
+    if remaining > 0:
+        _leases[user_id] = remaining
+    else:
+        _leases.pop(user_id, None)
+
+
+def is_leased(user_id: int) -> bool:
+    """Return True while a running job holds *user_id*'s client."""
+    return _leases.get(user_id, 0) > 0
+
+
 async def evict_idle_clients() -> int:
-    """Disconnect clients unused for the configured idle period."""
+    """Disconnect clients unused for the configured idle period (skipping leased)."""
     idle_seconds = max(1, config.get_settings().session_idle_seconds)
     now = time.monotonic()
     stale = [
         user_id
         for user_id in list(_active_clients)
-        if now - _last_used.get(user_id, now) >= idle_seconds
+        if not is_leased(user_id) and now - _last_used.get(user_id, now) >= idle_seconds
     ]
     for user_id in stale:
         await stop_client(user_id)

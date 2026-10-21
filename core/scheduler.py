@@ -1,11 +1,12 @@
 """Background scheduler — periodic maintenance jobs.
 
-A single asyncio task loops forever, running three cheap maintenance passes
+A single asyncio task loops forever, running four cheap maintenance passes
 at independent intervals:
 
 - **quota sweep** — drop stale ``quota_usage`` counters older than 30 days
 - **rate-limit sweep** — clear stale rate-limiter tokens
 - **session sweep** — disconnect idle user clients
+- **send-gate sweep** — drop gates of disconnected clients and idle per-chat buckets
 
 All work runs inside a short-lived ``session_scope`` so a single failure
 doesn't take down the loop.
@@ -29,6 +30,7 @@ logger = structlog.get_logger("spideybot.scheduler")
 QUOTA_SWEEP_INTERVAL = 3600
 RATELIMIT_SWEEP_INTERVAL = 300
 SESSION_SWEEP_INTERVAL = 60
+SENDGATE_SWEEP_INTERVAL = 300
 
 
 async def _run_quota_sweep() -> None:
@@ -47,11 +49,18 @@ def _run_ratelimit_sweep() -> None:
     get_limiter().clear_stale()
 
 
+def _run_sendgate_sweep() -> None:
+    from core import sendgate
+
+    sendgate.sweep()
+
+
 async def _scheduler_loop() -> None:
     """Run maintenance passes forever, each on its own cadence."""
     last_quota = 0.0
     last_ratelimit = 0.0
     last_sessions = 0.0
+    last_sendgate = 0.0
 
     while True:
         now = asyncio.get_running_loop().time()
@@ -78,6 +87,13 @@ async def _scheduler_loop() -> None:
                 await sessions.evict_idle_clients()
             except Exception:  # noqa: BLE001
                 logger.exception("session sweep failed")
+
+        if now - last_sendgate >= SENDGATE_SWEEP_INTERVAL:
+            last_sendgate = now
+            try:
+                _run_sendgate_sweep()
+            except Exception:  # noqa: BLE001
+                logger.exception("sendgate sweep failed")
 
         await asyncio.sleep(1)
 

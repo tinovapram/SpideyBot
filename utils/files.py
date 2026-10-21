@@ -13,6 +13,8 @@ import subprocess
 
 import structlog
 
+from core import sendgate
+
 logger = structlog.get_logger(__name__)
 
 _VIDEO_EXTS = frozenset({".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".wmv", ".m4v"})
@@ -168,6 +170,16 @@ def make_video_thumb(video_path: str) -> str | None:
     return None
 
 
+async def _upload_thumb(client, thumb_path: str | None):
+    """Upload a thumbnail, tolerating failure (the file itself still sends)."""
+    if not thumb_path or not os.path.isfile(thumb_path):
+        return None
+    try:
+        return await client.upload_file(thumb_path)
+    except Exception:
+        return None
+
+
 async def prepare_media(
     client,
     file_path: str,
@@ -179,15 +191,39 @@ async def prepare_media(
     nosound_video: bool | None = None,
     progress_callback=None,
 ):
-    """Upload *file_path* and return a Telethon ``InputMedia`` object."""
+    """Prepare *file_path* for delivery: one media token, one media slot.
+
+    The gate charges one token per file (album or not) and holds one slot for
+    the whole transfer, including the thumbnail upload. ffmpeg runs outside the
+    gate because it is local CPU/disk work, not Telegram traffic.
+    """
     from telethon import types
     from telethon.utils import get_attributes, is_image
-
-    file_handle = await client.upload_file(file_path, progress_callback=progress_callback)
 
     is_img = is_image(file_path)
     if as_image is None:
         as_image = is_img and not force_document
+
+    thumb_path = None if as_image else thumb
+    auto_thumb = None
+    if thumb_path is None and not as_image:
+        auto_thumb = await asyncio.to_thread(make_video_thumb, file_path)
+        thumb_path = auto_thumb
+
+    gate = sendgate.get_gate(client)
+    try:
+        async with gate.media_slot():
+            await gate.take_media()
+            file_handle = await client.upload_file(
+                file_path, progress_callback=progress_callback
+            )
+            thumb_handle = await _upload_thumb(client, thumb_path)
+    finally:
+        if auto_thumb:
+            try:
+                os.remove(auto_thumb)
+            except OSError:
+                pass
 
     if as_image:
         return types.InputMediaUploadedPhoto(file=file_handle)
@@ -201,25 +237,6 @@ async def prepare_media(
         force_document=force_document,
         supports_streaming=supports_streaming,
     )
-
-    thumb_handle = None
-    if thumb and os.path.isfile(thumb):
-        try:
-            thumb_handle = await client.upload_file(thumb)
-        except Exception:
-            thumb_handle = None
-    elif thumb is None:
-        auto_thumb = await asyncio.to_thread(make_video_thumb, file_path)
-        if auto_thumb:
-            try:
-                thumb_handle = await client.upload_file(auto_thumb)
-            except Exception:
-                thumb_handle = None
-            finally:
-                try:
-                    os.remove(auto_thumb)
-                except OSError:
-                    pass
 
     nosound = (nosound_video if nosound_video is not None else True) if mime.startswith("video") else None
 

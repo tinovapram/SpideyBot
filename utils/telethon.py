@@ -1,19 +1,20 @@
 """
 Telethon helpers that handle Telegram flood-wait and album chunking.
 
-Telegram limits albums to 10 media items, rate-limits rapid edits/sends, and
-only accepts photos and videos inside a media group. These wrappers catch
-``FloodWaitError``, wait out the cooldown, retry, and keep every other file
-type out of the album so it is delivered as its own message.
+Every send and edit is paced by the client's :class:`~core.sendgate.SendGate`
+(shared flood cooldown, per-chat/per-client token buckets, bounded retries).
+Telegram limits albums to 10 media items and only accepts photos and videos
+inside a media group, so anything else is delivered as its own message.
 """
 
 from __future__ import annotations
 
-import asyncio
-
 import structlog
 from telethon import types
-from telethon.errors import FloodWaitError, RPCError
+from telethon.errors import RPCError
+
+from core import sendgate
+from core.sendgate import FileExpiredError
 
 logger = structlog.get_logger(__name__)
 
@@ -37,30 +38,19 @@ def is_album_media(item: object) -> bool:
 
 
 async def safe_edit(message, text: str, **kwargs) -> bool:
-    """Edit *message*, sleeping through flood-waits. Returns success."""
+    """Edit *message* under the client's cooldown (no send tokens). Returns success."""
+    gate = sendgate.get_gate(getattr(message, "_client", None))
     try:
-        await message.edit(text, **kwargs)
+        await gate.edit(lambda: message.edit(text, **kwargs))
         return True
-    except FloodWaitError as exc:
-        logger.warning("Flood wait on edit", seconds=exc.seconds)
-        await asyncio.sleep(exc.seconds)
-        try:
-            await message.edit(text, **kwargs)
-            return True
-        except RPCError:
-            return False
     except RPCError:
         return False
 
 
-async def safe_send_file(client, *args, **kwargs):
-    """``send_file`` that sleeps through a single flood-wait and retries."""
-    try:
-        return await client.send_file(*args, **kwargs)
-    except FloodWaitError as exc:
-        logger.warning("Flood wait on send", seconds=exc.seconds)
-        await asyncio.sleep(exc.seconds)
-        return await client.send_file(*args, **kwargs)
+async def safe_send_file(client, chat_id, media, **kwargs):
+    """``send_file`` paced by *client*'s gate, with retries for retryable errors."""
+    gate = sendgate.get_gate(client)
+    return await gate.send(chat_id, lambda: client.send_file(chat_id, media, **kwargs))
 
 
 async def _send_individual(
@@ -71,21 +61,16 @@ async def _send_individual(
     reply_to,
     **kwargs,
 ) -> bool:
-    """Send one media item, retrying once after a short pause."""
-    for attempt in range(2):
-        try:
-            await safe_send_file(
-                client, chat_id, item,
-                caption=caption, reply_to=reply_to, **kwargs,
-            )
-            return True
-        except Exception as send_exc:
-            if attempt == 0:
-                logger.warning("Individual send failed, retrying", error=str(send_exc))
-                await asyncio.sleep(1.0)
-            else:
-                logger.warning("Individual send failed", error=str(send_exc))
-    return False
+    """Send one media item; the gate already handles retries."""
+    try:
+        await safe_send_file(
+            client, chat_id, item,
+            caption=caption, reply_to=reply_to, **kwargs,
+        )
+        return True
+    except Exception as exc:
+        logger.warning("Individual send failed", error=str(exc))
+        return False
 
 
 async def _send_album_batch(
@@ -103,6 +88,9 @@ async def _send_album_batch(
             caption=captions, reply_to=reply_to, **kwargs,
         )
         return len(batch)
+    except FileExpiredError:
+        logger.warning("Album media expired, batch dropped", count=len(batch))
+        return 0
     except Exception as exc:
         logger.warning("Album send failed, sending individually", error=str(exc))
 
