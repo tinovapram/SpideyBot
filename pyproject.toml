@@ -4,9 +4,6 @@ version = "3.0.0"
 description = "Telegram media downloader bot (TeraBox, YouTube, TikTok, Reddit, 30+ platforms)"
 requires-python = ">=3.13"
 
-[build-system]
-requires = ["setuptools>=75"]
-build-backend = "setuptools.build_meta"
 dependencies = [
     "telethon>=1.35.0",
     "cryptg",
@@ -36,6 +33,15 @@ dependencies = [
     "curl_cffi>=0.16.0",
     "camoufox>=0.4.0",
 ]
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["core*", "downloader*", "handler*", "utils*"]
+exclude = ["tests*", "app*", "handlers*", "telegram*"]
 
 [project.optional-dependencies]
 test = [
