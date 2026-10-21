@@ -28,7 +28,6 @@ async def test_failed_job_retries_in_current_worker_with_context(
     from downloader import flow
 
     job = SimpleNamespace(id=7, user_id=42, link="https://example.com/video", site="example")
-    database_job = SimpleNamespace()
     manager = worker.DownloadManager(bot=object(), terabox_downloader=None)
     task = worker.DownloadTask(
         entry_id=job.id,
@@ -43,8 +42,6 @@ async def test_failed_job_retries_in_current_worker_with_context(
 
     monkeypatch.setattr(worker, "session_scope", _SessionScope)
     monkeypatch.setattr(worker.sessions, "get_client", lambda _user_id: None)
-    monkeypatch.setattr(worker.Q, "get_job", lambda _session, _job_id: _async_value(database_job))
-
     retry_count = 0
 
     async def retry_running_job(_session: Any, _job: Any) -> bool:
@@ -52,11 +49,7 @@ async def test_failed_job_retries_in_current_worker_with_context(
         retry_count += 1
         return True
 
-    async def complete(_session: Any, _job: Any) -> None:
-        return None
-
     monkeypatch.setattr(worker.Q, "retry_running_job", retry_running_job)
-    monkeypatch.setattr(worker.Q, "complete", complete)
 
     attempts = 0
 
@@ -72,7 +65,3 @@ async def test_failed_job_retries_in_current_worker_with_context(
     assert job.id not in manager.active_tasks
     assert attempts == 2
     assert retry_count == 1
-
-
-async def _async_value(value: Any) -> Any:
-    return value

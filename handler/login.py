@@ -121,6 +121,7 @@ def register_login_handlers(bot) -> None:
                 # Persist auth to the file session, then start the persistent client.
                 try:
                     client.session.save()
+                    sessions.secure_session_file(event.sender_id)
                 except Exception as exc:
                     logger.warning("Session save after login failed", error=str(exc))
                 await client.disconnect()

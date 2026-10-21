@@ -32,13 +32,14 @@ services:
         condition: service_healthy
     ports:
       - "6414:6414"  # gallery-dl OAuth callback
+      - "9090:9090"  # liveness, readiness, and Prometheus metrics
     volumes:
       - ./data:/app/data
       - ./user_sessions:/app/user_sessions
       - ./config/runtime:/app/config/runtime
       - gallery-dl-cache:/app/.gallery-dl
     healthcheck:
-      test: ["CMD", "pgrep", "-f", "python main.py"]
+      test: ["CMD", "/opt/venv/bin/python", "-c", "from pathlib import Path; import os; p=Path('/app/data/ready'); pid=int(p.read_text()) if p.exists() else 0; assert pid > 0; os.kill(pid, 0)"]
       interval: 60s
       timeout: 10s
       start_period: 15s

@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Any
 
-from sqlalchemy import func, select, text
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.models import QuotaUsage, User
@@ -102,48 +102,6 @@ async def _upsert_counter(
     return row
 
 
-async def _atomic_increment(
-    session: AsyncSession,
-    user_id: int,
-    period_start: date,
-    period_type: str,
-    *,
-    add_downloads: int = 0,
-    add_bytes: int = 0,
-) -> QuotaUsage:
-    """Atomically increment counters and return the updated row.
-
-    Uses ``UPDATE ... RETURNING`` so the caller sees the post-increment values
-    within the same transaction.
-    """
-    await _upsert_counter(session, user_id, period_start, period_type)
-    stmt = (
-        text(
-            """
-            UPDATE quota_usage
-               SET downloads   = downloads   + :dl,
-                   bytes_down  = bytes_down  + :bd
-             WHERE user_id      = :uid
-               AND period_start = :ps
-               AND period_type  = :pt
-            RETURNING user_id, period_start, period_type, downloads, bytes_down, bytes_up
-            """
-        )
-        .bindparams(uid=user_id, ps=period_start, pt=period_type, dl=add_downloads, bd=add_bytes)
-    )
-    result = await session.execute(stmt)
-    row = result.first()
-    assert row is not None
-    return QuotaUsage(
-        user_id=row.user_id,
-        period_start=row.period_start,
-        period_type=row.period_type,
-        downloads=row.downloads,
-        bytes_down=row.bytes_down,
-        bytes_up=row.bytes_up,
-    )
-
-
 # ── Public API ──────────────────────────────────────────────────
 
 
@@ -156,15 +114,10 @@ async def get_snapshot(session: AsyncSession, user: User) -> QuotaSnapshot:
 
     daily = await session.get(QuotaUsage, (user.id, today, "daily"))
 
-    # Count active (running) downloads for the user.
-    from core.models import DownloadJob
+    # Active jobs are process-local and intentionally reset on restart.
+    from core.queue import active_count
 
-    active = await session.scalar(
-        select(func.count()).select_from(DownloadJob).where(
-            DownloadJob.user_id == user.id,
-            DownloadJob.status == "running",
-        )
-    )
+    active = await active_count(user.id)
 
     # Read-computed referral bonus (extra daily downloads).
     from core.referral import bonus_downloads
@@ -177,7 +130,7 @@ async def get_snapshot(session: AsyncSession, user: User) -> QuotaSnapshot:
         policy=policy,
         downloads_today=daily.downloads if daily else 0,
         bytes_today=daily.bytes_down if daily else 0,
-        active_downloads=active or 0,
+        active_downloads=active,
         referral_bonus=bonus,
     )
 
@@ -214,17 +167,89 @@ async def check_quota(
     return snap
 
 
+async def reserve_download(session: AsyncSession, user: User) -> QuotaSnapshot:
+    """Atomically reserve one daily download slot before queueing a job."""
+    snap = await get_snapshot(session, user)
+    if not user.is_admin and snap.daily_bytes_remaining is not None and snap.daily_bytes_remaining <= 0:
+        raise QuotaExceeded("Daily bandwidth limit reached", snap)
+    if (
+        not user.is_admin
+        and snap.policy.concurrent_mode != "queue"
+        and snap.policy.concurrent <= snap.active_downloads
+    ):
+        raise QuotaExceeded(
+            f"Concurrent download limit reached ({snap.policy.concurrent} slots)",
+            snap,
+        )
+
+    daily_limit = None
+    if not user.is_admin and snap.policy.daily_downloads is not None:
+        daily_limit = snap.policy.daily_downloads + snap.referral_bonus
+
+    today = _today_utc()
+    await _upsert_counter(session, user.id, today, "daily")
+    stmt = text(
+        """
+        UPDATE quota_usage
+           SET downloads = downloads + 1
+         WHERE user_id = :uid
+           AND period_start = :ps
+           AND period_type = 'daily'
+           AND (:limit IS NULL OR downloads < :limit)
+        RETURNING downloads
+        """
+    ).bindparams(uid=user.id, ps=today, limit=daily_limit)
+    result = await session.execute(stmt)
+    if result.first() is None:
+        raise QuotaExceeded("Daily download limit reached", snap)
+    return await get_snapshot(session, user)
+
+
+async def release_download(session: AsyncSession, user: User) -> None:
+    """Return a previously reserved daily download slot."""
+    stmt = text(
+        """
+        UPDATE quota_usage
+           SET downloads = GREATEST(downloads - 1, 0)
+         WHERE user_id = :uid
+           AND period_start = :ps
+           AND period_type = 'daily'
+        """
+    ).bindparams(uid=user.id, ps=_today_utc())
+    await session.execute(stmt)
+
+
 async def consume(
     session: AsyncSession,
     user: User,
     *,
     bytes_downloaded: int = 0,
+    reservation: bool = False,
 ) -> None:
-    """Record a completed download: +1 download, +bytes."""
+    """Record completion bytes, using an existing admission reservation."""
+    if not reservation:
+        await reserve_download(session, user)
+
     today = _today_utc()
-    await _atomic_increment(
-        session, user.id, today, "daily", add_downloads=1, add_bytes=bytes_downloaded
-    )
+    tier = effective_tier(user.tier, user.tier_expiry, is_admin=user.is_admin)
+    byte_limit = None if user.is_admin else tier_policy(tier).daily_bytes
+    await _upsert_counter(session, user.id, today, "daily")
+    stmt = text(
+        """
+        UPDATE quota_usage
+           SET bytes_down = bytes_down + :bd
+         WHERE user_id = :uid
+           AND period_start = :ps
+           AND period_type = 'daily'
+           AND (:limit IS NULL OR bytes_down + :bd <= :limit)
+        RETURNING bytes_down
+        """
+    ).bindparams(uid=user.id, ps=today, bd=bytes_downloaded, limit=byte_limit)
+    result = await session.execute(stmt)
+    if result.first() is None:
+        if not reservation:
+            await release_download(session, user)
+        raise QuotaExceeded("Daily bandwidth limit reached")
 
 
 async def reset_daily(session: AsyncSession, user_id: int) -> int:

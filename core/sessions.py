@@ -10,6 +10,7 @@ and migrated to the new file format automatically on first use.
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import structlog
@@ -22,8 +23,14 @@ from utils import paths
 
 logger = structlog.get_logger(__name__)
 
-MAX_ACTIVE_CLIENTS = 100
+
+def _update_metrics() -> None:
+    from core.metrics import get_metrics
+
+    get_metrics().set("active_sessions", len(_active_clients))
+
 _active_clients: dict[int, TelegramClient] = {}
+_last_used: dict[int, float] = {}
 _fernet: Fernet | None = None
 
 
@@ -34,9 +41,22 @@ def session_file(user_id: int) -> Path:
     return paths.SESSIONS_DIR / f"{user_id}.session"
 
 
+def secure_session_file(user_id: int) -> None:
+    """Apply owner-only permissions after Telethon creates the SQLite file."""
+    _restrict_file(session_file(user_id))
+
+
 def legacy_file(user_id: int) -> Path:
     """Path of a legacy encrypted StringSession JSON file."""
     return paths.SESSIONS_DIR / f"{user_id}.json"
+
+
+def _restrict_file(path: Path) -> None:
+    """Best-effort owner-only permissions for session files."""
+    try:
+        path.chmod(0o600)
+    except OSError:
+        logger.warning("Unable to restrict session file permissions", path=str(path))
 
 
 def _fernet_cipher() -> Fernet:
@@ -82,6 +102,7 @@ def _string_session_to_file(session_string: str, target: Path) -> bool:
         db.auth_key = memory.auth_key
         db.save()
         db.close()
+        _restrict_file(target)
         return target.exists() and target.stat().st_size > 0
     except Exception as exc:
         logger.warning("StringSession -> file migration failed", error=str(exc))
@@ -124,6 +145,7 @@ def build_client(user_id: int) -> TelegramClient | None:
         if not migrate_legacy(user_id):
             return None
     settings = config.get_settings()
+    _restrict_file(file_path)
     return TelegramClient(
         SQLiteSession(str(file_path)),
         int(settings.tg_api_id),
@@ -143,8 +165,10 @@ def create_login_client(user_id: int) -> TelegramClient:
         except OSError:
             pass
     settings = config.get_settings()
+    session_path = session_file(user_id)
+    _restrict_file(session_path)
     return TelegramClient(
-        SQLiteSession(str(session_file(user_id))),
+        SQLiteSession(str(session_path)),
         int(settings.tg_api_id),
         settings.tg_api_hash,
     )
@@ -159,11 +183,17 @@ async def start_client(user_id: int) -> bool:
     """
     existing = _active_clients.get(user_id)
     if existing is not None and existing.is_connected():
+        _last_used[user_id] = time.monotonic()
         return True
 
-    if len(_active_clients) >= MAX_ACTIVE_CLIENTS:
-        logger.warning("Active client limit reached", limit=MAX_ACTIVE_CLIENTS)
-        return False
+    max_live = max(1, config.get_settings().session_max_live)
+    if len(_active_clients) >= max_live:
+        oldest_user = min(_last_used, key=_last_used.get, default=None)
+        if oldest_user is not None and oldest_user != user_id:
+            await stop_client(oldest_user)
+        else:
+            logger.warning("Active client limit reached", limit=max_live)
+            return False
 
     client = build_client(user_id)
     if client is None:
@@ -177,14 +207,14 @@ async def start_client(user_id: int) -> bool:
             return False
 
         _active_clients[user_id] = client
+        _last_used[user_id] = time.monotonic()
+        _update_metrics()
 
         # Imported lazily: handler.handler imports core.sessions at module level.
         # While this client is live it is the priority path for /dl and /dt, and
         # the bot side stands down so the command isn't handled twice.
         from handler.handler import get_handler
         get_handler().register_user_handlers(client)
-        await client.get_dialogs()
-
         logger.info("User client started", user_id=user_id)
         return True
     except Exception as exc:
@@ -195,22 +225,49 @@ async def start_client(user_id: int) -> bool:
 async def stop_client(user_id: int) -> bool:
     client = _active_clients.pop(user_id, None)
     if client is None:
+        _last_used.pop(user_id, None)
         return False
     try:
         await client.disconnect()
     except Exception:
         pass
+    _last_used.pop(user_id, None)
+    _update_metrics()
     logger.info("User client stopped", user_id=user_id)
     return True
 
 
 def get_client(user_id: int) -> TelegramClient | None:
     client = _active_clients.get(user_id)
-    return client if client is not None and client.is_connected() else None
+    if client is None or not client.is_connected():
+        return None
+    _last_used[user_id] = time.monotonic()
+    return client
 
 
 def is_client_active(user_id: int) -> bool:
     return get_client(user_id) is not None
+
+
+async def evict_idle_clients() -> int:
+    """Disconnect clients unused for the configured idle period."""
+    idle_seconds = max(1, config.get_settings().session_idle_seconds)
+    now = time.monotonic()
+    stale = [
+        user_id
+        for user_id in list(_active_clients)
+        if now - _last_used.get(user_id, now) >= idle_seconds
+    ]
+    for user_id in stale:
+        await stop_client(user_id)
+    if stale:
+        logger.info("Evicted idle user sessions", count=len(stale))
+    return len(stale)
+
+
+def active_count() -> int:
+    """Return the number of live user clients."""
+    return len(_active_clients)
 
 
 async def stop_all_clients() -> None:

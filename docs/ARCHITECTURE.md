@@ -5,8 +5,7 @@ System design, data model, and tier/quota specification for the 1000-user rewrit
 ## 1. Process model
 
 - **Single asyncio process** for the bot (Telethon), download workers, and scheduler.
-- **Designed for horizontal scale**: the persistent queue uses `FOR UPDATE SKIP LOCKED`,
-  so adding worker processes later requires no queue rewrite.
+- **Process-local queue**: download jobs are intentionally discarded when the process stops.
 - **Known single-process limits** (documented, not fixed in V4):
   - In-memory per-user rate limiting — for multi-worker you need Redis.
   - In-memory session LRU — a user's session lives on whichever worker claims their job.
@@ -22,8 +21,8 @@ System design, data model, and tier/quota specification for the 1000-user rewrit
 │  └────────────┘   └──────────────┘   └───────┬────────┘   │
 │                                              ▼            │
 │  ┌──────────────┐   ┌──────────────────────────────┐      │
-│  │  scheduler   │   │   persistent priority queue   │      │
-│  │ (reset/reap) │   │   (SKIP LOCKED + lease)       │      │
+│  │  scheduler   │   │ process-local priority queue │      │
+│  │ (quota sweep)│   │   (fresh after restart)       │      │
 │  └──────┬───────┘   └──────────────┬───────────────┘      │
 │         │                          ▼                      │
 │  ┌──────▼───────────────────────────────────────┐         │
@@ -33,7 +32,7 @@ System design, data model, and tier/quota specification for the 1000-user rewrit
 │  user sessions (LRU)     yt-dlp / gallery-dl / TeraBox    │
 └─────────┼─────────────────────┼───────────────────────────┘
           │                     │
-   PostgreSQL (users, quota, jobs, history)
+   PostgreSQL (users, quota, referrals)
 ```
 
 ## 2. Package layout
@@ -49,9 +48,10 @@ core/
   db.py          # async engine/session
   quota.py       # check/reserve/consume/reset (atomic)
   ratelimit.py   # per-user token bucket
-  queue.py       # persistent priority queue
+  queue.py       # process-local priority queue
   scheduler.py   # background jobs
-  metrics.py     # in-process counters
+  metrics.py     # counters + Prometheus text export
+  observability.py # /livez, /readyz, and /metrics endpoints
   sessions.py    # on-demand user session lifecycle
   bot.py         # wiring + lifecycle
   logging.py
@@ -89,38 +89,6 @@ quota_usage (
   PRIMARY KEY (user_id, period_start, period_type)
 )
 
-download_jobs (
-  id             BIGSERIAL PRIMARY KEY,
-  user_id        BIGINT NOT NULL REFERENCES users(id),
-  link           TEXT   NOT NULL,
-  site           TEXT,
-  tier           TEXT   NOT NULL,
-  priority       REAL   NOT NULL,
-  status         TEXT   NOT NULL DEFAULT 'queued',
-                 -- 'queued' | 'running' | 'done' | 'failed' | 'cancelled'
-  attempts       INT    NOT NULL DEFAULT 0,
-  total_bytes    BIGINT,
-  claim_token    UUID,                        -- worker lease
-  lease_expires  TIMESTAMPTZ,
-  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-  started_at     TIMESTAMPTZ,
-  finished_at    TIMESTAMPTZ
-)
-CREATE INDEX idx_jobs_claim ON download_jobs (status, priority, created_at);
-
-download_history (
-  id          BIGSERIAL PRIMARY KEY,
-  user_id     BIGINT NOT NULL REFERENCES users(id),
-  job_id      BIGINT REFERENCES download_jobs(id),
-  link        TEXT   NOT NULL,
-  site        TEXT,
-  filename    TEXT,
-  bytes       BIGINT,
-  status      TEXT,
-  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
-)
-CREATE INDEX idx_history_user ON download_history (user_id, created_at DESC);
-
 referrals (
   id           BIGSERIAL PRIMARY KEY,
   referrer_id  BIGINT NOT NULL REFERENCES users(id),
@@ -137,10 +105,6 @@ CREATE INDEX idx_referrals_referrer ON referrals (referrer_id);
 
 - **Quota in one table** (`quota_usage`) with a `(user_id, period_start, period_type)`
   primary key → atomic upserts, trivial rollover, no per-day tables.
-- **`download_jobs.claim_token` + `lease_expires`** → crash-safe queue: a worker leases a
-  job; if it dies, the scheduler re-queues expired leases.
-- **`download_history` separate from jobs** → retention can delete history without
-  touching queue bookkeeping.
 
 ## 4. Tier & quota specification
 
@@ -178,29 +142,14 @@ All users can access all sites — no site gating.
 request → rate-limit check (429 if exceeded)
         → quota check (daily count · daily bytes · concurrent slots)
         → enqueue job (priority = tier.priority)
-        → worker claims job (SKIP LOCKED)
+        → process-local worker claims job
         → download → upload → record bytes in quota_usage
         → release slot
 ```
 
-## 6. Persistent queue
+## 6. User session lifecycle (1000-user fix)
 
-- Heap ordering (`priority`, `created_at`) in SQL, not in memory.
-- Workers claim with:
-  ```sql
-  SELECT ... FROM download_jobs
-  WHERE status = 'queued' AND (lease_expires IS NULL OR lease_expires < now())
-  ORDER BY priority, created_at
-  FOR UPDATE SKIP LOCKED
-  LIMIT 1
-  ```
-- Each claim sets `status='running'`, a fresh `claim_token`, and `lease_expires = now() + lease_timeout`.
-- On completion/failure the worker finalizes the job; a sweeper re-queues expired leases.
-
-## 7. User session lifecycle (1000-user fix)
-
-- `_live_clients` is an **LRU with a hard cap** (e.g. 50 live clients) and an **idle
-  timeout** (e.g. 10 min).
+- `_active_clients` is an **LRU with a configured hard cap** and an **idle timeout**.
 - Sessions start **on demand** when a job needs the user's account; not on `/start`.
 - `get_dialogs()` is called only when actually needed (deferred).
 - A scheduler task sweeps idle clients every minute and disconnects them.
@@ -208,6 +157,12 @@ request → rate-limit check (429 if exceeded)
   errored.
 
 This replaces V3's "every logged-in user stays connected forever".
+
+## 7. Operations endpoints
+
+- `/livez` reports that the process is serving requests.
+- `/readyz` reports readiness after Telegram startup completes.
+- `/metrics` exposes process-local Prometheus-compatible counters and gauges.
 
 ## 8. Rate limiting
 
@@ -257,7 +212,7 @@ SPIDEY_ADMIN_IDS
 SPIDEY_MAX_CONCURRENT_DOWNLOADS
 SPIDEY_RATE_LIMIT_PER_MINUTE
 SPIDEY_SESSION_MAX_LIVE / _IDLE_SECONDS
-SPIDEY_RETENTION_DAYS
+SPIDEY_METRICS_HOST / _PORT
 SPIDEY_TIER_OVERRIDES (JSON)   # optional per-tier policy override
 ```
 

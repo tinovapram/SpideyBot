@@ -10,22 +10,15 @@ from core import scheduler
 
 @pytest.mark.asyncio
 async def test_start_scheduler_runs_maintenance_task(monkeypatch: pytest.MonkeyPatch) -> None:
-    reclaimed = asyncio.Event()
-
-    async def run_reclaim() -> None:
-        reclaimed.set()
-
     async def no_op() -> None:
         return None
 
-    monkeypatch.setattr(scheduler, "_run_reclaim", run_reclaim)
-    monkeypatch.setattr(scheduler, "_run_retention", no_op)
     monkeypatch.setattr(scheduler, "_run_quota_sweep", no_op)
     monkeypatch.setattr(scheduler, "_run_ratelimit_sweep", lambda: None)
 
     task = await scheduler.start_scheduler()
     try:
-        await asyncio.wait_for(reclaimed.wait(), timeout=1)
+        await asyncio.sleep(0.05)
         assert task.get_name() == "spideybot-scheduler"
         assert not task.done()
     finally:

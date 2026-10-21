@@ -37,7 +37,7 @@ undocumented edge cases" — the existing 96 tests are the regression net.
 | R1 | Postgres adds ops burden / not available in dev | High | Med | `docker compose` ships a `postgres` service; docs cover local setup |
 | R2 | Telethon user-session flood at scale | High | High | On-demand start + idle timeout + LRU cap + live-cap (Phase 4) |
 | R3 | Quota oversell under concurrency | Med | High | Atomic `INSERT ... ON CONFLICT` with `WHERE` guard; tests with concurrent writers |
-| R4 | Queue job loss on crash | Med | High | `SKIP LOCKED` + lease timeout + sweeper re-queue |
+| R4 | Queue job loss on crash | Certain | Low | Intentional: jobs are process-local; users resubmit after restart |
 | R5 | Per-site downloader regressions during rewrite | High | Med | Port-first, improve-second; keep V3 tests as regression net |
 | R6 | In-memory rate limit / session LRU drift across workers | Low | Med | Documented; Redis is the documented multi-worker path (out of V4 scope) |
 | R7 | Data migration from V3 loses premium state | Med | High | Migration script maps `is_premium → tier='premium'` + expiry; dry-run + verify |
@@ -78,7 +78,7 @@ undocumented edge cases" — the existing 96 tests are the regression net.
 | Config/tiers | pytest | every tier + override path |
 | Quota | pytest + concurrent writers | oversell must not happen |
 | Rate limit | pytest (fake clock) | bucket refill + 429 path |
-| Queue | pytest + two worker loops | no double-claim; lease re-queue |
+| Queue | pytest + two worker loops | no double-claim; per-user concurrency limits |
 | Sessions | pytest | LRU eviction + idle reaping |
 | Downloaders | smoke tests per adapter | URL → resolved file path |
 | Handlers | Telethon event fixtures | command surface + quota denials |

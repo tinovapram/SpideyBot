@@ -29,6 +29,7 @@ if [[ "$(id -u)" -eq 0 ]]; then
 
     # Make the runtime directories writable by the application user.
     chown -R "${APP_USER}:${APP_GROUP}" "${RUNTIME_DIRS[@]}"
+    chmod 700 "${APP_DIR}/data" "${APP_DIR}/downloads" "${APP_DIR}/user_sessions" "${APP_DIR}/config/runtime"
 
     echo "[entrypoint] Dropping privileges to ${APP_USER}..."
 

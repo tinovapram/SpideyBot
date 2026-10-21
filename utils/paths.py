@@ -17,6 +17,7 @@ DATA_DIR = PROJECT_ROOT / "data"
 SESSIONS_DIR = PROJECT_ROOT / "user_sessions"
 CONFIG_DIR = PROJECT_ROOT / "config"
 RUNTIME_CONFIG_DIR = CONFIG_DIR / "runtime"
+READY_FILE = DATA_DIR / "ready"
 
 DB_PATH = DATA_DIR / "bot_database.db"
 
@@ -29,3 +30,7 @@ def ensure_directories() -> None:
     """Create all runtime directories once at startup."""
     for directory in (DOWNLOADS_DIR, DATA_DIR, SESSIONS_DIR, RUNTIME_CONFIG_DIR):
         directory.mkdir(parents=True, exist_ok=True)
+        try:
+            directory.chmod(0o700)
+        except OSError:
+            pass

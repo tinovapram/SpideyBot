@@ -1,9 +1,8 @@
-"""In-memory task context + worker loop + manager surface.
+"""In-memory task context + process-local worker queue.
 
-Bridges the persistent :mod:`core.queue` (PostgreSQL-backed jobs) with the
-flow modules (:mod:`downloader.flow`, :mod:`downloader.terabox_flow`) that
-expect an in-memory task object carrying ``.tier``, ``.is_admin``, ``.event``,
-``.status_msg``, ``.is_cancelled`` etc.
+Bridges :mod:`core.queue` with the flow modules that expect an in-memory task
+object carrying ``.tier``, ``.is_admin``, ``.event``, ``.status_msg``, and
+``.is_cancelled``.
 
 Also exposes the manager surface that V3 handlers already call:
 ``add_task``, ``cancel_task``, ``get_queue_position``, ``active_tasks``,
@@ -27,6 +26,7 @@ from core.cookies import shared_cookies
 from core.db import session_scope
 from core.metrics import get_metrics
 from core.models import User, get_or_create_user
+from core.quota import QuotaExceeded, consume, release_download
 from core.tiers import HEAVY_SITES, effective_tier, tier_policy
 
 if TYPE_CHECKING:
@@ -111,6 +111,9 @@ class DownloadTask:
     status_msg: _MessageStub | None = None
     is_cancelled: bool = False
     job_id: int | None = None
+    downloaded_bytes: int = 0
+    completed: bool = False
+    quota_reserved: bool = False
 
     def cancel(self) -> None:
         self.is_cancelled = True
@@ -229,7 +232,7 @@ async def _append_shared_cookies(pool: Any, session: Any) -> Any:
 
 
 class DownloadManager:
-    """Manages the bridge between Telegram commands and the DB queue.
+    """Manages the bridge between Telegram commands and the process-local queue.
 
     Handlers call :meth:`add_task`, :meth:`cancel_task`, etc.
     The worker loop (started via :meth:`start`) claims and executes jobs.
@@ -252,6 +255,7 @@ class DownloadManager:
         is_premium: bool,
         is_admin: bool,
         status_msg: Any,
+        quota_reserved: bool = False,
     ) -> tuple[str, DownloadTask]:
         """Enqueue a download and return ``(status, task)``."""
         site = detect_site(link)
@@ -262,16 +266,16 @@ class DownloadManager:
             real_tier = effective_tier(user.tier, user.tier_expiry, is_admin=user.is_admin)
             if real_tier != tier:
                 tier = real_tier
-            job = await Q.enqueue(
-                session,
-                user_id=user_id,
-                link=link,
-                site=site,
-                tier=tier,
-                is_admin=is_admin,
-            )
-            await session.commit()
-            job_id = job.id
+
+        job = await Q.enqueue(
+            None,
+            user_id=user_id,
+            link=link,
+            site=site,
+            tier=tier,
+            is_admin=is_admin,
+        )
+        job_id = job.id
 
         chat_id = event.chat_id if hasattr(event, "chat_id") else event.message.chat_id
         msg_id = status_msg.id if hasattr(status_msg, "id") else status_msg.message_id
@@ -292,6 +296,7 @@ class DownloadManager:
             event=adapter,
             status_msg=_MessageStub(msg_id, send_client, chat_id),
             job_id=job_id,
+            quota_reserved=quota_reserved,
         )
         self.active_tasks[job_id] = task
         get_metrics().incr("tasks_enqueued")
@@ -302,12 +307,20 @@ class DownloadManager:
         task = self.active_tasks.get(entry_id)
         if task is not None and not task.is_cancelled:
             task.cancel()
-            async with session_scope() as session:
-                await Q.cancel(session, entry_id)
-                await session.commit()
+            if await Q.cancel(None, entry_id):
+                await self._release_quota(task)
             get_metrics().incr("tasks_cancelled")
             return True
         return False
+
+    async def _release_quota(self, task: DownloadTask) -> None:
+        if not task.quota_reserved:
+            return
+        async with session_scope() as session:
+            user = await session.get(User, task.user_id)
+            if user is not None:
+                await release_download(session, user)
+        task.quota_reserved = False
 
     def get_queue_position(self, entry_id: int) -> int:
         """1-based queue position; 0 if not found."""
@@ -369,17 +382,14 @@ class DownloadManager:
     # ── Worker loop ─────────────────────────────────────────────
 
     async def _worker_loop(self) -> None:
-        """Claim and execute jobs from the persistent queue."""
+        """Claim and execute jobs from the process-local queue."""
         logger.info("Worker loop starting")
         while self._running:
             try:
-                async with session_scope() as session:
-                    job = await Q.claim_next(session)
-                    if job is None:
-                        await session.commit()
-                        await asyncio.sleep(1)
-                        continue
-                    await session.commit()
+                job = await Q.claim_next(None)
+                if job is None:
+                    await asyncio.sleep(1)
+                    continue
                 await self._run_job(job)
             except asyncio.CancelledError:
                 break
@@ -390,28 +400,17 @@ class DownloadManager:
     async def _run_job(self, job: Any) -> None:
         """Build a task and dispatch to the appropriate flow."""
         entry_id = job.id
+        log = logger.bind(job_id=entry_id, user_id=job.user_id)
         task = self.active_tasks.get(entry_id)
         if task is None:
-            # Orphan job (crash recovery, stale retry) — no chat context
-            # to deliver results to.  Fail it without retry.
-            logger.warning("Orphan job — no active task, failing", job_id=entry_id)
-            try:
-                async with session_scope() as session:
-                    db_job = await Q.get_job(session, entry_id)
-                    if db_job is not None:
-                        await Q.fail(session, db_job, retry=False)
-                    await session.commit()
-            except Exception:
-                logger.exception("Failed to record orphan job failure", job_id=entry_id)
+            log.warning("Queue task context missing, failing job")
+            await Q.fail(None, job, retry=False)
             return
 
         # ── Check cancellation before dispatch ──────────────────
         if task.is_cancelled:
-            async with session_scope() as session:
-                db_job = await Q.get_job(session, entry_id)
-                if db_job is not None:
-                    await Q.fail(session, db_job, retry=False)
-                await session.commit()
+            await Q.fail(None, job, retry=False)
+            await self._release_quota(task)
             self.task_done(entry_id)
             return
 
@@ -447,11 +446,8 @@ class DownloadManager:
                         )
                     except Exception:
                         pass
-                async with session_scope() as session:
-                    db_job = await Q.get_job(session, entry_id)
-                    if db_job is not None:
-                        await Q.fail(session, db_job, retry=False)
-                    await session.commit()
+                await Q.fail(None, job, retry=False)
+                await self._release_quota(task)
                 self.task_done(entry_id)
                 return
         else:
@@ -482,32 +478,45 @@ class DownloadManager:
                     await run_download(task, client)
                 break
             except Exception:
-                logger.exception(
+                log.exception(
                     "Download failed",
-                    user_id=job.user_id,
                     link=job.link,
                     site=task.site,
                 )
                 try:
-                    async with session_scope() as session:
-                        db_job = await Q.get_job(session, entry_id)
-                        if db_job is None or not await Q.retry_running_job(session, db_job):
-                            self.task_done(entry_id)
-                            return
+                    if not await Q.retry_running_job(None, job):
+                        await self._release_quota(task)
+                        self.task_done(entry_id)
+                        return
                 except Exception:
-                    logger.exception("Failed to record job failure", job_id=entry_id)
+                    log.exception("Failed to record job failure")
                     return
 
-                logger.info("Retrying job in current worker", job_id=entry_id)
+                log.info("Retrying job in current worker")
                 await asyncio.sleep(1)
 
         # ── Success ─────────────────────────────────────────────
         try:
+            if not task.completed:
+                await Q.fail(None, job, retry=False)
+                await self._release_quota(task)
+                self.task_done(entry_id)
+                return
+
             async with session_scope() as session:
-                db_job = await Q.get_job(session, entry_id)
-                if db_job is not None:
-                    await Q.complete(session, db_job)
-                await session.commit()
+                user = await session.get(User, job.user_id)
+                if user is not None:
+                    await consume(
+                        session,
+                        user,
+                        bytes_downloaded=task.downloaded_bytes,
+                        reservation=task.quota_reserved,
+                    )
+            task.quota_reserved = False
+            await Q.complete(None, job, bytes_downloaded=task.downloaded_bytes)
+        except QuotaExceeded:
+            await self._release_quota(task)
+            await Q.fail(None, job, retry=False)
         except Exception:
-            logger.exception("Failed to record job completion", job_id=entry_id)
+            log.exception("Failed to record job completion")
         self.task_done(entry_id)

@@ -9,7 +9,7 @@ platforms — all from a single Telegram bot. Send a link, get the files in chat
 - **28+ platforms** — TeraBox, YouTube, Twitter/X, Instagram, TikTok, Reddit, and more
 - **Telegram-native downloads** — `/dt` pulls files directly from Telegram messages via your own session
 - **Tiered access** — Free, Pro, and Premium tiers with configurable limits
-- **Persistent queue** — PostgreSQL-backed job queue with priority scheduling
+- **In-memory queue** — process-local priority scheduling; queued jobs are cleared on restart
 - **Rate limiting** — Per-user rate limits to prevent abuse
 - **Referral system** — Earn bonus downloads by inviting friends
 - **Per-user cookies** — Encrypted per-user TeraBox session cookies
@@ -49,7 +49,7 @@ user sessions, and gallery-dl config across restarts.
 ```bash
 python -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
+pip install ".[test]"
 
 # Fetch Camoufox browser (needed for /bypass and some downloaders)
 camoufox fetch

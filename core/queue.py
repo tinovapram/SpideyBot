@@ -1,27 +1,20 @@
-"""Persistent priority download queue backed by PostgreSQL.
+"""Process-local priority queue for active downloads.
 
-Workers claim jobs atomically with ``FOR UPDATE SKIP LOCKED``.  Each claim
-sets ``status='running'``, a fresh ``claim_token``, and ``lease_expires``.
-If a worker crashes, the scheduler re-queues expired leases.
-
-Horizontal-scale ready: multiple worker processes can share the same queue
-with no code changes.
+Jobs intentionally disappear when the process stops. User accounts, quotas,
+cookies, and Telegram session files remain persistent elsewhere.
 """
 
 from __future__ import annotations
 
-import uuid
-from datetime import datetime, timedelta, timezone
-
-from sqlalchemy import func, select, text, update
-from sqlalchemy.ext.asyncio import AsyncSession
+import asyncio
+import itertools
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any
 
 from core.config import get_settings
 from core.metrics import get_metrics
-from core.models import DownloadJob
 from core.tiers import PRIORITY_ADMIN, tier_policy
-
-# ── Status constants ────────────────────────────────────────────
 
 QUEUED = "queued"
 RUNNING = "running"
@@ -29,250 +22,163 @@ DONE = "done"
 FAILED = "failed"
 CANCELLED = "cancelled"
 
+_ids = itertools.count(1)
+_jobs: dict[int, "Job"] = {}
+_lock = asyncio.Lock()
 
-# ── Enqueue ────────────────────────────────────────────────────
+
+@dataclass
+class Job:
+    """In-memory download job. It is never written to the database."""
+
+    id: int
+    user_id: int
+    link: str
+    site: str | None
+    tier: str
+    priority: float
+    status: str = QUEUED
+    attempts: int = 0
+    total_bytes: int | None = None
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
 
 
 async def enqueue(
-    session: AsyncSession,
+    _session: Any,
     *,
     user_id: int,
     link: str,
     site: str | None = None,
     tier: str = "free",
     is_admin: bool = False,
-) -> DownloadJob:
-    """Insert a new job and return it."""
-    priority = PRIORITY_ADMIN if is_admin else tier_policy(tier).priority
-    job = DownloadJob(
+) -> Job:
+    """Add a job to this process's queue."""
+    job = Job(
+        id=next(_ids),
         user_id=user_id,
         link=link,
         site=site,
         tier=tier,
-        priority=priority,
-        status=QUEUED,
-        attempts=0,
+        priority=PRIORITY_ADMIN if is_admin else tier_policy(tier).priority,
     )
-    session.add(job)
-    await session.flush()
+    async with _lock:
+        _jobs[job.id] = job
+    get_metrics().incr("tasks_enqueued")
+    await _update_gauges()
     return job
 
 
-# ── Claim (worker) ─────────────────────────────────────────────
+async def claim_next(_session: Any) -> Job | None:
+    """Claim the highest-priority queued job in this process."""
+    async with _lock:
+        active_by_user: dict[int, int] = {}
+        for running_job in _jobs.values():
+            if running_job.status == RUNNING:
+                active_by_user[running_job.user_id] = active_by_user.get(running_job.user_id, 0) + 1
 
-
-async def claim_next(session: AsyncSession) -> DownloadJob | None:
-    """Atomically claim the next runnable job.
-
-    Uses ``FOR UPDATE SKIP LOCKED`` so multiple workers never grab the same
-    job.  Returns ``None`` when the queue is empty.
-    """
-    settings = get_settings()
-    lease_seconds = settings.job_lease_seconds
-
-    # ponytail: per-user slot cap at claim time (best-effort — two workers
-    # racing on the same user can overshoot by one; add pg_advisory_xact_lock
-    # if exactness matters).
-    stmt = text(
-        """
-        UPDATE download_jobs SET
-            status        = 'running',
-            claim_token   = :token,
-            lease_expires = now() + make_interval(secs => :lease),
-            started_at    = coalesce(started_at, now()),
-            attempts      = attempts + 1
-          WHERE id = (
-            SELECT id FROM download_jobs
-             WHERE status = 'queued'
-               AND (lease_expires IS NULL OR lease_expires < now())
-               AND (
-                    SELECT count(*) FROM download_jobs j2
-                     WHERE j2.user_id = download_jobs.user_id
-                       AND j2.status = 'running'
-               ) < CASE download_jobs.tier
-                        WHEN 'pro'     THEN :pro
-                        WHEN 'premium' THEN :prem
-                        ELSE :free
-                    END
-             ORDER BY priority, created_at
-             FOR UPDATE SKIP LOCKED
-             LIMIT 1
-          )
-        RETURNING id, user_id, link, site, tier, priority, status, attempts,
-                  claim_token, lease_expires, created_at, started_at, finished_at
-        """
-    ).bindparams(
-        token=uuid.uuid4(),
-        lease=lease_seconds,
-        free=settings.tier_free_concurrent,
-        pro=settings.tier_pro_concurrent,
-        prem=settings.tier_premium_concurrent,
-    )
-
-    result = await session.execute(stmt)
-    row = result.first()
-    if row is None:
-        return None
-
+        candidates = [
+            job
+            for job in _jobs.values()
+            if (
+                job.status == QUEUED
+                and active_by_user.get(job.user_id, 0) < tier_policy(job.tier).concurrent
+            )
+        ]
+        if not candidates:
+            return None
+        job = min(candidates, key=lambda item: (item.priority, item.created_at, item.id))
+        job.status = RUNNING
+        job.attempts += 1
+        job.started_at = job.started_at or datetime.now(timezone.utc)
     get_metrics().incr("queue_claims")
-
-    # Return the session-tracked instance (not a detached copy) so later
-    # mutations in complete()/fail() actually flush to the DB.  The raw
-    # UPDATE already committed the new state; refresh() reloads it into the
-    # identity-mapped object.
-    job = await session.get(DownloadJob, row.id)
-    await session.refresh(job)
+    await _update_gauges()
     return job
 
 
-# ── Finalize ────────────────────────────────────────────────────
+async def _update_gauges() -> None:
+    async with _lock:
+        metrics = get_metrics()
+        metrics.set("queue_depth", sum(job.status == QUEUED for job in _jobs.values()))
+        metrics.set("active_downloads", sum(job.status == RUNNING for job in _jobs.values()))
+
+
+async def active_count(user_id: int) -> int:
+    async with _lock:
+        return sum(
+            job.user_id == user_id and job.status == RUNNING
+            for job in _jobs.values()
+        )
 
 
 async def complete(
-    session: AsyncSession,
-    job: DownloadJob,
+    _session: Any,
+    job: Job,
     *,
     bytes_downloaded: int | None = None,
     filename: str | None = None,
 ) -> None:
-    """Mark a job done, write history, and record metrics."""
+    """Mark an in-memory job complete."""
     job.status = DONE
     job.finished_at = datetime.now(timezone.utc)
     job.total_bytes = bytes_downloaded
-
     get_metrics().incr("downloads_completed")
+    get_metrics().record_download(
+        job.site,
+        (job.finished_at - (job.started_at or job.created_at)).total_seconds(),
+    )
     if bytes_downloaded:
         get_metrics().incr("bytes_downloaded", bytes_downloaded)
+    await _update_gauges()
 
 
-async def fail(
-    session: AsyncSession,
-    job: DownloadJob,
-    *,
-    retry: bool = True,
-) -> bool:
-    """Mark a job failed.  If *retry* and attempts < max, re-queue it.
-
-    Returns ``True`` when the job was re-queued for retry.
-    """
+async def fail(_session: Any, job: Job, *, retry: bool = True) -> bool:
+    """Fail a job or put it back in the process-local queue."""
     settings = get_settings()
     job.finished_at = datetime.now(timezone.utc)
-
     if retry and job.attempts < settings.job_max_attempts:
         job.status = QUEUED
-        job.claim_token = None
-        job.lease_expires = None
-        job.started_at = None
         get_metrics().incr("downloads_failed")
+        get_metrics().record_failure(job.site)
+        await _update_gauges()
         return True
-
     job.status = FAILED
     get_metrics().incr("downloads_failed")
+    get_metrics().record_failure(job.site)
+    await _update_gauges()
     return False
 
 
-async def retry_running_job(session: AsyncSession, job: DownloadJob) -> bool:
-    """Keep a failed job claimed while the current worker retries it.
-
-    Returning the job to the shared queue would allow another process to
-    claim it without the in-memory Telegram message context needed to deliver
-    the result.
-    """
+async def retry_running_job(_session: Any, job: Job) -> bool:
+    """Retry a failed job without making it visible outside this process."""
     settings = get_settings()
-    now = datetime.now(timezone.utc)
     get_metrics().incr("downloads_failed")
-
+    get_metrics().incr("download_retries")
     if job.attempts >= settings.job_max_attempts:
         job.status = FAILED
-        job.finished_at = now
-        job.claim_token = None
-        job.lease_expires = None
+        job.finished_at = datetime.now(timezone.utc)
         return False
-
     job.attempts += 1
+    job.status = RUNNING
     job.finished_at = None
-    job.lease_expires = now + timedelta(seconds=settings.job_lease_seconds)
     return True
 
 
-async def cancel(session: AsyncSession, job_id: int) -> bool:
-    """Cancel a queued job.  Returns ``True`` if the job was queued."""
-    result = await session.execute(
-        update(DownloadJob)
-        .where(DownloadJob.id == job_id, DownloadJob.status == QUEUED)
-        .values(status=CANCELLED, finished_at=datetime.now(timezone.utc))
-    )
-    if result.rowcount:
-        get_metrics().incr("downloads_cancelled")
-    return (result.rowcount or 0) > 0
+async def cancel(_session: Any, job_id: int) -> bool:
+    async with _lock:
+        job = _jobs.get(job_id)
+        if job is None or job.status != QUEUED:
+            return False
+        job.status = CANCELLED
+        job.finished_at = datetime.now(timezone.utc)
+    get_metrics().incr("downloads_cancelled")
+    await _update_gauges()
+    return True
 
 
-async def cancel_user_queued(session: AsyncSession, user_id: int) -> int:
-    """Cancel all queued jobs for a user.  Returns count cancelled."""
-    result = await session.execute(
-        update(DownloadJob)
-        .where(DownloadJob.user_id == user_id, DownloadJob.status == QUEUED)
-        .values(status=CANCELLED, finished_at=datetime.now(timezone.utc))
-    )
-    count = result.rowcount or 0
-    if count:
-        get_metrics().incr("downloads_cancelled", count)
-    return count
-
-
-# ── Reclaim (scheduler) ─────────────────────────────────────────
-
-
-async def reclaim_expired(session: AsyncSession) -> int:
-    """Re-queue jobs whose lease has expired (worker crash recovery).
-
-    Returns the number of jobs re-queued.
-    """
-    result = await session.execute(
-        update(DownloadJob)
-        .where(
-            DownloadJob.status == RUNNING,
-            DownloadJob.lease_expires < datetime.now(timezone.utc),
-        )
-        .values(
-            status=QUEUED,
-            claim_token=None,
-            lease_expires=None,
-            started_at=None,
-        )
-    )
-    count = result.rowcount or 0
-    if count:
-        get_metrics().incr("queue_reclaims", count)
-    return count
-
-
-# ── Queries ─────────────────────────────────────────────────────
-
-
-async def get_job(session: AsyncSession, job_id: int) -> DownloadJob | None:
-    """Fetch a job by id."""
-    return await session.get(DownloadJob, job_id)
-
-
-async def user_active_count(session: AsyncSession, user_id: int) -> int:
-    """Count queued + running jobs for a user."""
-    result = await session.scalar(
-        select(func.count())
-        .select_from(DownloadJob)
-        .where(
-            DownloadJob.user_id == user_id,
-            DownloadJob.status.in_([QUEUED, RUNNING]),
-        )
-    )
-    return result or 0
-
-
-async def queue_depth(session: AsyncSession) -> int:
-    """Total queued jobs (for /stats)."""
-    result = await session.scalar(
-        select(func.count())
-        .select_from(DownloadJob)
-        .where(DownloadJob.status == QUEUED)
-    )
-    return result or 0
+async def clear() -> None:
+    """Clear all process-local jobs, primarily for tests and shutdown."""
+    async with _lock:
+        _jobs.clear()
+    await _update_gauges()

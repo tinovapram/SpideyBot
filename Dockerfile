@@ -44,12 +44,13 @@ RUN apt-get update \
 
 WORKDIR /build
 
-# ── Dependency files first ─────────────────────────────────────────
+# ── Install from the project manifest ─────────────────────────────
 #
-# This layer is cached as long as requirements.txt doesn't change.
-# Application source changes will therefore NOT reinstall dependencies.
+# pyproject.toml is the single dependency source for local and container
+# environments. The builder needs the source tree because it installs the
+# project itself as a package.
 
-COPY requirements.txt .
+COPY . .
 
 # ── Create venv and install dependencies ───────────────────────────
 #
@@ -61,7 +62,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         --python-preference only-system \
     && uv pip install \
         --python /opt/venv/bin/python \
-        -r requirements.txt
+        .
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -99,7 +100,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 #
 # No compilers or development headers here.
 #
-# procps provides pgrep for the Docker healthcheck.
+# procps provides process tools used by the container healthcheck.
 # gosu is used by entrypoint.sh for the one-time privilege drop.
 
 RUN set -eux; \
@@ -187,13 +188,6 @@ RUN chown -R spideybot:spideybot \
 
 WORKDIR /app
 
-# Application code is copied LAST.
-#
-# Changes to application source therefore don't invalidate:
-#   - apt layer
-#   - Python environment
-#   - Camoufox browser
-
 COPY --chown=spideybot:spideybot . .
 
 
@@ -246,7 +240,7 @@ HEALTHCHECK \
     --timeout=5s \
     --start-period=20s \
     --retries=3 \
-    CMD pgrep -f "python.*main.py" > /dev/null || exit 1
+    CMD /opt/venv/bin/python -c "from pathlib import Path; import os; p=Path('/app/data/ready'); pid=int(p.read_text()) if p.exists() else 0; assert pid > 0; os.kill(pid, 0)" || exit 1
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -254,3 +248,5 @@ HEALTHCHECK \
 # ════════════════════════════════════════════════════════════════════
 
 ENTRYPOINT ["/app/entrypoint.sh"]
+
+EXPOSE 6414 9090

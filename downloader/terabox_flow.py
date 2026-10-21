@@ -145,6 +145,7 @@ async def run_terabox(task, client, downloader) -> None:
         if task.is_cancelled:
             await status.cleanup_close("❌ **SpideyBot:** Download cancelled.", edit_only=True)
         elif sent > 0:
+            task.completed = True
             has_failures = len(failed) > 0
             text = (
                 f"✅ **SpideyBot: Done!** Sent {sent}/{len(files)} files "
@@ -196,6 +197,7 @@ async def _pipeline(task, client, downloader, files, output_dir, status) -> tupl
                     failed.append((tb_file.filename, "empty file (0 bytes)"))
                 else:
                     await ready.put((path, tb_file.filename))
+                    task.downloaded_bytes += os.path.getsize(path)
                     downloaded += 1
             except Exception as exc:
                 failed.append((tb_file.filename, str(exc) or type(exc).__name__))

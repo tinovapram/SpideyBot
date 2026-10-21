@@ -8,17 +8,17 @@
 1. Handle **1000 active users** without degrading under burst load.
 2. Replace the boolean `is_premium` model with a **data-driven tier + quota** system.
 3. Full rewrite of core **and** all site downloaders.
-4. Add persistent queue, rate limiting, usage history, stats, retry, dedupe, retention.
+4. Add in-memory queue, rate limiting, stats, retry, and dedupe.
 
 ## Scope decisions (locked)
 
 | Decision | Choice |
 |:--|:--|
 | Tiers | `free`, `pro`, `premium` (+ admin bypass) |
-| Quota dimensions | per-file size · per-link total size · daily count · daily bandwidth · monthly bandwidth · concurrent · site gating · priority · history retention |
+| Quota dimensions | per-file size · per-link total size · daily count · daily bandwidth · monthly bandwidth · concurrent · site gating · priority |
 | Storage | PostgreSQL (async SQLAlchemy 2.0 + asyncpg) |
 | Rewrite | Everything — core + per-site adapters |
-| Extras | persistent queue · per-user rate limiting · `/stats` · `/quota` · `/history` · retry/backoff · dedupe · retention |
+| Extras | in-memory queue · per-user rate limiting · `/stats` · `/quota` · retry/backoff · dedupe |
 | Referral | deep link `?start=<code>`, reward on invitee's first successful download |
 | Out of scope | batch/multi-link · playlist support |
 
@@ -27,7 +27,7 @@
 ### Phase 0 — Foundations
 - [ ] `config.py` → pydantic-settings, typed, env-prefixed (`SPIDEY_*`)
 - [ ] `tiers.py` → tier table + quota policies (single source of truth)
-- [ ] `models.py` → ORM schema (users, quota_usage, download_jobs, history, referrals)
+- [ ] `models.py` → ORM schema (users, quota_usage, referrals)
 - [ ] `db.py` → async engine + session factory
 - [ ] Alembic migrations (baseline + forward-only)
 - [ ] `utils/paths.py` → dirs + data layout
@@ -42,15 +42,15 @@
 - **Done when**: unit tests prove quota decrements/resets and referral credit are correct.
 
 ### Phase 2 — Queue & scheduler
-- [ ] `core/queue.py` → persistent priority queue (`FOR UPDATE SKIP LOCKED` + lease)
-- [ ] `core/scheduler.py` → background jobs (quota reset, idle sweep, retention)
-- [ ] `core/metrics.py` → in-process counters for `/stats`
-- **Done when**: jobs survive restart; two workers can share a queue safely.
+- [x] `core/queue.py` → process-local priority queue (fresh after restart)
+- [x] `core/scheduler.py` → background jobs (quota reset, rate-limit sweep, idle session sweep)
+- [x] `core/metrics.py` → in-process counters plus `/metrics` export
+- **Done when**: jobs are isolated to the current process and clear on restart.
 
 ### Phase 3 — Downloader core
 - [ ] `downloader/base.py` → `BaseDownloader` (async, quota-aware)
 - [ ] `downloader/registry.py` → host → adapter registry + tier gating
-- [ ] `downloader/flow.py` → orchestration (resolve → download → upload → history)
+- [ ] `downloader/flow.py` → orchestration (resolve → download → upload)
 - [ ] `downloader/engines.py` → yt-dlp / gallery-dl wrappers
 - [ ] `downloader/terabox*.py` → port TeraBox (transfer backends, account pool)
 - [ ] Port all per-site adapters (`downloader/site/*.py`)
@@ -62,7 +62,7 @@
 - **Done when**: max concurrent live user clients is bounded and idle clients are reaped.
 
 ### Phase 5 — Handlers
-- [ ] `handler/user.py` → `/start /stop /help /dl /dt /cancel /quota /history /sites /referral`
+- [ ] `handler/user.py` → `/start /stop /help /dl /dt /cancel /quota /sites /referral`
 - [ ] `/start` deep-link parsing: `?start=<code>` → record referral
 - [ ] `handler/admin.py` → `/addtier /settier /setquota /resetquota /stats /ban`
 - [ ] `handler/outgoing.py` → progress / upload status
@@ -71,7 +71,7 @@
 ### Phase 6 — Extras
 - [ ] Retry with exponential backoff
 - [ ] Duplicate-link detection (hash of normalized link within window)
-- [ ] Retention policy (auto-clean `downloads/` + history)
+- [ ] Retention policy (auto-clean `downloads/`)
 - [ ] `/stats` dashboard
 - **Done when**: all extra features have tests.
 
@@ -100,7 +100,7 @@
 |:--|:--|
 | M1: Foundations | config + schema migrate cleanly |
 | M2: Data layer | quota + rate limit unit-tested |
-| M3: Queue | persistent queue survives restart |
+| M3: Queue | process-local queue starts fresh after restart |
 | M4: Downloader | all adapters smoke-test green |
 | M5: Sessions | live-client cap + idle reaping |
 | M6: Handlers | full command surface wired |

@@ -63,7 +63,6 @@ class Settings(BaseSettings):
     max_concurrent_downloads: int = 20
 
     # ── Queue / jobs ─────────────────────────────────────────────
-    job_lease_seconds: int = 300
     job_max_attempts: int = 3
 
     # ── Admin ────────────────────────────────────────────────────
@@ -76,9 +75,11 @@ class Settings(BaseSettings):
     session_max_live: int = 50
     session_idle_seconds: int = 600
 
-    # ── Retention ────────────────────────────────────────────────
-    downloads_retention_days: int = 3
+    # ── Observability ───────────────────────────────────────────
+    metrics_host: str = "0.0.0.0"
+    metrics_port: int = 9090
 
+    # ── Retention ────────────────────────────────────────────────
     # ── Bot behavior defaults ────────────────────────────────────
     default_timer_media: bool = True
     default_magic_word: str = "WOW"

@@ -61,6 +61,7 @@ async def run_download(task, client) -> None:
         return
 
     if sent > 0:
+        task.completed = True
         await status.cleanup_close(f"✅ **SpideyBot: Done!** Sent {sent} file(s).")
     else:
         await status.cleanup_close("❌ **SpideyBot:** No files were successfully sent.", edit_only=True)
@@ -258,6 +259,8 @@ async def _send_all_at_once(task, client, downloaded_files, status) -> int:
     ]
     if not media_files:
         return 0
+
+    task.downloaded_bytes += sum(os.path.getsize(fp) for fp in media_files)
 
     media, captions = [], []
     upload_cb = status.bytes_cb("ul", "📤", "Uploading")

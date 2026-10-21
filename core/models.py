@@ -3,21 +3,17 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from uuid import UUID
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
     Date,
     DateTime,
-    Float,
     ForeignKey,
-    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
-    Uuid,
     func,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -62,51 +58,6 @@ class QuotaUsage(Base):
     downloads: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     bytes_down: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     bytes_up: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
-
-
-class DownloadJob(Base):
-    """A queued download — the persistent priority queue."""
-
-    __tablename__ = "download_jobs"
-    __table_args__ = (Index("idx_jobs_claim", "status", "priority", "created_at"),)
-
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id"), index=True)
-    link: Mapped[str] = mapped_column(Text, nullable=False)
-    site: Mapped[str | None] = mapped_column(String(40), nullable=True)
-    tier: Mapped[str] = mapped_column(String(20), nullable=False, default="free")
-    priority: Mapped[float] = mapped_column(Float, nullable=False, default=2.0)
-    status: Mapped[str] = mapped_column(String(20), nullable=False, default="queued", index=True)
-    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    total_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    claim_token: Mapped[UUID | None] = mapped_column(Uuid, nullable=True)
-    lease_expires: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-
-
-class DownloadHistory(Base):
-    """User-facing download history (also drives /history and retention)."""
-
-    __tablename__ = "download_history"
-    __table_args__ = (Index("idx_history_user", "user_id", "created_at"),)
-
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id"), index=True)
-    job_id: Mapped[int | None] = mapped_column(
-        BigInteger, ForeignKey("download_jobs.id"), nullable=True
-    )
-    link: Mapped[str] = mapped_column(Text, nullable=False)
-    site: Mapped[str | None] = mapped_column(String(40), nullable=True)
-    filename: Mapped[str | None] = mapped_column(Text, nullable=True)
-    bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    status: Mapped[str] = mapped_column(String(20), nullable=False, default="done")
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
 
 
 class Referral(Base):

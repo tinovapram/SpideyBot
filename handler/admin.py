@@ -13,6 +13,7 @@ from core import config
 from core.config import get_settings, is_admin
 from core.db import session_scope
 from core.models import User, get_or_create_user
+from core.metrics import get_metrics
 
 logger = structlog.get_logger(__name__)
 
@@ -27,12 +28,14 @@ async def stats_handler(event):
         raise events.StopPropagation
     try:
         from core.bot import download_manager as dm
-        running = sum(1 for t in dm.active_tasks.values() if not t.is_cancelled)
-        cancelled = sum(1 for t in dm.active_tasks.values() if t.is_cancelled)
+        metrics = get_metrics().snapshot()
         lines = [
             "**Live Stats**",
-            f"  Running: {running}",
-            f"  Cancelled: {cancelled}",
+            f"  Active downloads: {metrics['active_downloads']}",
+            f"  Queue depth: {metrics['queue_depth']}",
+            f"  Active sessions: {metrics['active_sessions']}",
+            f"  Completed: {metrics['downloads_completed']}",
+            f"  Failed: {metrics['downloads_failed']}",
         ]
         await event.client.send_message(event.chat_id, "\n".join(lines))
     except Exception as exc:

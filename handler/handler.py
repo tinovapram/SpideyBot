@@ -31,7 +31,7 @@ from core import sessions
 from core.config import get_settings, is_admin
 from core.db import session_scope
 from core.models import User, get_or_create_user
-from core.quota import check_quota, get_snapshot, QuotaExceeded
+from core.quota import get_snapshot, release_download, reserve_download, QuotaExceeded
 from core.referral import referral_stats
 from core.tiers import (
     HEAVY_SITES, size_limit,
@@ -173,7 +173,7 @@ class Handler:
             user = await get_or_create_user(session, user_id, _sender_username(event))
             is_premium = user.is_admin or user.tier in ("pro", "premium")
             try:
-                await check_quota(session, user)
+                await reserve_download(session, user)
             except QuotaExceeded as exc:
                 detail = ""
                 snap = exc.snapshot
@@ -186,14 +186,22 @@ class Handler:
                 )
                 return
 
-        status_msg = await event.client.send_message(event.chat_id, "⏳ **SpideyBot:** Queuing download…",reply_to=event.message)
-        # add_task returns (status, task) — the id lives on the task.
-        _, task = await self.manager.add_task(
-            user_id, event, link,
-            is_premium=is_premium,
-            is_admin=is_admin(user_id),
-            status_msg=status_msg,
-        )
+        try:
+            status_msg = await event.client.send_message(event.chat_id, "⏳ **SpideyBot:** Queuing download…",reply_to=event.message)
+            # add_task returns (status, task) — the id lives on the task.
+            _, task = await self.manager.add_task(
+                user_id, event, link,
+                is_premium=is_premium,
+                is_admin=is_admin(user_id),
+                status_msg=status_msg,
+                quota_reserved=True,
+            )
+        except Exception:
+            async with session_scope() as session:
+                user = await session.get(User, user_id)
+                if user is not None:
+                    await release_download(session, user)
+            raise
         position = self.manager.get_queue_position(task.entry_id)
         if position > 0:
             await status_msg.edit(

@@ -4,6 +4,47 @@ version = "3.0.0"
 description = "Telegram media downloader bot (TeraBox, YouTube, TikTok, Reddit, 30+ platforms)"
 requires-python = ">=3.13"
 
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+dependencies = [
+    "telethon>=1.35.0",
+    "cryptg",
+    "hachoir",
+    "pillow",
+    "python-dotenv>=1.0.1",
+    "pydantic>=2.7.0",
+    "pydantic-settings>=2.0.0",
+    "structlog>=24.1.0",
+    "requests>=2.31.0",
+    "requests[socks]",
+    "PySocks",
+    "aiohttp>=3.9.0",
+    "beautifulsoup4",
+    "cryptography>=42.0.0",
+    "SQLAlchemy[asyncio]>=2.0.0",
+    "asyncpg>=0.29.0",
+    "alembic>=1.13.0",
+    "gallery-dl",
+    "yt-dlp[curl-cffi]",
+    "brotli",
+    "mutagen",
+    "websockets",
+    "cyberdrop-dl-patched",
+    "praw",
+    "pycryptodomex",
+    "curl_cffi>=0.16.0",
+    "camoufox>=0.4.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "pytest-asyncio",
+    "ruff",
+    "pyright",
+]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

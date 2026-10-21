@@ -18,7 +18,7 @@ Plan only. No application code or dependency files have been changed. Implementa
    - Keep the project's Python `>=3.13` requirement intact unless compatibility findings require a decision.
 
 2. **Update dependencies**
-   - Replace Telethon and `cryptg` in `requirements.txt` with Kurigram and `tgcrypto-pyrofork`.
+   - Replace Telethon and `cryptg` in `pyproject.toml` with Kurigram and `tgcrypto-pyrofork`.
    - Add `winuvloop` with an appropriate Windows-only environment marker if its packaging supports that installation pattern.
 
 3. **Port client startup and lifecycle**
@@ -51,7 +51,7 @@ Plan only. No application code or dependency files have been changed. Implementa
 
 ## Likely files to update
 
-- `requirements.txt`
+- `pyproject.toml`
 - `core/bot.py`
 - `core/sessions.py`
 - `core/worker.py`
