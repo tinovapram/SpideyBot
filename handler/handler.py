@@ -25,7 +25,6 @@ import re
 
 import structlog
 from telethon import TelegramClient, events
-from telethon.tl.custom import Button
 
 from core import sessions
 from core.config import get_settings, is_admin
@@ -47,20 +46,13 @@ from downloader.telegram import (
 from utils.files import prepare_media
 from utils.paths import DOWNLOADS_DIR
 from utils.progress import StatusMessage
+from utils.urls import validate_public_url
 
 logger = structlog.get_logger(__name__)
 
 # ── pricing / copy ────────────────────────────────────────────────────────────
 
 _FREE_NOTE = "🆓 Free tier: one file at a time, size limit per download."
-_PRO_NOTE = (
-    "✨ Pro — ⬆️ higher limits + faster queues.\n"
-    "    💰 Upgrade: /upgrade"
-)
-_PREMIUM_NOTE = (
-    "💎 Premium — ⬆️ highest limits + priority queue.\n"
-    "    💰 Upgrade: /upgrade"
-)
 
 _HELP_HEADER = (
     "**Welcome to SpideyBot**\n"
@@ -73,7 +65,7 @@ _HELP_COMMANDS = """
     /start  — Sign up or refresh your status
     /help   — Show this help guide
     /dl *URL*  — Download a file
-    /dt *URL*  — Download and auto-split into 1 GB chunks
+    /dt *t.me link* — Download from a Telegram message (needs /login)
     /cancel *ID*  — Cancel a queued download
     /status — View your active downloads
     /account — Account & session status
@@ -181,6 +173,16 @@ class Handler:
     async def _enqueue_download(self, event, link: str) -> None:
         """Queue *link* for the sender and report back the queue position."""
         user_id = event.sender_id
+        try:
+            link = await validate_public_url(link)
+        except ValueError as exc:
+            await event.client.send_message(
+                event.chat_id,
+                f"⚠️ **SpideyBot:** {exc}",
+                reply_to=event.message,
+            )
+            return
+
         async with session_scope() as session:
             user = await get_or_create_user(session, user_id, _sender_username(event))
             is_premium = user.is_admin or user.tier in ("pro", "premium")
@@ -375,10 +377,7 @@ class Handler:
         if user.tier == "free" and not is_admin(user_id):
             lines.append(_FREE_NOTE)
         lines.append(_HELP_COMMANDS)
-        buttons = [
-            [Button.url("⭐ Upgrade", "https://t.me/SpideyBot?start=upgrade")],
-        ]
-        await event.client.send_message(event.chat_id, "\n".join(lines), buttons=buttons)
+        await event.client.send_message(event.chat_id, "\n".join(lines))
         raise events.StopPropagation
 
     # ── /help ─────────────────────────────────────────────────────────────────

@@ -1,4 +1,4 @@
-﻿# SpideyBot V4 — Telegram Media Downloader Bot
+﻿# SpideyBot — Telegram Media Downloader Bot
 
 Download media from **TeraBox**, **Twitter/X**, **Instagram**, **TikTok**,
 **YouTube**, **Reddit**, **Bluesky**, **Pinterest**, **Spotify**, and 28+
@@ -25,7 +25,7 @@ SpideyBot/
 ├── core/              # config, database, queue, sessions, tiers, referral
 ├── downloader/        # downloaders (base, registry, gallery-dl, TeraBox, per-site)
 ├── utils/             # paths, files, formatting, progress, Telegram helpers
-├── handler/           # Telegram handlers (user, admin, login, outgoing, setting)
+├── handler/           # Telegram handlers (handler, admin, login, setting, bypass)
 ├── migrations/        # Alembic database migrations
 ├── downloads/         # runtime download staging (gitignored)
 ├── config/            # gallery-dl / yt-dlp config templates
@@ -46,23 +46,27 @@ user sessions, and gallery-dl config across restarts.
 
 ## Quick start (local)
 
+[uv](https://docs.astral.sh/uv/) is used by CI and the Docker build; `uv.lock` pins every
+dependency.
+
 ```bash
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
-pip install ".[test]"
+uv sync --frozen --extra test     # creates .venv from uv.lock
 
 # Fetch Camoufox browser (needed for /bypass and some downloaders)
-camoufox fetch
+uv run camoufox fetch
 
 # Start PostgreSQL (Docker or local)
 docker compose up -d postgres
 
 # Apply database migrations
-alembic upgrade head
+uv run alembic upgrade head
 
 # Run the bot
-python main.py
+uv run python main.py
 ```
+
+Prefer pip? `python -m venv .venv && source .venv/bin/activate && pip install ".[test]"`
+(or `.venv\Scripts\activate` on Windows) works too, but will not honour `uv.lock`.
 
 ## Configuration
 
@@ -74,19 +78,36 @@ All settings use the `SPIDEY_` env prefix. Copy `.env.example` to `.env` and fil
 | `SPIDEY_TG_API_HASH` | Yes | Telegram API hash |
 | `SPIDEY_TG_BOT_TOKEN` | Yes | Bot token from [@BotFather](https://t.me/BotFather) |
 | `SPIDEY_DATABASE_URL` | Yes | PostgreSQL connection string |
-| `SPIDEY_SESSION_ENCRYPT_KEY` | Yes | Fernet key for cookie encryption |
+| `SPIDEY_SESSION_ENCRYPT_KEY` | Yes | Fernet key for TeraBox cookies and legacy session files |
 | `SPIDEY_ADMIN_IDS` | Yes | Comma-separated Telegram user IDs |
 | `SPIDEY_TERABOX_COOKIES` | No | TeraBox cookie(s) — single or `\|`-delimited for multi-account |
 
+Unknown `SPIDEY_*` keys are logged at startup instead of being silently ignored, so a typo in
+`.env` is visible in the logs.
+
+### Security notes
+
+- `user_sessions/<user id>.session` files are **plaintext** Telethon SQLite databases. They are
+  created with owner-only permissions, but they are not encrypted at rest — protect the volume
+  (or the host) accordingly.
+- `SPIDEY_SESSION_ENCRYPT_KEY` encrypts per-user TeraBox cookies and decrypts legacy string
+  sessions; it does not encrypt the file sessions above.
+- `/dl` links are rejected when they resolve to private, loopback or link-local addresses.
+  Redirects followed inside yt-dlp / gallery-dl are outside that check, so keep the container's
+  egress restricted if the bot is exposed to untrusted users.
+
 ## User tiers
 
-| Tier | Files/day | Size limit | Daily bandwidth | Monthly | Concurrency | Sites |
-|------|-----------|------------|-----------------|---------|-------------|-------|
-| Free | 10 | 100 MB | 1 GB | 20 GB | 1 | Social |
-| Pro | 50 | 2 GB | 25 GB | 500 GB | 3 | Social + Video |
-| Premium | 200 | 10 GB | 100 GB | 2 TB | 8 | All |
+| Tier | Downloads/day | Per-link size | Daily bandwidth | Concurrency | Queue priority |
+|------|---------------|---------------|-----------------|-------------|----------------|
+| Free | 10 | 500 MB | 1 GB | 1 | 2.0 |
+| Pro | 50 | 10 GB | 25 GB | 3 | 1.0 |
+| Premium | 200 | Unlimited | 100 GB | 5 | 0.5 |
 
-Admins bypass all limits.
+All tiers can use every supported site. Every value is overridable through the
+`SPIDEY_TIER_*` environment variables (`..._CONCURRENT_MODE` chooses whether a request is
+rejected or queued when the concurrency slots are full). Admins bypass the daily limits and
+queue ahead of everyone (priority 0.2).
 
 ## Commands
 
@@ -134,9 +155,13 @@ Free-tier cookies are shared across the bot's account pool; Pro/Premium cookies 
 ## Testing
 
 ```bash
-pytest               # 148 tests
-pytest -v            # verbose
-pytest tests/test_handler.py   # handler tests only
+uv run pytest                        # full suite
+uv run pytest -v                     # verbose
+uv run pytest tests/test_queue.py    # one module
+
+# Database-backed tests are skipped unless a database is provided:
+SPIDEY_TEST_DATABASE_URL=postgresql+asyncpg://spidey:spidey@localhost:5432/spideybot \
+  uv run pytest
 ```
 
 ## License

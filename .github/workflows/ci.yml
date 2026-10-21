@@ -43,13 +43,16 @@ jobs:
         with:
           python-version: "3.13"
 
-      # Install into .venv so pyright and ruff resolve the same environment
-      # locally and in CI (see [tool.pyright] venvPath/venv in pyproject.toml).
+      # Reproducible install from uv.lock into .venv, so pyright and ruff
+      # resolve the same environment locally and in CI
+      # (see [tool.pyright] venvPath/venv in pyproject.toml).
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
       - name: Install project and test tools
-        run: |
-          python -m venv .venv
-          .venv/bin/python -m pip install --upgrade pip
-          .venv/bin/python -m pip install ".[test]"
+        run: uv sync --frozen --extra test --python 3.13
 
       - name: Compile Python modules
         run: .venv/bin/python -m compileall -q core handler downloader tests migrations main.py
@@ -68,9 +71,9 @@ jobs:
       - name: Run tests
         env:
           SPIDEY_DATABASE_URL: postgresql+asyncpg://spidey:spidey@localhost:5432/spideybot
-          SPIDEY_API_ID: "1"
-          SPIDEY_API_HASH: ci-placeholder
-          SPIDEY_BOT_TOKEN: "123456:ci-placeholder"
+          SPIDEY_TG_API_ID: "1"
+          SPIDEY_TG_API_HASH: ci-placeholder
+          SPIDEY_TG_BOT_TOKEN: "123456:ci-placeholder"
           SPIDEY_SESSION_ENCRYPT_KEY: 8D6k2YqJ7m2jN6dGv3m7o5mC8qW4nB9pL1xR6tF0zHk=
           SPIDEY_TEST_DATABASE_URL: postgresql+asyncpg://spidey:spidey@localhost:5432/spideybot
         run: .venv/bin/pytest -q

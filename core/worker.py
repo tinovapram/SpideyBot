@@ -284,7 +284,6 @@ class DownloadManager:
                 tier = real_tier
 
         job = await Q.enqueue(
-            None,
             user_id=user_id,
             link=link,
             site=site,
@@ -323,7 +322,7 @@ class DownloadManager:
         task = self.active_tasks.get(entry_id)
         if task is not None and not task.is_cancelled:
             task.cancel()
-            if await Q.cancel(None, entry_id):
+            if await Q.cancel(entry_id):
                 await self._release_quota(task)
             get_metrics().incr("tasks_cancelled")
             return True
@@ -395,7 +394,7 @@ class DownloadManager:
         logger.info("Worker loop starting")
         while self._running:
             try:
-                job = await Q.claim_next(None)
+                job = await Q.claim_next()
                 if job is None:
                     await Q.wait_for_work()
                     continue
@@ -413,12 +412,12 @@ class DownloadManager:
         task = self.active_tasks.get(entry_id)
         if task is None:
             log.warning("Queue task context missing, failing job")
-            await Q.fail(None, job, retry=False)
+            await Q.fail(job, retry=False)
             return
 
         # ── Check cancellation before dispatch ──────────────────
         if task.is_cancelled:
-            await Q.fail(None, job, retry=False)
+            await Q.fail(job, retry=False)
             await self._release_quota(task)
             self.task_done(entry_id)
             return
@@ -455,7 +454,7 @@ class DownloadManager:
                         )
                     except Exception:
                         pass
-                await Q.fail(None, job, retry=False)
+                await Q.fail(job, retry=False)
                 await self._release_quota(task)
                 self.task_done(entry_id)
                 return
@@ -493,7 +492,7 @@ class DownloadManager:
                     site=task.site,
                 )
                 try:
-                    if not await Q.retry_running_job(None, job):
+                    if not await Q.retry_running_job(job):
                         await self._release_quota(task)
                         self.task_done(entry_id)
                         return
@@ -502,7 +501,7 @@ class DownloadManager:
                     return
 
                 if task.is_cancelled:
-                    await Q.fail(None, job, retry=False)
+                    await Q.fail(job, retry=False)
                     await self._release_quota(task)
                     self.task_done(entry_id)
                     return
@@ -514,7 +513,7 @@ class DownloadManager:
         # ── Success ─────────────────────────────────────────────
         try:
             if not task.completed:
-                await Q.fail(None, job, retry=False)
+                await Q.fail(job, retry=False)
                 await self._release_quota(task)
                 self.task_done(entry_id)
                 return
@@ -531,10 +530,10 @@ class DownloadManager:
                 # First successful download credits the referrer (idempotent).
                 await try_credit_on_download(session, job.user_id)
             task.quota_reserved = False
-            await Q.complete(None, job, bytes_downloaded=task.downloaded_bytes)
+            await Q.complete(job, bytes_downloaded=task.downloaded_bytes)
         except QuotaExceeded:
             await self._release_quota(task)
-            await Q.fail(None, job, retry=False)
+            await Q.fail(job, retry=False)
         except Exception:
             log.exception("Failed to record job completion")
         self.task_done(entry_id)

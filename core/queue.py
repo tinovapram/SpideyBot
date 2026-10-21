@@ -10,7 +10,6 @@ import asyncio
 import itertools
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
 
 from core.config import get_settings
 from core.metrics import get_metrics
@@ -83,7 +82,6 @@ class Job:
 
 
 async def enqueue(
-    _session: Any,
     *,
     user_id: int,
     link: str,
@@ -108,7 +106,7 @@ async def enqueue(
     return job
 
 
-async def claim_next(_session: Any) -> Job | None:
+async def claim_next() -> Job | None:
     """Claim the highest-priority queued job in this process."""
     async with _lock:
         active_by_user: dict[int, int] = {}
@@ -155,7 +153,6 @@ async def active_count(user_id: int) -> int:
 
 
 async def complete(
-    _session: Any,
     job: Job,
     *,
     bytes_downloaded: int | None = None,
@@ -176,7 +173,7 @@ async def complete(
     notify_work()  # a concurrency slot just freed up
 
 
-async def fail(_session: Any, job: Job, *, retry: bool = True) -> bool:
+async def fail(job: Job, *, retry: bool = True) -> bool:
     """Fail a job or put it back in the process-local queue."""
     settings = get_settings()
     job.finished_at = datetime.now(UTC)
@@ -194,7 +191,7 @@ async def fail(_session: Any, job: Job, *, retry: bool = True) -> bool:
     return False
 
 
-async def retry_running_job(_session: Any, job: Job) -> bool:
+async def retry_running_job(job: Job) -> bool:
     """Retry a failed job without making it visible outside this process."""
     settings = get_settings()
     get_metrics().incr("downloads_failed")
@@ -210,7 +207,7 @@ async def retry_running_job(_session: Any, job: Job) -> bool:
     return True
 
 
-async def cancel(_session: Any, job_id: int) -> bool:
+async def cancel(job_id: int) -> bool:
     async with _lock:
         job = _jobs.get(job_id)
         if job is None or job.status != QUEUED:

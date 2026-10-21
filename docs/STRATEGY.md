@@ -1,4 +1,7 @@
-# SpideyBot V4 — Strategy
+# SpideyBot V4 — Strategy (historical)
+
+> **Historical planning document.** Kept for context; not maintained. Current system:
+> [ARCHITECTURE.md](./ARCHITECTURE.md).
 
 How we execute the rewrite, manage risk, migrate from V3, and verify success.
 

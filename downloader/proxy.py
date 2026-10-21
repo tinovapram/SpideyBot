@@ -1,9 +1,9 @@
 """Lightweight proxy pool for downloaders that need IP rotation.
 
-Reads ``PROXY_POOL`` from the environment — a comma-separated list of
-proxies (``protocol://host:port`` or ``ip:port``).  Each downloader site
-gets its own rotation index so one site's activity doesn't exhaust the
-pool for another.
+Reads ``SPIDEY_PROXY_POOL`` — a comma-separated list of proxies
+(``protocol://host:port`` or ``ip:port``).  Each downloader site gets its
+own rotation index so one site's activity doesn't exhaust the pool for
+another.
 
 Usage from a downloader::
 
@@ -14,8 +14,9 @@ Usage from a downloader::
 
 from __future__ import annotations
 
-import os
 import threading
+
+from core.config import get_settings
 
 # Sentinel: distinguish "never loaded" from "loaded but empty pool".
 _UNSET = object()
@@ -29,7 +30,7 @@ def _load() -> list[str]:
     with _lock:
         if _pool is not _UNSET:
             return _pool
-        raw = os.getenv("PROXY_POOL", "").strip()
+        raw = get_settings().proxy_pool.strip()
         _pool = [p.strip() for p in raw.split(",") if p.strip()] if raw else []
         return _pool
 

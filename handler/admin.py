@@ -55,7 +55,6 @@ async def _add_premium_by_id(user_id: int, days: int) -> str:
         else:
             user.tier = "pro"
             user.tier_expiry = expires
-        await session.commit()
     return f"✅ Pro granted to `{user_id}` — expires {expires:%Y-%m-%d %H:%M UTC}"
 
 
@@ -71,7 +70,6 @@ async def _add_premium_by_username(username: str, days: int) -> str:
             return f"❌ User @{clean} not found. They must /start the bot first."
         user.tier = "pro"
         user.tier_expiry = expires
-        await session.commit()
     return f"✅ Pro granted to @{clean} (`{user.id}`) — expires {expires:%Y-%m-%d %H:%M UTC}"
 
 
@@ -86,7 +84,6 @@ async def _remove_premium(target: str) -> str:
                 return f"❌ User `{uid}` not found."
             user.tier = "free"
             user.tier_expiry = None
-            await session.commit()
         return f"✅ Pro revoked from `{uid}` — tier reset to free."
     except ValueError:
         pass
@@ -100,7 +97,6 @@ async def _remove_premium(target: str) -> str:
             return f"❌ User @{clean} not found."
         user.tier = "free"
         user.tier_expiry = None
-        await session.commit()
     return f"✅ Pro revoked from @{clean} (`{user.id}`) — tier reset to free."
 
 

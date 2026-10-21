@@ -15,18 +15,18 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-import os
 import re
-import socket
 import sys
 from contextlib import asynccontextmanager
-from ipaddress import ip_address
 from urllib.parse import urlparse
 
 import structlog
 from telethon import TelegramClient, events
 
+from core.config import get_settings
 from core.metrics import get_metrics
+from utils.urls import is_obviously_private_request as _is_obviously_private_request
+from utils.urls import validate_public_url as _validate_public_url
 
 logger = structlog.get_logger(__name__)
 
@@ -120,89 +120,12 @@ _MOVE2LINK_API = "https://api.move2link.com/api/v1"
 
 _JWT_RE = re.compile(r"^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$")
 _URL_RE = re.compile(r"^https?://", re.IGNORECASE)
-_BLOCKED_HOSTNAMES = {
-    "localhost",
-    "localhost.localdomain",
-    "ip6-localhost",
-    "ip6-loopback",
-}
-
-
 def _max_browser_concurrency() -> int:
     """Return the configured upper bound for concurrent browser sessions."""
-    try:
-        return max(1, min(int(os.environ.get("CAMOUFOX_MAX_CONCURRENCY", "2")), 16))
-    except ValueError:
-        return 2
+    return max(1, min(get_settings().camoufox_max_concurrency, 16))
 
 
 _BROWSER_SEMAPHORE = asyncio.Semaphore(_max_browser_concurrency())
-
-
-async def _validate_public_url(raw_url: str) -> str:
-    """Validate a URL before navigation and reject common SSRF targets."""
-    candidate = raw_url.strip()
-    parsed = urlparse(candidate)
-    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
-        raise ValueError("Only public HTTP(S) URLs are supported")
-    if parsed.username or parsed.password:
-        raise ValueError("URLs with embedded credentials are not supported")
-
-    hostname = parsed.hostname.rstrip(".").lower()
-    if hostname in _BLOCKED_HOSTNAMES or hostname.endswith((".local", ".internal")):
-        raise ValueError("Private or local destinations are not supported")
-
-    try:
-        literal = ip_address(hostname)
-        addresses = [literal]
-    except ValueError:
-        try:
-            infos = await asyncio.to_thread(
-                socket.getaddrinfo,
-                hostname,
-                parsed.port or (443 if parsed.scheme.lower() == "https" else 80),
-                type=socket.SOCK_STREAM,
-            )
-        except OSError as exc:
-            raise ValueError("The destination host could not be resolved") from exc
-        addresses = [ip_address(info[4][0]) for info in infos]
-
-    if not addresses or any(
-        address.is_private
-        or address.is_loopback
-        or address.is_link_local
-        or address.is_reserved
-        or address.is_multicast
-        or address.is_unspecified
-        for address in addresses
-    ):
-        raise ValueError("Private or local destinations are not supported")
-    return candidate
-
-
-def _is_obviously_private_request(raw_url: str) -> bool:
-    """Reject private literal hosts in browser subrequests and redirects."""
-    try:
-        parsed = urlparse(raw_url)
-        if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
-            return parsed.scheme.lower() not in {"", "about", "data", "blob"}
-        hostname = parsed.hostname.rstrip(".").lower()
-        if hostname in _BLOCKED_HOSTNAMES or hostname.endswith((".local", ".internal")):
-            return True
-        try:
-            address = ip_address(hostname)
-        except ValueError:
-            return False
-        return (
-            address.is_private
-            or address.is_loopback
-            or address.is_link_local
-            or address.is_reserved
-            or address.is_multicast
-            or address.is_unspecified
-        )
-    except ValueError:
-        return True
 
 
 async def _guard_browser_request(route, request) -> None:
@@ -219,9 +142,9 @@ def _default_headless() -> bool | str:
     is far harder to fingerprint than true headless. Xvfb is Linux-only, so
     other platforms fall back to plain headless.
 
-    Override with ``CAMOUFOX_HEADLESS`` = ``virtual`` | ``1`` | ``0``.
+    Override with ``SPIDEY_CAMOUFOX_HEADLESS`` = ``virtual`` | ``1`` | ``0``.
     """
-    override = os.environ.get("CAMOUFOX_HEADLESS", "").strip().lower()
+    override = get_settings().camoufox_headless.strip().lower()
     if override in {"0", "false", "no"}:
         return False
     if override in {"1", "true", "yes"}:

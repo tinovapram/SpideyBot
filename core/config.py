@@ -7,11 +7,19 @@ cached :func:`get_settings`. Validation happens at first access, so a broken
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
+from pathlib import Path
 
+import structlog
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from utils import paths
+
+logger = structlog.get_logger(__name__)
+
+_ENV_PREFIX = "SPIDEY_"
 
 
 class ConfigError(Exception):
@@ -32,7 +40,8 @@ class Settings(BaseSettings):
     tg_bot_token: str | None = None
 
     # ── Database ─────────────────────────────────────────────────
-    database_url: str = "postgresql+asyncpg://spidey:spidey@localhost:5432/spideybot"
+    # Required: a credential-bearing default used to point at a dev database.
+    database_url: str = Field(min_length=1)
 
     # ── Security ─────────────────────────────────────────────────
     session_encrypt_key: str = ""
@@ -41,6 +50,9 @@ class Settings(BaseSettings):
     terabox_cookies: str = ""  # single or multi-account, "|"-delimited
     terabox_jstoken: str = ""
     terabox_bdstoken: str = ""
+    terabox_sign: str = ""
+    terabox_timestamp: str = ""
+    terabox_logid: str = ""
     terabox_transfer: str = "auto"  # auto | aria2 | segmented | single
     terabox_transfer_min_mb: int = 32
     terabox_segment_connections: int = 8
@@ -60,6 +72,7 @@ class Settings(BaseSettings):
 
     # ── Download management ──────────────────────────────────────
     max_concurrent_downloads: int = 20
+    proxy_pool: str = ""  # comma-separated protocol://host:port entries
 
     # ── Queue / jobs ─────────────────────────────────────────────
     job_max_attempts: int = 3
@@ -78,7 +91,10 @@ class Settings(BaseSettings):
     metrics_host: str = "0.0.0.0"
     metrics_port: int = 9090
 
-    # ── Retention ────────────────────────────────────────────────
+    # ── Browser (Camoufox) ──────────────────────────────────────
+    camoufox_max_concurrency: int = 2
+    camoufox_headless: str = ""  # "" | "virtual" | "1" | "0"
+
     # ── Bot behavior defaults ────────────────────────────────────
     default_timer_media: bool = True
     default_magic_word: str = "WOW"
@@ -133,10 +149,49 @@ class Settings(BaseSettings):
         return [p.strip() for p in self.terabox_cookies.split("|") if p.strip()]
 
 
+def _known_env_keys() -> set[str]:
+    """Return the env var names the settings model actually consumes."""
+    return {f"{_ENV_PREFIX}{name.upper()}" for name in Settings.model_fields}
+
+
+def _env_file_keys() -> set[str]:
+    """Return keys defined in the configured ``.env`` file."""
+    configured = Settings.model_config.get("env_file")
+    if not configured:
+        return set()
+    candidates = configured if isinstance(configured, (list, tuple)) else [configured]
+    path = next(
+        (Path(entry) for entry in candidates if isinstance(entry, (str, Path))), None
+    )
+    if path is None or not path.is_file():
+        return set()
+    keys: set[str] = set()
+    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        keys.add(stripped.split("=", 1)[0].strip())
+    return keys
+
+
+def unknown_env_keys() -> list[str]:
+    """Return ``SPIDEY_*`` keys nothing consumes — typos or removed options."""
+    candidates = {key for key in os.environ if key.startswith(_ENV_PREFIX)}
+    candidates |= {key for key in _env_file_keys() if key.startswith(_ENV_PREFIX)}
+    return sorted(candidates - _known_env_keys())
+
+
 @lru_cache
 def get_settings() -> Settings:
-    """Return the cached settings instance."""
-    return Settings()
+    """Return the cached settings instance, warning about ignored keys."""
+    settings = Settings()  # pyright: ignore[reportCallIssue]  # env/.env supply the values
+    unknown = unknown_env_keys()
+    if unknown:
+        logger.warning(
+            "Ignoring unknown SPIDEY_* settings — check for typos or stale options",
+            keys=unknown,
+        )
+    return settings
 
 
 def is_admin(user_id: int) -> bool:

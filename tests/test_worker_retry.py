@@ -49,7 +49,7 @@ async def test_failed_job_retries_in_current_worker_with_context(
     monkeypatch.setattr(worker, "_RETRY_JITTER_SECONDS", 0.0)
     retry_count = 0
 
-    async def retry_running_job(_session: Any, _job: Any) -> bool:
+    async def retry_running_job(_job: Any) -> bool:
         nonlocal retry_count
         retry_count += 1
         return True

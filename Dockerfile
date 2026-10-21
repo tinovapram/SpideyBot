@@ -58,12 +58,18 @@ COPY . .
 #
 # BuildKit cache keeps downloaded Python packages between builds.
 
+# Install exactly the locked dependency set, then the project itself.
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv venv /opt/venv \
         --python "${PYTHON_VERSION}" \
         --python-preference only-system \
+    && uv export --frozen --no-dev --no-emit-project -o /tmp/requirements.txt \
     && uv pip install \
         --python /opt/venv/bin/python \
+        -r /tmp/requirements.txt \
+    && uv pip install \
+        --python /opt/venv/bin/python \
+        --no-deps \
         .
 
 

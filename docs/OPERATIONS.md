@@ -40,6 +40,11 @@ Rotate Telegram API credentials, bot tokens, TeraBox credentials, and
 the encryption key requires decrypting and re-encrypting stored cookies in a
 controlled migration; it does not convert or replace Telethon session files.
 
+Telethon file sessions (`user_sessions/*.session`) are plaintext SQLite
+databases — the Fernet key does not cover them. To rotate a user session,
+delete the file and have the user run `/login` again; to protect the data at
+rest, rely on volume permissions or full-disk encryption.
+
 ## Logs and metrics
 
 Sensitive fields and URL query parameters are redacted by the structured

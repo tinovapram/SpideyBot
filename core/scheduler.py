@@ -1,10 +1,11 @@
 """Background scheduler — periodic maintenance jobs.
 
-A single asyncio task loops forever, running four cheap maintenance passes
+A single asyncio task loops forever, running three cheap maintenance passes
 at independent intervals:
 
 - **quota sweep** — drop stale ``quota_usage`` counters older than 30 days
 - **rate-limit sweep** — clear stale rate-limiter tokens
+- **session sweep** — disconnect idle user clients
 
 All work runs inside a short-lived ``session_scope`` so a single failure
 doesn't take down the loop.
@@ -13,15 +14,15 @@ doesn't take down the loop.
 from __future__ import annotations
 
 import asyncio
-import logging
 
+import structlog
 from sqlalchemy import delete
 
 from core.db import session_scope
 from core.models import QuotaUsage
 from core.ratelimit import get_limiter
 
-logger = logging.getLogger("spideybot.scheduler")
+logger = structlog.get_logger("spideybot.scheduler")
 
 # ── Intervals (seconds) ─────────────────────────────────────────
 

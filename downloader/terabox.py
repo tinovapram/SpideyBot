@@ -976,19 +976,20 @@ class TeraBoxDownloader:
         pool_maxsize: int = 20,
     ) -> None:
         self.logger = structlog.get_logger("TeraBoxDownloader")
-        self.cookie = cookie or os.environ.get("TERABOX_COOKIES", "").split("|")[0].strip()
+        settings = get_settings()
+        self.cookie = cookie or settings.terabox_cookies.split("|")[0].strip()
         if not self.cookie:
             raise TeraBoxAuthError(
-                "No cookie provided. Pass cookie= or set TERABOX_COOKIES env var."
+                "No cookie provided. Pass cookie= or set SPIDEY_TERABOX_COOKIES."
             )
 
         self.account = AccountTransferResolver(
             cookie=self.cookie,
-            js_token=js_token or os.environ.get("TERABOX_JSTOKEN", ""),
-            bds_token=bds_token or os.environ.get("TERABOX_BDSTOKEN", ""),
-            sign=sign or os.environ.get("TERABOX_SIGN", ""),
-            timestamp=timestamp or os.environ.get("TERABOX_TIMESTAMP", ""),
-            logid=logid or os.environ.get("TERABOX_LOGID", ""),
+            js_token=js_token or settings.terabox_jstoken,
+            bds_token=bds_token or settings.terabox_bdstoken,
+            sign=sign or settings.terabox_sign,
+            timestamp=timestamp or settings.terabox_timestamp,
+            logid=logid or settings.terabox_logid,
             root_path=root_path or "/downloads",
             timeout=timeout,
             auto_resolve_tokens=auto_resolve_tokens,

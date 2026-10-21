@@ -46,5 +46,8 @@ data/
 downloads/
 user_sessions/
 config/runtime/
+# Generated at runtime by the downloaders (templates end in .example).
+config/yt-dlp.conf
+config/gallery-dl.json
 graphify-out/
 .devcontainer/

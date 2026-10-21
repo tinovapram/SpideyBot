@@ -23,9 +23,9 @@ ruff check .
 pytest -q
 ```
 
-**Post-fix status (2026-10-22, P0 + P1 resolved):** `ruff check .` clean, `pytest -q` → 28 passed,
-`pyright` → 78 pre-existing type errors (advisory, no undefined names), CI now installs into
-`.venv` and gates on lint.
+**Post-fix status (2026-10-22, P0–P3 resolved):** `ruff check .` clean, `pytest -q` → 47 passed,
+`pyright` → 77 pre-existing type errors (advisory, no undefined names), CI installs from
+`uv.lock` into `.venv` and gates on lint.
 
 ---
 
@@ -199,7 +199,19 @@ On failure the worker retries in-place with a flat `sleep(1)` and no attempt re-
 
 ## P2 — Configuration and security hygiene
 
+> **All P2 items below are fixed.** Status notes record what changed; the evidence text is kept
+> for history.
+
 ### P2-1. Silent configuration drift
+
+> **Status: ✅ Done** — `get_settings()` now compares `SPIDEY_*` keys from the environment *and*
+> from `.env` against the settings model and logs an `Ignoring unknown SPIDEY_* settings`
+> warning listing them. All the drift in the table below was fixed: the phantom
+> `SPIDEY_DOWNLOADS_RETENTION_DAYS` example was removed, CI now sets `SPIDEY_TG_*`, Reddit
+> credentials come from `Settings`, and `CAMOUFOX_*`, `PROXY_POOL`, `GDL_COOKIES_FROM_BROWSER`
+> and the TeraBox token fallbacks were moved into `Settings` (new
+> `SPIDEY_CAMOUFOX_*`, `SPIDEY_PROXY_POOL`, `SPIDEY_TERABOX_SIGN/_TIMESTAMP/_LOGID`). Missing
+> options were added to `.env.example`, and `tests/test_config.py` covers the warning.
 
 `Settings` uses `extra="ignore"` ([core/config.py:26](../core/config.py)), so a misspelled `SPIDEY_*` variable is discarded without a warning. Drift already present:
 
@@ -215,9 +227,21 @@ On failure the worker retries in-place with a flat `sleep(1)` and no attempt re-
 
 ### P2-2. Database credentials hardcoded as defaults
 
+> **Status: ✅ Done** — `database_url` is now a required field (`Field(min_length=1)`), so a
+> missing or empty value fails fast instead of silently connecting to a dev database. A new
+> `tests/conftest.py` supplies a placeholder URL for the suite; compose/CI already inject the
+> real one.
+
 [core/config.py:35](../core/config.py) defaults `database_url` to a `spidey:spidey@localhost:5432/spideybot` URL, mirrored in `docker-compose.yml` (which also publishes `5432`). Make `database_url` a required field and inject credentials from the environment / compose secrets.
 
 ### P2-3. SSRF validation is inconsistent
+
+> **Status: ✅ Done** — both validators moved to [`utils/urls.py`](../utils/urls.py) as
+> `validate_public_url()` / `is_obviously_private_request()`; `/bypass` imports them (no
+> behaviour change) and `Handler._enqueue_download()` now rejects private, loopback, link-local,
+> credential-bearing and non-HTTP(S) links before quota is touched, replying with the reason.
+> Covered by `tests/test_urls.py`. Redirects followed inside yt-dlp/gallery-dl remain outside
+> the check — documented as residual risk in the README security notes.
 
 `handler/bypass.py` implements a solid `_validate_public_url` (rejects loopback, private, link-local, reserved, credentialed URLs, and re-checks browser subrequests). The gallery-dl, yt-dlp, cyberdrop-dl, TeraBox and per-site adapters accept any user-supplied URL with no equivalent check.
 
@@ -225,9 +249,18 @@ On failure the worker retries in-place with a flat `sleep(1)` and no attempt re-
 
 ### P2-4. Session storage claims more protection than it provides
 
+> **Status: ✅ Done** — documented instead of re-encrypting (file sessions stay plaintext by
+> design so Telethon can use them): README gained a "Security notes" section, the
+> `.env.example` key comment now states that only cookies and *legacy* string sessions are
+> encrypted, and OPERATIONS.md explains how to rotate a file session.
+
 Sessions are plaintext Telethon SQLite files under `user_sessions/` (bind-mounted to the host). Only *legacy* string sessions were encrypted, yet `SPIDEY_SESSION_ENCRYPT_KEY` and the docs read as if all sessions are encrypted. Either document the distinction or encrypt at rest (e.g. `SQLCipher`/Fernet-wrapped blob).
 
 ### P2-5. Empty tracked runtime config
+
+> **Status: ✅ Done** — `config/yt-dlp.conf` was removed from the repository (the downloader
+> creates it on demand, and `/app` is owned by the app user in the image); `.gitignore` now
+> ignores it together with `config/gallery-dl.json`. Only the `.example` templates are tracked.
 
 `config/yt-dlp.conf` is committed empty and is recreated at runtime by `_ensure_ytdlp_config`. Drop it from the repo (keep `.example`) or populate it.
 
@@ -235,7 +268,17 @@ Sessions are plaintext Telethon SQLite files under `user_sessions/` (bind-mounte
 
 ## P3 — Documentation, tests and repository hygiene
 
+> **All P3 items below are fixed.** Notes record what changed; the evidence text is kept for
+> history.
+
 ### P3-1. Docs describe a code base that no longer exists
+
+> **Status: ✅ Done** — README and ARCHITECTURE rewritten against the real tree (no `engines.py`,
+> `handler/user.py` or `handler/outgoing.py`; correct module lists, tier table and config
+> block). The README no longer claims "148 tests" or points at `tests/test_handler.py`, and its
+> local quick start uses `uv sync --frozen`. `PLAN.md` / `STRATEGY.md` carry a "historical"
+> banner. The in-bot `/dt` help text now matches reality, the dead `/upgrade` copy and hardcoded
+> upgrade button were removed, and a `LICENSE` file was added to back the README's MIT claim.
 
 `README.md`, `docs/ARCHITECTURE.md`, `docs/PLAN.md` and `docs/STRATEGY.md` are still "V4" plans, while the code is the V3 layout:
 
@@ -248,17 +291,42 @@ Sessions are plaintext Telethon SQLite files under `user_sessions/` (bind-mounte
 
 ### P3-2. Test coverage collapsed
 
+> **Status: ✅ Done (coverage restored where it matters most)** — the suite went from 11 to 47
+> tests. New coverage: quota admission/limit/bandwidth + refund semantics and referral credit
+> (PostgreSQL), shared-cookie tier filtering, queue pruning/wake-up/priority position, token
+> bucket, readiness probes (200/503), staging cleanup, SSRF validation, unknown-config-key
+> detection, the handler's pre-queue guards (`/dl` URL rejection, rate limit) and the worker
+> happy path (quota consumption + referral credit + completion). Per-site adapters and the
+> download flows remain untested — that needs HTTP fixtures and is the next milestone.
+
 Commit `f0ed9dc` ("V4: rewrite for scale…") deleted the previous suite together with `tests/conftest.py`; only six top-level test files remain. There is no coverage of quota admission/refund, referral crediting, handler command flows (`/dl`, `/cancel`, `/status`), or `prepare_media`/`make_video_thumb`. Highest-value additions: `_enqueue_download` quota path, `queue` pruning behaviour, referral crediting idempotency, and the worker happy path.
 
 ### P3-3. No dependency lockfile
+
+> **Status: ✅ Done** — `uv.lock` (106 packages) is committed and `uv lock --check` is clean.
+> CI installs with `uv sync --frozen --extra test --python 3.13` (setup-uv with caching), and the
+> Dockerfile installs `uv export --frozen` requirements before the project, so the image uses the
+> same pins. Tool versions are pinned in the `test` extra, so a ruff/pyright release can no
+> longer break the build silently.
 
 Neither CI nor the Docker build pins transitive versions (`pip install ".[test]"`, `uv pip install .`), so builds are not reproducible — an unpinned `ruff` is what broke the pipeline. Commit `uv.lock` and use `uv sync --frozen` / `uv pip install --frozen`.
 
 ### P3-4. Stale build and cache artifacts inside the working tree
 
+> **Status: ✅ Done** — removed the leftover `app/`, `telegram/`, `build/`, `dist/`,
+> `spideybot.egg-info/`, all `__pycache__` directories, the empty `tests/{acceptance,fakes,
+> integration,unit}` and `downloader/{bypass,sites}` folders, and the tool caches. `data/`
+> (local PostgreSQL + bot session) was left untouched because it holds live state; moving it
+> outside the repository remains a manual step.
+
 `app/`, `telegram/`, `build/`, `dist/`, `spideybot.egg-info/`, and `tests/{unit,integration,acceptance,fakes}/__pycache__` are remnants of a removed layout (several directories contain only `.pyc` files). `data/pgdata` also contains a live local PostgreSQL data directory inside the repository. Delete them, and consider moving local PG data outside the repo.
 
 ### P3-5. Minor code smells
+
+> **Status: ✅ Done** — the unused `_session` parameter is gone from every `core/queue.py`
+> function and all call sites; `handler/admin.py` no longer commits twice inside `session_scope`;
+> the scheduler logs through `structlog` like the rest of the code; the orphaned "Retention"
+> header in `core/config.py` was removed.
 
 - Every `core/queue.py` public function takes an unused `_session` argument (V4 API residue) — remove it.
 - `handler/admin.py` opens `session_scope()` (which already commits) and then calls `await session.commit()` explicitly.
@@ -273,17 +341,18 @@ Neither CI nor the Docker build pins transitive versions (`pip install ".[test]"
 1. ~~**Unbreak the pipeline** — P0-1 (`Path`), P0-6 (ruff/pyright config, pinned tools), then make `main` green so tests gate merges.~~ ✅ Done
 2. ~~**Make advertised features real** — P0-2 (rate limiting), P0-3 (referrals), P1-1 (`/dt` client).~~ ✅ Done — `/upgrade` copy is still advertised without a handler; tracked under P3-1.
 3. ~~**Stability** — P0-4 (queue pruning), P0-5 (blocking ffmpeg), P1-2/P1-3 (TeraBox pool + N+1), P1-4/P1-5 (wake-up + backoff), P1-6 (queue position), P1-7 (readiness), P1-8 (staging cleanup).~~ ✅ Done
-4. **Configuration hardening** — P2-1 … P2-5.
-5. **Docs, tests, lockfile** — P3-1 … P3-4, once the code above has settled.
+4. ~~**Configuration hardening** — P2-1 … P2-5.~~ ✅ Done
+5. ~~**Docs, tests, lockfile** — P3-1 … P3-4, once the code above has settled.~~ ✅ Done
 
 ## Verification checklist for future audits
 
 ```bash
-ruff check .                 # must be clean
-pyright                      # must be clean
-pytest -q                    # must be green
-python -m compileall -q core handler downloader utils migrations main.py
-docker compose config        # compose interpolation sanity
+uv sync --frozen --extra test   # environment matches uv.lock
+uv run ruff check .             # must be clean
+uv run pyright                  # advisory today (baseline above); must not regress
+uv run pytest -q                # must be green
+uv run python -m compileall -q core handler downloader tests migrations utils main.py
+docker compose config           # compose interpolation sanity
 ```
 
 All four must pass locally before pushing, since the CI gate currently cannot report on them.

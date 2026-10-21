@@ -1,5 +1,9 @@
-# SpideyBot V4 — Plan
+# SpideyBot V4 — Plan (historical)
 
+> **Historical planning document.** This plan produced the current code base; it is kept for
+> context and is not maintained. For the system as it exists today see
+> [ARCHITECTURE.md](./ARCHITECTURE.md).
+>
 > Full rewrite for 1000-user scale + tier-based quota.
 > Branch: `V4` · Storage: PostgreSQL · Tiers: free / pro / premium (+ admin bypass)
 

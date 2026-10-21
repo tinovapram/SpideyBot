@@ -14,6 +14,7 @@ from urllib.parse import unquote, urlparse
 import aiohttp
 import structlog
 
+from core.config import get_settings
 from utils import paths
 
 logger = structlog.get_logger(__name__)
@@ -36,7 +37,7 @@ class GalleryDLDownloader:
     # ── Runtime config generation ──────────────────────────────────
 
     def _generate_runtime_config(self) -> None:
-        browser_name = os.getenv("GDL_COOKIES_FROM_BROWSER", "").strip()
+        browser_name = get_settings().gdl_cookies_from_browser.strip()
 
         extractors = ["twitter", "instagram", "reddit", "tiktok", "facebook", "pinterest"]
         extractor_config: dict = {}
@@ -73,9 +74,10 @@ class GalleryDLDownloader:
 
     @staticmethod
     def _reddit_credentials() -> dict:
-        client_id = (os.getenv("GDL_REDDIT_CLIENT_ID") or os.getenv("REDDIT_GDL_CLIENT_ID") or "").strip()
-        secret = (os.getenv("GDL_REDDIT_CLIENT_SECRET") or os.getenv("REDDIT_GDL_CLIENT_SECRET") or "").strip()
-        refresh = (os.getenv("GDL_REDDIT_REFRESH_TOKEN") or os.getenv("REDDIT_GDL_REFRESH_TOKEN") or "").strip()
+        settings = get_settings()
+        client_id = settings.gdl_reddit_client_id.strip()
+        secret = settings.gdl_reddit_client_secret.strip()
+        refresh = settings.gdl_reddit_refresh_token.strip()
         if not (client_id or secret or refresh):
             return {}
         result: dict = {}
