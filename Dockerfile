@@ -9,17 +9,19 @@ ARG PYTHON_VERSION=3.14
 
 
 # ════════════════════════════════════════════════════════════════════
-# Stage 1: Builder
+# Stage 1: Deps
 #
-# Resolve Python dependencies into a relocatable virtual environment.
+# Resolve the locked dependency set into a relocatable virtual
+# environment. Only pyproject.toml and uv.lock are copied here, so
+# editing application code never invalidates this stage.
 #
-# The builder contains compilers and development headers that are
+# The stage contains compilers and development headers that are
 # required only when Python packages need to build native extensions.
 #
 # The runtime image never receives these build dependencies.
 # ════════════════════════════════════════════════════════════════════
 
-FROM ghcr.io/astral-sh/uv:${UV_VERSION}-python${PYTHON_VERSION}-trixie-slim AS builder
+FROM ghcr.io/astral-sh/uv:${UV_VERSION}-python${PYTHON_VERSION}-trixie-slim AS deps
 
 ARG PYTHON_VERSION
 
@@ -46,19 +48,15 @@ RUN apt-get update \
 
 WORKDIR /build
 
-# ── Install from the project manifest ─────────────────────────────
-#
-# pyproject.toml is the single dependency source for local and container
-# environments. The builder needs the source tree because it installs the
-# project itself as a package.
-
-COPY . .
-
 # ── Create venv and install dependencies ───────────────────────────
 #
-# BuildKit cache keeps downloaded Python packages between builds.
+# pyproject.toml + uv.lock are the single dependency source for local and
+# container environments. BuildKit cache keeps downloaded Python packages
+# between builds; changing the lock file is the only thing that rebuilds
+# this layer.
 
-# Install exactly the locked dependency set, then the project itself.
+COPY pyproject.toml uv.lock ./
+
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv venv /opt/venv \
         --python "${PYTHON_VERSION}" \
@@ -66,23 +64,21 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     && uv export --frozen --no-dev --no-emit-project -o /tmp/requirements.txt \
     && uv pip install \
         --python /opt/venv/bin/python \
-        -r /tmp/requirements.txt \
-    && uv pip install \
-        --python /opt/venv/bin/python \
-        --no-deps \
-        .
+        -r /tmp/requirements.txt
 
 
 # ════════════════════════════════════════════════════════════════════
 # Stage 2: Camoufox
 #
 # Download the Camoufox browser using exactly the same Python
-# environment created by the builder.
+# environment created by the deps stage.
 #
 # This prevents the browser/package combination from drifting apart.
+# It derives from `deps` (not from the source-bearing stage), so editing
+# application code never re-downloads the browser.
 # ════════════════════════════════════════════════════════════════════
 
-FROM builder AS camoufox
+FROM deps AS camoufox
 
 ENV XDG_CACHE_HOME=/root/.cache
 
@@ -90,7 +86,26 @@ RUN /opt/venv/bin/camoufox fetch
 
 
 # ════════════════════════════════════════════════════════════════════
-# Stage 3: Runtime
+# Stage 3: Builder
+#
+# Install the project itself into the same venv. This layer re-runs on any
+# source edit, but the dependency layer above stays cached, so it costs
+# seconds instead of a full reinstall.
+# ════════════════════════════════════════════════════════════════════
+
+FROM deps AS builder
+
+COPY . .
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install \
+        --python /opt/venv/bin/python \
+        --no-deps \
+        .
+
+
+# ════════════════════════════════════════════════════════════════════
+# Stage 4: Runtime
 #
 # Minimal runtime image.
 #
