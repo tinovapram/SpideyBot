@@ -46,6 +46,7 @@ from downloader.telegram import (
 from utils.files import prepare_media
 from utils.paths import DOWNLOADS_DIR
 from utils.progress import StatusMessage
+from utils.telethon import send_album
 from utils.urls import validate_public_url
 
 logger = structlog.get_logger(__name__)
@@ -317,9 +318,9 @@ class Handler:
                     cap = original_caption
                 else:
                     cap = f"✅ **SpideyBot:** Downloaded {len(media)} file(s) from Telegram{label}."
-                await event.client.send_file(
-                    event.chat_id, media,
-                    caption=cap,
+                captions = [cap, *([""] * (len(media) - 1))]
+                await send_album(
+                    event.client, event.chat_id, media, captions,
                     reply_to=event.message,
                 )
             else:

@@ -8,6 +8,7 @@ platforms — all from a single Telegram bot. Send a link, get the files in chat
 
 - **28+ platforms** — TeraBox, YouTube, Twitter/X, Instagram, TikTok, Reddit, and more
 - **Telegram-native downloads** — `/dt` pulls files directly from Telegram messages via your own session
+- **Predictable delivery** — photos and videos arrive as albums (max 10 per group); documents, audio and archives are sent as separate messages
 - **Tiered access** — Free, Pro, and Premium tiers with configurable limits
 - **In-memory queue** — process-local priority scheduling; queued jobs are cleared on restart
 - **Rate limiting** — Per-user rate limits to prevent abuse
