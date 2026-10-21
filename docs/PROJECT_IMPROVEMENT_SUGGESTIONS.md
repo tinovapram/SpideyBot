@@ -357,3 +357,9 @@ docker compose config           # compose interpolation sanity
 
 All four must pass locally before pushing, since the CI gate currently cannot report on them.
 
+## Related documents
+
+- [ARCHITECTURE.md](./ARCHITECTURE.md) — current system design.
+- [SEND_RATE_LIMITING.md](./SEND_RATE_LIMITING.md) — proposal for pacing uploads/sends and
+  handling `FLOOD_WAIT` across concurrent jobs (not implemented yet).
+
