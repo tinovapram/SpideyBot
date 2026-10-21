@@ -32,9 +32,13 @@ from pyrogram import idle
 from app import capabilities, config, db, dbprovider, jobs, paths, scheduler, workers
 from app import logging as app_logging
 from app.config import Settings
+from app.handler import install as install_handlers
+from app.manager import DownloadManager
 from telegram import clients, delivery, sessions
 
 log = logging.getLogger(__name__)
+
+_manager: DownloadManager | None = None
 
 
 def sender_for(bot: Any) -> delivery.SenderFor:
@@ -84,6 +88,12 @@ async def serve(settings: Settings | None = None, *, pool_size: int | None = Non
     bot = clients.build_bot(resolved)
     pool = sessions.SessionPool(resolved)
     sessions.set_pool(pool)
+
+    # ── DownloadManager + class-based handlers (V5 pattern) ─────
+    global _manager
+    _manager = DownloadManager(bot=bot)
+    install_handlers(bot, _manager)
+
     worker_pool: workers.WorkerPool | None = None
     housekeeper: scheduler.Scheduler | None = None
 
