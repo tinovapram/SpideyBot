@@ -8,10 +8,14 @@ import sys
 
 import structlog
 
-_SECRET_KEY_RE = re.compile(r"(?:cookie|token|password|api[_-]?hash|secret|authorization|session)", re.I)
+_SECRET_KEY_RE = re.compile(
+    r"(?:cookie|token|password|api[_-]?hash|secret|authorization|"
+    r"session[_-]?(?:token|string|key|cookie|secret|encrypt[_-]?key))",
+    re.IGNORECASE,
+)
 _QUERY_SECRET_RE = re.compile(
     r"([?&](?:token|access_token|auth|cookie|session|sig|signature|key|password)=)[^&\s]+",
-    re.I,
+    re.IGNORECASE,
 )
 
 

@@ -9,10 +9,9 @@ from datetime import datetime, timedelta, timezone
 from telethon import TelegramClient, events
 
 import structlog
-from core import config
-from core.config import get_settings, is_admin
+from core.config import is_admin
 from core.db import session_scope
-from core.models import User, get_or_create_user
+from core.models import User
 from core.metrics import get_metrics
 
 logger = structlog.get_logger(__name__)
@@ -27,7 +26,6 @@ async def stats_handler(event):
         await event.client.send_message(event.chat_id, "⛔ Admin only.")
         raise events.StopPropagation
     try:
-        from core.bot import download_manager as dm
         metrics = get_metrics().snapshot()
         lines = [
             "**Live Stats**",

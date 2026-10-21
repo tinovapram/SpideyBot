@@ -34,7 +34,7 @@ from core.models import User, get_or_create_user
 from core.quota import get_snapshot, release_download, reserve_download, QuotaExceeded
 from core.referral import referral_stats
 from core.tiers import (
-    HEAVY_SITES, size_limit,
+    size_limit,
 )
 from core.worker import DownloadManager, _MessageStub
 from downloader.telegram import (
@@ -220,7 +220,6 @@ class Handler:
 
     async def _download_tg(self, event, link: str) -> None:
         """Download from Telegram message link using the user's own client."""
-        from telethon.errors import RPCError as TelethonRPCError
 
         is_range = is_tg_range_url(link)
         try:

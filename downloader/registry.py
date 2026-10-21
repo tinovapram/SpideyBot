@@ -52,7 +52,6 @@ def _build_entries():
     from downloader.site.kuaishou import KuaishouDownloader
     from downloader.site.linkedin import LinkedInDownloader
     from downloader.site.pinterest import PinterestDownloader
-    from downloader.site.reddit import RedditDownloader
     from downloader.site.snapchat import SnapchatDownloader
     from downloader.site.soundcloud import SoundCloudDownloader
     from downloader.site.spotify import SpotifyDownloader

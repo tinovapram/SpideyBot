@@ -13,7 +13,7 @@ import base64
 import os
 import re
 import struct
-from typing import Iterator
+from typing import Any, Iterator
 
 import requests
 import structlog
@@ -119,7 +119,7 @@ def _ecb_cipher(key: bytes):
     return AES.new(key, AES.MODE_ECB)
 
 
-def _ctr_cipher(key: bytes, iv: int) -> "AES":
+def _ctr_cipher(key: bytes, iv: int) -> Any:
     """AES-256-CTR cipher with a position-aware 128-bit IV.
 
     The IV is 16 bytes: first 8 bytes = little-endian chunk number,

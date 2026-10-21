@@ -10,7 +10,7 @@ For multi-worker deployments, replace this with a Redis-backed limiter.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from threading import Lock
 
 from core.config import get_settings

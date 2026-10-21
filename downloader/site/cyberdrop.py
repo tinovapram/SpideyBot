@@ -9,10 +9,8 @@ is self-contained.
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import re
-import shutil
 import sys
 from typing import Iterator
 

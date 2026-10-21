@@ -17,7 +17,6 @@ from telethon import events
 from telethon.tl.custom import Button
 
 from core import cookies as cookie_store
-from core.config import get_settings
 from core.db import session_scope
 from core.models import get_or_create_user
 from core.tiers import DEFAULT_TIER, effective_tier

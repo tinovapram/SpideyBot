@@ -12,10 +12,8 @@ Also exposes the manager surface that V3 handlers already call:
 from __future__ import annotations
 
 import asyncio
-import os
-import time
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass
+from typing import Any
 
 import structlog
 
@@ -27,10 +25,7 @@ from core.db import session_scope
 from core.metrics import get_metrics
 from core.models import User, get_or_create_user
 from core.quota import QuotaExceeded, consume, release_download
-from core.tiers import HEAVY_SITES, effective_tier, tier_policy
-
-if TYPE_CHECKING:
-    from telethon import TelegramClient, types
+from core.tiers import HEAVY_SITES, effective_tier
 
 logger = structlog.get_logger(__name__)
 

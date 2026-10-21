@@ -1,6 +1,5 @@
 """StreamWish / Playnixes downloader — packed JS → HLS playlist → yt-dlp."""
 
-import ast
 import os
 import re
 import time
