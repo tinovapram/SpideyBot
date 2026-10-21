@@ -10,6 +10,12 @@ venv
 .env.*
 __pycache__
 *.pyc
+build
+dist
+*.egg-info
+.ruff_cache
+.mypy_cache
+.pyright
 *.session
 *.session-journal
 data

@@ -21,6 +21,8 @@ ARG PYTHON_VERSION=3.14
 
 FROM ghcr.io/astral-sh/uv:${UV_VERSION}-python${PYTHON_VERSION}-trixie-slim AS builder
 
+ARG PYTHON_VERSION
+
 ENV DEBIAN_FRONTEND=noninteractive \
     UV_PYTHON_DOWNLOADS=0 \
     UV_COMPILE_BYTECODE=1 \
@@ -58,7 +60,7 @@ COPY . .
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv venv /opt/venv \
-        --python 3.14 \
+        --python "${PYTHON_VERSION}" \
         --python-preference only-system \
     && uv pip install \
         --python /opt/venv/bin/python \
@@ -238,9 +240,9 @@ USER root
 HEALTHCHECK \
     --interval=60s \
     --timeout=5s \
-    --start-period=20s \
+    --start-period=60s \
     --retries=3 \
-    CMD /opt/venv/bin/python -c "from pathlib import Path; import os; p=Path('/app/data/ready'); pid=int(p.read_text()) if p.exists() else 0; assert pid > 0; os.kill(pid, 0)" || exit 1
+    CMD /opt/venv/bin/python -c "from urllib.request import urlopen; response=urlopen('http://127.0.0.1:9090/readyz', timeout=4); assert response.status == 200" || exit 1
 
 
 # ════════════════════════════════════════════════════════════════════
