@@ -12,13 +12,14 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 # Add project root to path so core.* imports work
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sqlalchemy import text
+
 from core.db import engine, init_db
 
 
@@ -39,12 +40,12 @@ def read_v3_users(db_path: str) -> list[dict]:
 
 def transform(user: dict) -> dict:
     """Convert V3 user row to V4 format."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     # V3 premium_expiry is a unix timestamp (int), V4 tier_expiry is datetime
     expiry_ts = user.get("premium_expiry", 0) or 0
     tier_expiry = (
-        datetime.fromtimestamp(expiry_ts, tz=timezone.utc)
+        datetime.fromtimestamp(expiry_ts, tz=UTC)
         if expiry_ts > 0
         else None
     )

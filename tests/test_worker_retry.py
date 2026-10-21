@@ -27,7 +27,9 @@ async def test_failed_job_retries_in_current_worker_with_context(
 ) -> None:
     from downloader import flow
 
-    job = SimpleNamespace(id=7, user_id=42, link="https://example.com/video", site="example")
+    job = SimpleNamespace(
+        id=7, user_id=42, link="https://example.com/video", site="example", attempts=1
+    )
     manager = worker.DownloadManager(bot=object(), terabox_downloader=None)
     task = worker.DownloadTask(
         entry_id=job.id,
@@ -42,6 +44,9 @@ async def test_failed_job_retries_in_current_worker_with_context(
 
     monkeypatch.setattr(worker, "session_scope", _SessionScope)
     monkeypatch.setattr(worker.sessions, "get_client", lambda _user_id: None)
+    # Keep the backoff out of the test's runtime.
+    monkeypatch.setattr(worker, "_RETRY_BASE_SECONDS", 0.0)
+    monkeypatch.setattr(worker, "_RETRY_JITTER_SECONDS", 0.0)
     retry_count = 0
 
     async def retry_running_job(_session: Any, _job: Any) -> bool:

@@ -4,15 +4,15 @@ Admin command handlers: /stats, /addpremium, /removepremium, /checkpremium.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-
-from telethon import TelegramClient, events
+from datetime import UTC, datetime, timedelta
 
 import structlog
+from telethon import TelegramClient, events
+
 from core.config import is_admin
 from core.db import session_scope
-from core.models import User
 from core.metrics import get_metrics
+from core.models import User
 
 logger = structlog.get_logger(__name__)
 
@@ -45,7 +45,7 @@ async def stats_handler(event):
 
 async def _add_premium_by_id(user_id: int, days: int) -> str:
     """Grant pro tier to a user by Telegram ID for *days* days."""
-    expires = datetime.now(timezone.utc) + timedelta(days=days)
+    expires = datetime.now(UTC) + timedelta(days=days)
     async with session_scope() as session:
         user = await session.get(User, user_id)
         if user is None:
@@ -61,7 +61,7 @@ async def _add_premium_by_id(user_id: int, days: int) -> str:
 
 async def _add_premium_by_username(username: str, days: int) -> str:
     """Grant pro tier to a user by @username for *days* days."""
-    expires = datetime.now(timezone.utc) + timedelta(days=days)
+    expires = datetime.now(UTC) + timedelta(days=days)
     clean = username.lstrip("@")
     async with session_scope() as session:
         from sqlalchemy import select
@@ -130,7 +130,7 @@ async def _check_premium(target: str) -> str:
         f"**Tier:** {user.tier}",
     ]
     if user.tier_expiry:
-        if user.tier_expiry > datetime.now(timezone.utc):
+        if user.tier_expiry > datetime.now(UTC):
             lines.append(f"**Expires:** {user.tier_expiry:%Y-%m-%d %H:%M UTC}")
         else:
             lines.append(f"**Expired:** {user.tier_expiry:%Y-%m-%d %H:%M UTC} (now free)")

@@ -5,12 +5,12 @@ from __future__ import annotations
 import json
 import os
 import time
-from typing import Iterator
+from collections.abc import Iterator
+from types import MappingProxyType
 
 import requests
 import structlog
 
-from types import MappingProxyType
 from utils.files import sanitize_filename
 
 logger = structlog.get_logger(__name__)

@@ -12,6 +12,7 @@ Also exposes the manager surface that V3 handlers already call:
 from __future__ import annotations
 
 import asyncio
+import random
 from dataclasses import dataclass
 from typing import Any
 
@@ -25,9 +26,20 @@ from core.db import session_scope
 from core.metrics import get_metrics
 from core.models import User, get_or_create_user
 from core.quota import QuotaExceeded, consume, release_download
+from core.referral import try_credit_on_download
 from core.tiers import HEAVY_SITES, effective_tier
 
 logger = structlog.get_logger(__name__)
+
+_RETRY_BASE_SECONDS = 2.0
+_RETRY_MAX_SECONDS = 30.0
+_RETRY_JITTER_SECONDS = 1.0
+
+
+def _retry_delay(attempt: int) -> float:
+    """Exponential backoff with jitter for in-worker retries."""
+    backoff = min(_RETRY_BASE_SECONDS * (2 ** max(0, attempt - 1)), _RETRY_MAX_SECONDS)
+    return backoff + random.uniform(0, _RETRY_JITTER_SECONDS)
 
 
 # ── Minimal event adapter ──────────────────────────────────────────
@@ -161,66 +173,75 @@ def detect_site(url: str) -> str | None:
     return hit[0] if hit else None
 
 
-# ── TeraBox pool builder ──────────────────────────────────────────
+# ── TeraBox pool (bot accounts + shared free-tier cookies) ───────
+
+_SHARED_POOL_TTL_SECONDS = 60.0
+
+_shared_pool_lock = asyncio.Lock()
+_shared_downloaders: dict[str, Any] = {}  # cookie -> downloader
+_combined_pool: Any | None = None
+_combined_snapshot: tuple[str, ...] = ()
+_combined_loaded_at = 0.0
 
 
-async def build_terabox_pool() -> Any:
-    """Build a :class:`TeraBoxAccountPool` from bot config + shared cookies.
-
-    Returns the pool, or ``None`` if no bot cookies are configured.
-    Returns a single :class:`TeraBoxDownloader` when only one account exists.
-    """
-    from downloader.terabox import TeraBoxAccountPool, TeraBoxDownloader
-
-    settings = get_settings()
-    account_cookies = settings.terabox_account_cookies()
-    if not account_cookies:
-        return None
-
-    downloaders = []
-    for cookie_str in account_cookies:
-        try:
-            downloaders.append(TeraBoxDownloader(cookie=cookie_str))
-        except Exception as exc:
-            logger.warning("Failed to build TeraBox downloader", error=str(exc))
-
-    if not downloaders:
-        return None
-    if len(downloaders) == 1:
-        return downloaders[0]
-
-    pool = TeraBoxAccountPool(downloaders)
-    logger.info("TeraBox pool initialized", accounts=pool.size)
-    return pool
-
-
-async def _append_shared_cookies(pool: Any, session: Any) -> Any:
-    """Append free-user cookies to the pool for this request."""
-    from downloader.terabox import TeraBoxAccountPool, TeraBoxDownloader
-
+async def _close_quietly(downloader: Any) -> None:
     try:
-        extra = await shared_cookies(session)
+        await downloader.close()
     except Exception:
-        return pool
+        pass
 
-    if not extra:
-        return pool
 
-    existing = pool.accounts if isinstance(pool, TeraBoxAccountPool) else [pool]
-    new_downloaders = list(existing)
-    for cookie_str in extra:
+async def terabox_pool_with_shared(base: Any, session: Any) -> Any:
+    """Return *base* extended with free-tier user cookies, cached briefly.
+
+    Building a downloader per cookie for every job raced across workers and
+    leaked aiohttp sessions (the old code also reassigned ``pool.accounts``
+    in place).  The resolved pool is now reused for
+    ``_SHARED_POOL_TTL_SECONDS`` and rebuilt only when the cookie set changes.
+    """
+    global _combined_loaded_at, _combined_pool, _combined_snapshot
+
+    if base is None:
+        return None
+
+    from downloader.terabox import TeraBoxAccountPool, TeraBoxDownloader
+
+    async with _shared_pool_lock:
+        now = asyncio.get_running_loop().time()
+        if _combined_pool is not None and now - _combined_loaded_at < _SHARED_POOL_TTL_SECONDS:
+            return _combined_pool
+        _combined_loaded_at = now
+
         try:
-            new_downloaders.append(TeraBoxDownloader(cookie=cookie_str))
+            cookies = tuple(await shared_cookies(session))
         except Exception:
-            pass
+            return _combined_pool if _combined_pool is not None else base
 
-    if len(new_downloaders) == len(existing):
-        return pool  # nothing added
+        if _combined_pool is not None and cookies == _combined_snapshot:
+            return _combined_pool
 
-    if isinstance(pool, TeraBoxAccountPool):
-        pool.accounts = new_downloaders
-        return pool
-    return TeraBoxAccountPool(new_downloaders)
+        for stale in set(_shared_downloaders) - set(cookies):
+            asyncio.create_task(_close_quietly(_shared_downloaders.pop(stale)))
+
+        shared = []
+        for cookie in cookies:
+            downloader = _shared_downloaders.get(cookie)
+            if downloader is None:
+                try:
+                    downloader = TeraBoxDownloader(cookie=cookie)
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to build shared TeraBox downloader", error=str(exc)
+                    )
+                    continue
+                _shared_downloaders[cookie] = downloader
+            shared.append(downloader)
+
+        base_accounts = list(base.accounts) if isinstance(base, TeraBoxAccountPool) else [base]
+        accounts = base_accounts + shared
+        _combined_pool = TeraBoxAccountPool(accounts) if len(accounts) > 1 else accounts[0]
+        _combined_snapshot = cookies
+        return _combined_pool
 
 
 # ── DownloadManager ───────────────────────────────────────────────
@@ -317,16 +338,9 @@ class DownloadManager:
                 await release_download(session, user)
         task.quota_reserved = False
 
-    def get_queue_position(self, entry_id: int) -> int:
-        """1-based queue position; 0 if not found."""
-        if entry_id not in self.active_tasks:
-            return 0
-        # Order by job_id (insertion/priority order from DB).
-        sorted_ids = sorted(self.active_tasks.keys())
-        try:
-            return sorted_ids.index(entry_id) + 1
-        except ValueError:
-            return 0
+    async def get_queue_position(self, entry_id: int) -> int:
+        """1-based rank in the order the queue will actually claim; 0 if not queued."""
+        return await Q.position(entry_id)
 
     def user_tasks(self, user_id: int) -> list[DownloadTask]:
         """All active tasks for *user_id*."""
@@ -383,7 +397,7 @@ class DownloadManager:
             try:
                 job = await Q.claim_next(None)
                 if job is None:
-                    await asyncio.sleep(1)
+                    await Q.wait_for_work()
                     continue
                 await self._run_job(job)
             except asyncio.CancelledError:
@@ -462,7 +476,7 @@ class DownloadManager:
                 if task.site == "terabox":
                     if not terabox_resolved:
                         async with session_scope() as session:
-                            terabox = await _append_shared_cookies(terabox, session)
+                            terabox = await terabox_pool_with_shared(terabox, session)
                         terabox_resolved = True
                     from downloader.terabox_flow import run_terabox
 
@@ -487,8 +501,15 @@ class DownloadManager:
                     log.exception("Failed to record job failure")
                     return
 
-                log.info("Retrying job in current worker")
-                await asyncio.sleep(1)
+                if task.is_cancelled:
+                    await Q.fail(None, job, retry=False)
+                    await self._release_quota(task)
+                    self.task_done(entry_id)
+                    return
+
+                delay = _retry_delay(job.attempts)
+                log.info("Retrying job in current worker", delay_seconds=round(delay, 1))
+                await asyncio.sleep(delay)
 
         # ── Success ─────────────────────────────────────────────
         try:
@@ -507,6 +528,8 @@ class DownloadManager:
                         bytes_downloaded=task.downloaded_bytes,
                         reservation=task.quota_reserved,
                     )
+                # First successful download credits the referrer (idempotent).
+                await try_credit_on_download(session, job.user_id)
             task.quota_reserved = False
             await Q.complete(None, job, bytes_downloaded=task.downloaded_bytes)
         except QuotaExceeded:

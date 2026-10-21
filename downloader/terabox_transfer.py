@@ -34,7 +34,7 @@ import os
 import re
 import shutil
 import time
-from typing import Callable, Optional
+from collections.abc import Callable
 
 import aiohttp
 import structlog
@@ -43,7 +43,7 @@ from core.config import get_settings
 
 # Progress callback signature used across TeraBox downloaders:
 # cb(filename: str, done_bytes: int, total_bytes: int)
-ProgressCallback = Optional[Callable[[str, int, int], None]]
+ProgressCallback = Callable[[str, int, int], None] | None
 
 _CHUNK = 256 * 1024  # 256 KiB native read chunk
 _MERGE_CHUNK = 1024 * 1024
@@ -124,7 +124,7 @@ def _format_bytes(value: float) -> str:
     return f"{value:.1f} PB"
 
 
-def _parse_readout(line: str, expected_size: int) -> Optional[int]:
+def _parse_readout(line: str, expected_size: int) -> int | None:
     """Extract downloaded bytes from an aria2 console readout line."""
     if not line:
         return None
@@ -151,7 +151,7 @@ async def aria2_download(
     url: str,
     filepath: str,
     *,
-    headers: Optional[dict] = None,
+    headers: dict | None = None,
     expected_size: int = 0,
     progress_callback: ProgressCallback = None,
     connections: int = 16,
@@ -236,7 +236,7 @@ async def aria2_download(
         while True:
             try:
                 item = await asyncio.wait_for(queue.get(), timeout=1.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 item = None
 
             done = 0
@@ -320,7 +320,7 @@ async def aria2_download(
 
 async def _probe_range(
     session: aiohttp.ClientSession, url: str, headers: dict, stall_timeout: int
-) -> Optional[int]:
+) -> int | None:
     """Return total content length when the server honours Range, else None."""
     try:
         timeout = aiohttp.ClientTimeout(total=0, connect=30, sock_read=stall_timeout)
@@ -335,7 +335,7 @@ async def _probe_range(
             return int(match.group(1)) if match else None
         finally:
             await response.release()
-    except (aiohttp.ClientError, asyncio.TimeoutError):
+    except (TimeoutError, aiohttp.ClientError):
         return None
 
 
@@ -367,7 +367,7 @@ async def _download_segment(
                 headers={**headers, "Range": range_header},
                 timeout=timeout,
             )
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        except (TimeoutError, aiohttp.ClientError) as exc:
             if attempt < retries:
                 await asyncio.sleep(min(2 ** attempt, 8))
                 continue
@@ -388,7 +388,7 @@ async def _download_segment(
                         )
                     except StopAsyncIteration:
                         break
-                    except asyncio.TimeoutError as exc:
+                    except TimeoutError as exc:
                         raise TransferError(
                             f"segment stalled at {resume_at + written}"
                         ) from exc
@@ -402,7 +402,7 @@ async def _download_segment(
             raise TransferError(
                 f"segment ended early ({written}/{total} bytes)"
             )
-        except (aiohttp.ClientError, asyncio.TimeoutError, TransferError) as exc:
+        except (TimeoutError, aiohttp.ClientError, TransferError) as exc:
             if isinstance(exc, TransferError) and "did not honour" in str(exc):
                 raise
             if attempt < retries:
@@ -418,8 +418,8 @@ async def segmented_download(
     url: str,
     filepath: str,
     *,
-    session: Optional[aiohttp.ClientSession] = None,
-    headers: Optional[dict] = None,
+    session: aiohttp.ClientSession | None = None,
+    headers: dict | None = None,
     expected_size: int = 0,
     progress_callback: ProgressCallback = None,
     connections: int = 8,
@@ -529,8 +529,8 @@ async def single_stream_download(
     url: str,
     filepath: str,
     *,
-    session: Optional[aiohttp.ClientSession] = None,
-    headers: Optional[dict] = None,
+    session: aiohttp.ClientSession | None = None,
+    headers: dict | None = None,
     expected_size: int = 0,
     progress_callback: ProgressCallback = None,
     stall_timeout: int = 300,
@@ -551,7 +551,7 @@ async def single_stream_download(
 
     try:
         done = 0
-        final_exc: Optional[Exception] = None
+        final_exc: Exception | None = None
         for attempt in range(1 + retries):
             req_headers = dict(headers)
             if done:
@@ -559,7 +559,7 @@ async def single_stream_download(
             timeout = aiohttp.ClientTimeout(total=0, connect=30, sock_read=stall_timeout)
             try:
                 response = await session.get(url, headers=req_headers, timeout=timeout)
-            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            except (TimeoutError, aiohttp.ClientError) as exc:
                 final_exc = exc
                 if attempt < retries:
                     await asyncio.sleep(min(2 ** attempt, 8))
@@ -581,7 +581,7 @@ async def single_stream_download(
                             )
                         except StopAsyncIteration:
                             break
-                        except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
+                        except (TimeoutError, aiohttp.ClientError) as exc:
                             raise TransferError(
                                 f"connection stalled at {done} on {filename}"
                             ) from exc
@@ -595,7 +595,7 @@ async def single_stream_download(
                 if attempt < retries:
                     continue  # reconnect from *done* on the next attempt
                 break
-            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            except (TimeoutError, aiohttp.ClientError) as exc:
                 final_exc = exc
                 if attempt < retries:
                     continue

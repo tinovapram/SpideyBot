@@ -5,7 +5,7 @@ import html
 import json
 import os
 import urllib.parse
-from typing import Iterator
+from collections.abc import Iterator
 
 import praw
 import structlog

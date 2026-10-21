@@ -20,8 +20,8 @@ import json
 import os
 import re
 import urllib.parse
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable, Optional
 
 import aiohttp
 import structlog
@@ -55,18 +55,18 @@ class TeraBoxFile:
     size_bytes: int
     size_mb: float
     fs_id: str
-    dlink: Optional[str] = None
-    stream_url: Optional[str] = None
+    dlink: str | None = None
+    stream_url: str | None = None
     stream_ready: bool = False
-    stream_m3u8: Optional[str] = None
+    stream_m3u8: str | None = None
     transfer_status: str = "pending"
-    error: Optional[str] = None
+    error: str | None = None
     is_dir: bool = False
     category: int = 0
-    md5: Optional[str] = None
-    thumbs: Optional[dict] = None
-    path: Optional[str] = None
-    server_mtime: Optional[int] = None
+    md5: str | None = None
+    thumbs: dict | None = None
+    path: str | None = None
+    server_mtime: int | None = None
     backend: str = "account"  # "account" (Method B) or "direct" (Method A)
 
     def __repr__(self) -> str:
@@ -78,12 +78,12 @@ class TeraBoxResult:
     """Result of resolving a TeraBox share link."""
 
     status: str
-    title: Optional[str] = None
-    share_id: Optional[int] = None
-    uk: Optional[int] = None
+    title: str | None = None
+    share_id: int | None = None
+    uk: int | None = None
     files: list[TeraBoxFile] = field(default_factory=list)
-    error: Optional[str] = None
-    raw_response: Optional[dict] = None
+    error: str | None = None
+    raw_response: dict | None = None
     method: str = "account"
 
     @property
@@ -117,7 +117,7 @@ class TeraBoxURLError(TeraBoxError):
 class TeraBoxAPIError(TeraBoxError):
     """The TeraBox API returned an error."""
 
-    def __init__(self, message: str, errno: Optional[int] = None) -> None:
+    def __init__(self, message: str, errno: int | None = None) -> None:
         super().__init__(message)
         self.errno = errno
 
@@ -238,7 +238,7 @@ class AccountTransferResolver:
             "Referer": f"{self.BASE_API}/main?category=all&path=%2F",
             "X-Requested-With": "XMLHttpRequest",
         }
-        self.session: Optional[aiohttp.ClientSession] = None
+        self.session: aiohttp.ClientSession | None = None
 
     # ── Session lifecycle ──────────────────────────────────────────
 
@@ -274,7 +274,7 @@ class AccountTransferResolver:
 
     async def _request_with_retry(self, method: str, url: str, **kwargs) -> aiohttp.ClientResponse:
         session = await self._ensure_session()
-        last_exc: Optional[Exception] = None
+        last_exc: Exception | None = None
         for attempt in range(self._max_retries):
             try:
                 response = await session.request(method, url, **kwargs)
@@ -283,7 +283,7 @@ class AccountTransferResolver:
                     await asyncio.sleep(self._backoff_factor * (2 ** attempt))
                     continue
                 return response
-            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            except (TimeoutError, aiohttp.ClientError) as exc:
                 last_exc = exc
                 if attempt < self._max_retries - 1:
                     await asyncio.sleep(self._backoff_factor * (2 ** attempt))
@@ -332,12 +332,12 @@ class AccountTransferResolver:
 
     def update_credentials(
         self,
-        cookie: Optional[str] = None,
-        js_token: Optional[str] = None,
-        bds_token: Optional[str] = None,
-        sign: Optional[str] = None,
-        timestamp: Optional[str] = None,
-        logid: Optional[str] = None,
+        cookie: str | None = None,
+        js_token: str | None = None,
+        bds_token: str | None = None,
+        sign: str | None = None,
+        timestamp: str | None = None,
+        logid: str | None = None,
     ) -> None:
         if cookie:
             self.cookie = cookie
@@ -473,7 +473,7 @@ class AccountTransferResolver:
             ),
         }
 
-    async def _get_download_link(self, fs_id: str) -> Optional[str]:
+    async def _get_download_link(self, fs_id: str) -> str | None:
         fsids = urllib.parse.quote(json.dumps([str(fs_id)]))
         url = (
             f"{self.BASE_API}/api/filemetas?{self._query_params()}"
@@ -698,7 +698,7 @@ class DirectShareResolver:
         self._lock = asyncio.Lock()
 
     @staticmethod
-    def _extract_share_jstoken(html_text: str) -> Optional[str]:
+    def _extract_share_jstoken(html_text: str) -> str | None:
         if not html_text:
             return None
         for pattern in DirectShareResolver._SHARE_JSTOKEN_PATTERNS:
@@ -771,7 +771,7 @@ class DirectShareResolver:
                             chunk = await asyncio.wait_for(iterator.__anext__(), timeout=stall_timeout)
                         except StopAsyncIteration:
                             break
-                        except asyncio.TimeoutError as exc:
+                        except TimeoutError as exc:
                             raise TeraBoxError(
                                 f"Download stalled for {tb_file.filename}: no data in {stall_timeout}s"
                             ) from exc
@@ -789,7 +789,7 @@ class DirectShareResolver:
             raise
         return filepath
 
-    async def resolve(self, url: str) -> Optional[TeraBoxResult]:
+    async def resolve(self, url: str) -> TeraBoxResult | None:
         """Resolve a share link directly, or return None to fall back to Method B."""
         if not HAS_CURL_CFFI:
             return None
@@ -837,7 +837,7 @@ class DirectShareResolver:
             }
             api_url = f"https://{self._DIRECT_API_HOST}/share/list"
 
-            def _params(surl: str, root: int, dir_path: Optional[str] = None) -> dict:
+            def _params(surl: str, root: int, dir_path: str | None = None) -> dict:
                 params = {
                     "app_id": "250528",
                     "jsToken": token,
@@ -962,13 +962,13 @@ class TeraBoxDownloader:
 
     def __init__(
         self,
-        cookie: Optional[str] = None,
-        js_token: Optional[str] = None,
-        bds_token: Optional[str] = None,
-        sign: Optional[str] = None,
-        timestamp: Optional[str] = None,
-        logid: Optional[str] = None,
-        root_path: Optional[str] = None,
+        cookie: str | None = None,
+        js_token: str | None = None,
+        bds_token: str | None = None,
+        sign: str | None = None,
+        timestamp: str | None = None,
+        logid: str | None = None,
+        root_path: str | None = None,
         timeout: int = 30,
         auto_resolve_tokens: bool = True,
         max_retries: int = 3,
@@ -1154,7 +1154,7 @@ class TeraBoxDownloader:
         url: str,
         output_dir: str = ".",
         chunk_size: int = 8192,
-        progress_callback: Optional[Callable] = None,
+        progress_callback: Callable | None = None,
     ) -> list[str]:
         result = await self.resolve(url, mode="download")
         if not result.ok:

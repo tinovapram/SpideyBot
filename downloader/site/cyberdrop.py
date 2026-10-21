@@ -12,12 +12,13 @@ import asyncio
 import os
 import re
 import sys
-from typing import Iterator
+from collections.abc import Iterator
 
 import structlog
 
-from ..base import BaseDownloader
 from utils import paths
+
+from ..base import BaseDownloader
 
 logger = structlog.get_logger(__name__)
 

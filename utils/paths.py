@@ -7,6 +7,8 @@ regardless of the process working directory (Docker, systemd, ``python -m``).
 
 from __future__ import annotations
 
+import re
+import shutil
 from pathlib import Path
 
 # Project root = parent of this package (`utils/`).
@@ -34,3 +36,26 @@ def ensure_directories() -> None:
             directory.chmod(0o700)
         except OSError:
             pass
+
+
+_STAGING_DIR_RE = re.compile(r"^(?:\d+|tg_\d+)$")
+
+
+def clear_staging() -> None:
+    """Delete leftover download staging, keeping ``DOWNLOADS_DIR`` itself.
+
+    Flows write under ``downloads/<user id>/…`` and ``downloads/tg_<user id>/``.
+    Only those names are removed, so the directory can stay bind-mounted and
+    unrelated files in it are never touched.
+    """
+    DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    for entry in DOWNLOADS_DIR.iterdir():
+        if not _STAGING_DIR_RE.match(entry.name):
+            continue
+        if entry.is_dir():
+            shutil.rmtree(entry, ignore_errors=True)
+        else:
+            try:
+                entry.unlink()
+            except OSError:
+                pass

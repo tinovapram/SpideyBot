@@ -9,7 +9,7 @@ or ``monthly``.  Upserts are atomic via ``ON CONFLICT DO UPDATE``.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -74,7 +74,7 @@ class QuotaExceeded(Exception):
 
 
 def _today_utc() -> date:
-    return datetime.now(timezone.utc).date()
+    return datetime.now(UTC).date()
 
 
 async def _upsert_counter(
@@ -187,6 +187,8 @@ async def reserve_download(session: AsyncSession, user: User) -> QuotaSnapshot:
 
     today = _today_utc()
     await _upsert_counter(session, user.id, today, "daily")
+    # asyncpg cannot infer a type for a bind used only in ``:limit IS NULL``
+    # (AmbiguousParameterError), so the cast makes the parameter typed.
     stmt = text(
         """
         UPDATE quota_usage
@@ -194,7 +196,7 @@ async def reserve_download(session: AsyncSession, user: User) -> QuotaSnapshot:
          WHERE user_id = :uid
            AND period_start = :ps
            AND period_type = 'daily'
-           AND (:limit IS NULL OR downloads < :limit)
+           AND (CAST(:limit AS BIGINT) IS NULL OR downloads < CAST(:limit AS BIGINT))
         RETURNING downloads
         """
     ).bindparams(uid=user.id, ps=today, limit=daily_limit)
@@ -233,6 +235,7 @@ async def consume(
     tier = effective_tier(user.tier, user.tier_expiry, is_admin=user.is_admin)
     byte_limit = None if user.is_admin else tier_policy(tier).daily_bytes
     await _upsert_counter(session, user.id, today, "daily")
+    # Same CAST requirement as in reserve_download().
     stmt = text(
         """
         UPDATE quota_usage
@@ -240,7 +243,7 @@ async def consume(
          WHERE user_id = :uid
            AND period_start = :ps
            AND period_type = 'daily'
-           AND (:limit IS NULL OR bytes_down + :bd <= :limit)
+           AND (CAST(:limit AS BIGINT) IS NULL OR bytes_down + :bd <= CAST(:limit AS BIGINT))
         RETURNING bytes_down
         """
     ).bindparams(uid=user.id, ps=today, bd=bytes_downloaded, limit=byte_limit)

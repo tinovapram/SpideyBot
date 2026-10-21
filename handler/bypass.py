@@ -528,15 +528,15 @@ async def bypass_handler(event):
             "⚠️ **Camoufox not installed.**\n"
             "Run: `pip install camoufox && camoufox fetch`"
         )
-        raise events.StopPropagation
+        raise events.StopPropagation from None
     except ValueError as exc:
         logger.warning("bypass_rejected", url=url, reason=str(exc))
         await status_msg.edit("❌ **This URL is not supported or points to a private destination.**")
-        raise events.StopPropagation
+        raise events.StopPropagation from exc
     except Exception:
         logger.exception("bypass_failed", url=url)
         await status_msg.edit("❌ **Failed to resolve this URL. Please try again later.**")
-        raise events.StopPropagation
+        raise events.StopPropagation from None
 
     await status_msg.edit(
         f"✅ **Resolved!**\n\n"

@@ -22,7 +22,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
-from typing import Callable, Optional
+from collections.abc import Callable
 
 from utils.format import format_size, progress_bar
 from utils.telethon import safe_edit
@@ -41,7 +41,7 @@ def bytes_line(icon: str, label: str, done: float, total: float) -> str:
     )
 
 
-def count_line(icon: str, label: str, current: int, total: Optional[int] = None) -> str:
+def count_line(icon: str, label: str, current: int, total: int | None = None) -> str:
     """A consistent count row (e.g. ``📤 Uploaded: 3/5``)."""
     if total:
         return f"{icon} **{label}:** {current}/{total}"
@@ -67,7 +67,7 @@ class StatusMessage:
     PULSE_INTERVAL = 0.6   # how often the renderer re-checks while a row is active
 
     def __init__(self, message, *, header: str = "", footer: str = "",
-                 _resend: Optional[Callable] = None) -> None:
+                 _resend: Callable | None = None) -> None:
         self._message = message
         self._header = header
         self._footer = footer
@@ -133,8 +133,8 @@ class StatusMessage:
         name: str,
         icon: str,
         label: str,
-        total: Optional[int] = None,
-    ) -> Callable[[int, Optional[int]], None]:
+        total: int | None = None,
+    ) -> Callable[[int, int | None], None]:
         """Return a ``cb(current, [total])`` callback for a counting phase."""
         def _cb(current, known_total=None) -> None:
             self.row(
@@ -155,7 +155,7 @@ class StatusMessage:
                 await asyncio.wait_for(
                     asyncio.wrap_future(future), timeout=self.PULSE_INTERVAL + 0.5
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 future.cancel()
             except Exception:
                 pass
@@ -177,7 +177,7 @@ class StatusMessage:
                 await asyncio.wait_for(
                     asyncio.wrap_future(future), timeout=self.PULSE_INTERVAL + 0.5
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 future.cancel()
             except Exception:
                 pass

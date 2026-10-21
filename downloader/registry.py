@@ -45,21 +45,23 @@ def _lazy_plain(cls, substrings):
 
 def _build_entries():
     from downloader.site.bluesky import BlueskyDownloader
+    from downloader.site.bysejikuar import BysejikuarDownloader
     from downloader.site.capcut import CapCutDownloader
+    from downloader.site.cyberdrop import CyberdropDLDownloader
     from downloader.site.dailymotion import DailymotionDownloader
     from downloader.site.doodstream import DoodstreamDownloader
     from downloader.site.douyin import DouyinDownloader
     from downloader.site.kuaishou import KuaishouDownloader
     from downloader.site.linkedin import LinkedInDownloader
+    from downloader.site.luluvdoo import LuluvdooDownloader
+    from downloader.site.mega import MegaDownloader
+    from downloader.site.mixdrop import MixDropDownloader
     from downloader.site.pinterest import PinterestDownloader
     from downloader.site.snapchat import SnapchatDownloader
     from downloader.site.soundcloud import SoundCloudDownloader
     from downloader.site.spotify import SpotifyDownloader
-    from downloader.site.mixdrop import MixDropDownloader
     from downloader.site.streamtape import StreamtapeDownloader
     from downloader.site.streamwish import StreamWishDownloader
-    from downloader.site.luluvdoo import LuluvdooDownloader
-    from downloader.site.bysejikuar import BysejikuarDownloader
     from downloader.site.threads import ThreadsDownloader
     from downloader.site.tiktok import TikTokDownloader
     from downloader.site.tumblr import TumblrDownloader
@@ -67,8 +69,6 @@ def _build_entries():
     from downloader.site.vidara import VidaraDownloader
     from downloader.site.vidmonstr import VidmonstrDownloader
     from downloader.site.youtube import YouTubeDownloader
-    from downloader.site.mega import MegaDownloader
-    from downloader.site.cyberdrop import CyberdropDLDownloader
 
     return [
         _lazy_plain(YouTubeDownloader, ("youtube.com", "youtu.be")),

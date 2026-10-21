@@ -6,7 +6,6 @@ from urllib.parse import urljoin, urlparse
 
 from ..base import BaseDownloader
 
-
 _DOMAIN_RE = re.compile(
     r"streamtape\.\w+|streamta\.\w+|stape\.fun"
 )

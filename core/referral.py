@@ -14,13 +14,13 @@ No daily re-grant job is needed; the quota path simply adds this headroom.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import get_settings
-from core.models import Referral
+from core.models import Referral, User
 
 # ── Link / payload helpers ──────────────────────────────────────
 
@@ -64,6 +64,10 @@ async def record_referral(
     """
     if referrer_id == invitee_id:
         return None
+    if await session.get(User, referrer_id) is None:
+        # Deep links can carry any payload; don't trip the invitee_id FK for
+        # a referrer who never started the bot.
+        return None
 
     existing = await session.scalar(
         select(Referral).where(Referral.invitee_id == invitee_id)
@@ -101,7 +105,7 @@ async def try_credit_on_download(
         return False
 
     referral.status = "credited"
-    referral.credited_at = datetime.now(timezone.utc)
+    referral.credited_at = datetime.now(UTC)
     return True
 
 
@@ -113,7 +117,7 @@ async def bonus_downloads(session: AsyncSession, user_id: int) -> int:
     is needed — the quota path adds this headroom when checking limits.
     """
     settings = get_settings()
-    cutoff = datetime.now(timezone.utc) - timedelta(days=settings.referral_bonus_days)
+    cutoff = datetime.now(UTC) - timedelta(days=settings.referral_bonus_days)
 
     count = await session.scalar(
         select(func.count())

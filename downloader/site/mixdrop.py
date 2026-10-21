@@ -76,10 +76,6 @@ class MixDropDownloader(BaseDownloader):
         raw_url = url_match.group(1)
         stream_url = "https:" + raw_url if raw_url.startswith("//") else raw_url
 
-        # Extract title
-        title_match = re.search(r'MDCore\.title="([^"]+)"', decoded)
-        title = title_match.group(1) if title_match else "MixDrop Video"
-
         fname = self._sanitize_filename(f"{vid}.mp4")
         path = os.path.join(output_dir, fname)
         self._download_file(

@@ -48,10 +48,27 @@ exclude = ["tests*", "app*", "handlers*", "telegram*"]
 test = [
     "pytest",
     "pytest-asyncio",
-    "ruff",
-    "pyright",
+    "ruff==0.17.0",
+    "pyright==1.1.414",
 ]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+# Deliberately narrower than "ALL": this is the set the code base passes today.
+# Widen it as type/quality debt is paid down (see docs/PROJECT_IMPROVEMENT_SUGGESTIONS.md).
+select = ["E4", "E7", "E9", "F", "I", "B", "UP"]
+
+[tool.pyright]
+include = ["core", "handler", "downloader", "utils", "tests", "migrations", "main.py"]
+exclude = ["build", "dist", "data", "downloads", "user_sessions", ".venv"]
+venvPath = "."
+venv = ".venv"
+pythonVersion = "3.13"
+typeCheckingMode = "basic"

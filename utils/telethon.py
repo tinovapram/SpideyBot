@@ -73,7 +73,7 @@ async def send_album(
         except Exception as exc:
             logger.warning("Album send failed, sending individually", error=str(exc))
 
-        for item, caption in zip(batch, batch_captions):
+        for item, caption in zip(batch, batch_captions, strict=False):
             for attempt in range(2):
                 try:
                     await safe_send_file(client, chat_id, item, caption=caption, reply_to=reply_to, **kwargs)

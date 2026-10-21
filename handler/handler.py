@@ -20,22 +20,22 @@ Call :func:`install` once at startup. User clients reach that instance through
 
 from __future__ import annotations
 
+import os
 import re
 
-from click import Path
+import structlog
 from telethon import TelegramClient, events
 from telethon.tl.custom import Button
 
-import structlog
 from core import sessions
 from core.config import get_settings, is_admin
 from core.db import session_scope
+from core.metrics import get_metrics
 from core.models import User, get_or_create_user
-from core.quota import get_snapshot, release_download, reserve_download, QuotaExceeded
-from core.referral import referral_stats
-from core.tiers import (
-    size_limit,
-)
+from core.quota import QuotaExceeded, get_snapshot, release_download, reserve_download
+from core.ratelimit import get_limiter
+from core.referral import parse_start_payload, record_referral, referral_stats
+from core.tiers import size_limit
 from core.worker import DownloadManager, _MessageStub
 from downloader.telegram import (
     download_tg_message,
@@ -153,6 +153,18 @@ class Handler:
             return "🟡 Session saved (not running)"
         return "🔴 No session"
 
+    async def _rate_limited(self, event) -> bool:
+        """Reply with a retry hint and return True when the sender is limited."""
+        if get_limiter().allow(event.sender_id):
+            return False
+        get_metrics().incr("rate_limited")
+        await event.client.send_message(
+            event.chat_id,
+            "⏳ **SpideyBot:** Too many requests — please wait a moment and try again.",
+            reply_to=event.message,
+        )
+        return True
+
     async def _resolve_bot_username(self) -> str | None:
         """Return the bot's own @username, cached for the process lifetime.
 
@@ -202,7 +214,7 @@ class Handler:
                 if user is not None:
                     await release_download(session, user)
             raise
-        position = self.manager.get_queue_position(task.entry_id)
+        position = await self.manager.get_queue_position(task.entry_id)
         if position > 0:
             await status_msg.edit(
                 f"📋 Queued — position **#{position}**. "
@@ -215,6 +227,8 @@ class Handler:
         if len(args) < 2 or not args[1].strip():
             await event.client.send_message(event.chat_id, usage,reply_to=event.message)
             raise events.StopPropagation
+        if await self._rate_limited(event):
+            raise events.StopPropagation
         await self._enqueue_download(event, args[1].strip())
         raise events.StopPropagation
 
@@ -226,6 +240,9 @@ class Handler:
             parse_tg_range(link) if is_range else parse_tg_link(link)
         except ValueError as exc:
             await event.client.send_message(event.chat_id, f"⚠️ {exc}", reply_to=event.message)
+            return
+
+        if await self._rate_limited(event):
             return
 
         label = " (range)" if is_range else ""
@@ -244,12 +261,12 @@ class Handler:
         try:
             if is_range:
                 result = await download_tg_range(
-                    self.client, link, output_dir=output_dir,
+                    event.client, link, output_dir=output_dir,
                     progress_callback=dl_cb,
                 )
             else:
                 result = await download_tg_message(
-                    self.client, link, output_dir=output_dir,
+                    event.client, link, output_dir=output_dir,
                     progress_callback=dl_cb,
                 )
         except Exception as exc:
@@ -264,13 +281,12 @@ class Handler:
         metadata = result.get("file_metadata") or [None] * len(files)
         original_caption = (result.get("caption") or "").strip()
 
-        import os
         try:
             status.drop("tgdl")
             status.set_header("📤 **SpideyBot:** Uploading to Telegram")
             up_cb = status.bytes_cb("ul", "📤", "Uploading")
             media = []
-            for fp, meta in zip(files, metadata):
+            for fp, meta in zip(files, metadata, strict=False):
                 if not os.path.isfile(fp):
                     continue
                 try:
@@ -287,7 +303,7 @@ class Handler:
                             kwargs["force_document"] = True
                     media.append(
                         await prepare_media(
-                            self.client, fp,
+                            event.client, fp,
                             progress_callback=up_cb, **kwargs,
                         )
                     )
@@ -299,7 +315,7 @@ class Handler:
                     cap = original_caption
                 else:
                     cap = f"✅ **SpideyBot:** Downloaded {len(media)} file(s) from Telegram{label}."
-                await self.client.send_file(
+                await event.client.send_file(
                     event.chat_id, media,
                     caption=cap,
                     reply_to=event.message,
@@ -337,6 +353,9 @@ class Handler:
 
         async with session_scope() as session:
             user = await get_or_create_user(session, user_id, _sender_username(event))
+            referrer_id = parse_start_payload(event.text or "")
+            if referrer_id is not None:
+                await record_referral(session, referrer_id=referrer_id, invitee_id=user_id)
 
         # Auto-start saved session so /dl and /dt work everywhere immediately.
         if sessions.has_session(user_id) and not sessions.is_client_active(user_id):
@@ -549,9 +568,9 @@ class Handler:
         """List supported sites grouped by category."""
         lines = [
             "**Supported Platforms**\n",
-            f"  📱 Social & video: YouTube, Twitter, TikTok, Reddit, Instagram, ...",
-            f"  🎬 Video hosting: Doodstream, StreamTape, MixDrop, StreamWish, ...",
-            f"  📦 Heavy / cloud: TeraBox",
+            "  📱 Social & video: YouTube, Twitter, TikTok, Reddit, Instagram, ...",
+            "  🎬 Video hosting: Doodstream, StreamTape, MixDrop, StreamWish, ...",
+            "  📦 Heavy / cloud: TeraBox",
             "",
             "Send any link with /dl or /dt to download.",
         ]
@@ -635,6 +654,8 @@ class Handler:
         if not msg or not msg.media:
             await event.client.send_message('me', "⚠️ **Replied message has no media.**\n" "Reply to a message with media and send `WOW` to download it.")
             raise events.StopPropagation
+        if await self._rate_limited(event):
+            return
         status_msg = await event.client.send_message('me', "⏳ **SpideyBot:** Downloading media…")
         status = StatusMessage(status_msg)
         status.set_header("🔄 **SpideyBot:** Downloading media")
@@ -680,10 +701,11 @@ class Handler:
         username = f"@{sender.username}/" if sender.username else ""
         user_id = f'#id{sender.id}' if sender.id else "None"
         caption = f':\n"{event.text}"' if event.text else ""
+        media_dir = DOWNLOADS_DIR / f"tg_{me.id}"
+        media_dir.mkdir(parents=True, exist_ok=True)
+        target = media_dir / f"timermedia_{sender.id}_{event.message.id}"
         try:
-            result = await event.download_media(
-                str(Path(f"TimerMedia/from{user_id}{event.message.id}{me.id}"))
-            )
+            result = await event.download_media(str(target))
         except Exception as exc:
             logger.error("Failed to download timer media", error=str(exc))
             return
@@ -693,6 +715,12 @@ class Handler:
             )
         except Exception as exc:
             logger.error("Failed to send timer media", error=str(exc))
+        finally:
+            # The media now lives in the user's Saved Messages; drop the staging file.
+            try:
+                os.remove(result)
+            except (OSError, TypeError):
+                pass
     # ── registration ──────────────────────────────────────────────────────────
 
     def register_bot_handlers(self) -> None:

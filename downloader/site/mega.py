@@ -13,7 +13,8 @@ import base64
 import os
 import re
 import struct
-from typing import Any, Iterator
+from collections.abc import Iterator
+from typing import Any
 
 import requests
 import structlog
@@ -148,12 +149,8 @@ def _api_post(session: requests.Session, data: list, id_: int = 0) -> list:
 def _decode_key(key_b64: str) -> bytes:
     """Decode a MEGA base64url share key → raw AES-256 key (16 bytes)."""
     raw = _b64_decode(key_b64)
-    # MEGA keys are 16 bytes (128-bit AES), encoded as 4 int32s.
-    ints = struct.unpack("<4I", raw)
-    # The actual AES key is the XOR of each pair of int32s:
-    # key[i] = ints[2i] ^ ints[2i+1], then we pack as 4 int32s → 16 bytes.
-    # Wait — for a 16-byte key, the encoding is: raw bytes, possibly with
-    # trailing zeros or a CRC.  We just use the first 16 bytes.
+    # MEGA keys are 16 bytes (128-bit AES).  The decoded value may carry
+    # padding or a CRC, so only the first 16 bytes are the key.
     return raw[:16]
 
 

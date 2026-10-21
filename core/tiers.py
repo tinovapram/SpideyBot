@@ -8,7 +8,7 @@ Tier parameters are loaded from env vars at first access via :func:`_load_tiers`
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 _MB = 1024 * 1024
 _GB = 1024 * _MB
@@ -89,8 +89,8 @@ def effective_tier(tier: str, tier_expiry: datetime | None, *, is_admin: bool = 
     if is_admin:
         return "premium"
     if tier_expiry is not None:
-        expiry = tier_expiry if tier_expiry.tzinfo else tier_expiry.replace(tzinfo=timezone.utc)
-        if expiry < datetime.now(timezone.utc):
+        expiry = tier_expiry if tier_expiry.tzinfo else tier_expiry.replace(tzinfo=UTC)
+        if expiry < datetime.now(UTC):
             return DEFAULT_TIER
     return tier if is_known_tier(tier) else DEFAULT_TIER
 

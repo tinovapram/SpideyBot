@@ -5,11 +5,11 @@ preparation for Telegram uploads.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
 import subprocess
-from typing import Optional
 
 import structlog
 
@@ -43,7 +43,7 @@ def sanitize_filename(filename: str, max_len: int = 120) -> str:
     return f"{clean_name}.{clean_ext}" if clean_ext else clean_name
 
 
-def build_caption(filename: str, link: str, native: Optional[str] = None) -> str:
+def build_caption(filename: str, link: str, native: str | None = None) -> str:
     """Build a per-file caption.
 
     When *native* (the post's own caption/description) is provided it is shown
@@ -51,7 +51,7 @@ def build_caption(filename: str, link: str, native: Optional[str] = None) -> str
     """
 
     head = f"{native}\n\n" if native and native.strip() else ""
-    bot_link = f"[SpideyBot](https://t.me/SpideyUtilBot)"
+    bot_link = "[SpideyBot](https://t.me/SpideyUtilBot)"
     return f"{head}{filename}\n\nDownloaded by {bot_link} from [link]({link})\n\n"
 
 
@@ -93,7 +93,7 @@ def _collect_meta(json_paths: list[str]) -> dict:
     return found
 
 
-def extract_native_text(json_paths: list[str]) -> Optional[str]:
+def extract_native_text(json_paths: list[str]) -> str | None:
     """Return the post's native caption/description text (no author prefix)."""
     found = _collect_meta(json_paths)
     if not found:
@@ -112,7 +112,7 @@ def extract_native_text(json_paths: list[str]) -> Optional[str]:
     return caption[:1024] if caption else None
 
 
-def extract_post_text(json_paths: list[str]) -> Optional[str]:
+def extract_post_text(json_paths: list[str]) -> str | None:
     """Extract ``author on category:\n\ncaption`` from metadata JSON files."""
     found = _collect_meta(json_paths)
     if not found:
@@ -133,7 +133,7 @@ def extract_post_text(json_paths: list[str]) -> Optional[str]:
     return f"{author} on {category}:\n\n{caption}\n" if caption else None
 
 
-def make_video_thumb(video_path: str) -> Optional[str]:
+def make_video_thumb(video_path: str) -> str | None:
     """Extract the first frame as a JPEG thumbnail for large videos."""
     ext = os.path.splitext(video_path)[1].lower()
     if ext not in _VIDEO_EXTS:
@@ -172,11 +172,11 @@ async def prepare_media(
     client,
     file_path: str,
     *,
-    thumb: Optional[str] = None,
-    as_image: Optional[bool] = None,
+    thumb: str | None = None,
+    as_image: bool | None = None,
     force_document: bool = False,
-    supports_streaming: Optional[bool] = None,
-    nosound_video: Optional[bool] = None,
+    supports_streaming: bool | None = None,
+    nosound_video: bool | None = None,
     progress_callback=None,
 ):
     """Upload *file_path* and return a Telethon ``InputMedia`` object."""
@@ -209,7 +209,7 @@ async def prepare_media(
         except Exception:
             thumb_handle = None
     elif thumb is None:
-        auto_thumb = make_video_thumb(file_path)
+        auto_thumb = await asyncio.to_thread(make_video_thumb, file_path)
         if auto_thumb:
             try:
                 thumb_handle = await client.upload_file(auto_thumb)

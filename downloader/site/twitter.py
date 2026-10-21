@@ -1,7 +1,7 @@
 import json
 import os
 import re
-from typing import Iterator
+from collections.abc import Iterator
 
 import structlog
 from bs4 import BeautifulSoup

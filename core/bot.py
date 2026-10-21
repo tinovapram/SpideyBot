@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import shutil
 import signal
 import sys
 
@@ -18,7 +17,7 @@ from core import config, db, sessions
 from core.config import Settings, get_settings
 from core.event_loop import configure_event_loop
 from core.logging import setup_logging
-from core.observability import set_component_status, start_server, stop_server
+from core.observability import register_probe, set_component_status, start_server, stop_server
 from core.scheduler import start_scheduler
 from core.worker import DownloadManager
 from handler.admin import register_admin_handlers
@@ -185,8 +184,7 @@ def main() -> None:
                 raise
             _scheduler_task = await start_scheduler()
             set_component_status("scheduler", True)
-            shutil.rmtree(paths.DOWNLOADS_DIR, ignore_errors=True)
-            paths.DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
+            paths.clear_staging()
 
             download_manager.start()
             set_component_status("worker", True)
@@ -194,6 +192,8 @@ def main() -> None:
             assert _settings is not None
             await bot.start(bot_token=_settings.tg_bot_token)
             set_component_status("telegram", True)
+            # Keep /readyz honest: report a dropped Telegram connection.
+            register_probe("telegram", lambda: bot is not None and bot.is_connected())
             paths.READY_FILE.write_text(str(os.getpid()), encoding="ascii")
             logger.info("Bot is running and listening for messages")
             await bot.run_until_disconnected()

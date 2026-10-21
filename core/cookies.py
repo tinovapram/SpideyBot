@@ -12,7 +12,6 @@ accounts are busy.  Pro/premium cookies stay private to their owner.
 from __future__ import annotations
 
 from cryptography.fernet import Fernet, InvalidToken
-
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -115,16 +114,19 @@ async def shared_cookies(session: AsyncSession) -> list[str]:
     ``free``).  Admin users are excluded so an admin's own cookie is never
     silently pooled.
     """
-    rows = await session.execute(select(UserCookie))
+    # Single join: the previous per-row ``session.get(User, ...)`` turned this
+    # into an N+1 query on every TeraBox job.
+    rows = await session.execute(
+        select(UserCookie.cookie_encrypted, User.tier, User.tier_expiry)
+        .join(User, User.id == UserCookie.user_id)
+        .where(User.is_admin.is_(False))
+    )
     result: list[str] = []
-    for cookie_row in rows.scalars():
-        user = await session.get(User, cookie_row.user_id)
-        if user is None or user.is_admin:
-            continue
-        if effective_tier(user.tier, user.tier_expiry) != DEFAULT_TIER:
+    for token, tier, tier_expiry in rows:
+        if effective_tier(tier, tier_expiry) != DEFAULT_TIER:
             continue
         try:
-            result.append(_decrypt(cookie_row.cookie_encrypted))
+            result.append(_decrypt(token))
         except InvalidToken:
             continue
     return result
