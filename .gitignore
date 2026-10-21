@@ -26,6 +26,8 @@ venv/
 .coverage.*
 htmlcov/
 tests/
+!tests/
+!tests/*.py
 
 # ── Type checking ──────────────────────────────────────────────────
 .mypy_cache/

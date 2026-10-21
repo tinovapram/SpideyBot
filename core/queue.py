@@ -11,7 +11,7 @@ with no code changes.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -169,6 +169,30 @@ async def fail(
     job.status = FAILED
     get_metrics().incr("downloads_failed")
     return False
+
+
+async def retry_running_job(session: AsyncSession, job: DownloadJob) -> bool:
+    """Keep a failed job claimed while the current worker retries it.
+
+    Returning the job to the shared queue would allow another process to
+    claim it without the in-memory Telegram message context needed to deliver
+    the result.
+    """
+    settings = get_settings()
+    now = datetime.now(timezone.utc)
+    get_metrics().incr("downloads_failed")
+
+    if job.attempts >= settings.job_max_attempts:
+        job.status = FAILED
+        job.finished_at = now
+        job.claim_token = None
+        job.lease_expires = None
+        return False
+
+    job.attempts += 1
+    job.finished_at = None
+    job.lease_expires = now + timedelta(seconds=settings.job_lease_seconds)
+    return True
 
 
 async def cancel(session: AsyncSession, job_id: int) -> bool:

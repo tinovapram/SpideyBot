@@ -20,7 +20,8 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from core import queue as Q, sessions
+from core import queue as Q
+from core import sessions
 from core.config import get_settings
 from core.cookies import shared_cookies
 from core.db import session_scope
@@ -463,38 +464,42 @@ class DownloadManager:
 
         # ── Resolve TeraBox downloader (with shared cookies) ────
         terabox = self._terabox_downloader
+        terabox_resolved = task.site != "terabox" or terabox is None
 
-        try:
-            if task.site == "terabox":
-                if terabox is not None:
-                    async with session_scope() as session:
-                        terabox = await _append_shared_cookies(terabox, session)
-                from downloader.terabox_flow import run_terabox
-
-                await run_terabox(task, client, terabox)
-            else:
-                from downloader.flow import run_download
-
-                await run_download(task, client)
-        except Exception:
-            logger.exception(
-                "Download failed",
-                user_id=job.user_id,
-                link=job.link,
-                site=task.site,
-            )
+        while True:
             try:
-                async with session_scope() as session:
-                    db_job = await Q.get_job(session, entry_id)
-                    if db_job is not None:
-                        retried = await Q.fail(session, db_job, retry=True)
-                        if retried:
-                            logger.info("Job re-queued for retry", job_id=entry_id)
-                await session.commit()
+                if task.site == "terabox":
+                    if not terabox_resolved:
+                        async with session_scope() as session:
+                            terabox = await _append_shared_cookies(terabox, session)
+                        terabox_resolved = True
+                    from downloader.terabox_flow import run_terabox
+
+                    await run_terabox(task, client, terabox)
+                else:
+                    from downloader.flow import run_download
+
+                    await run_download(task, client)
+                break
             except Exception:
-                logger.exception("Failed to record job failure", job_id=entry_id)
-            self.task_done(entry_id)
-            return
+                logger.exception(
+                    "Download failed",
+                    user_id=job.user_id,
+                    link=job.link,
+                    site=task.site,
+                )
+                try:
+                    async with session_scope() as session:
+                        db_job = await Q.get_job(session, entry_id)
+                        if db_job is None or not await Q.retry_running_job(session, db_job):
+                            self.task_done(entry_id)
+                            return
+                except Exception:
+                    logger.exception("Failed to record job failure", job_id=entry_id)
+                    return
+
+                logger.info("Retrying job in current worker", job_id=entry_id)
+                await asyncio.sleep(1)
 
         # ── Success ─────────────────────────────────────────────
         try:

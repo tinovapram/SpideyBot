@@ -5,8 +5,8 @@ Bot core: initialization, service wiring, handler registration and lifecycle.
 from __future__ import annotations
 
 import asyncio
-import signal
 import shutil
+import signal
 import sys
 
 import structlog
@@ -15,13 +15,13 @@ from telethon import TelegramClient
 from core import config, db, sessions
 from core.config import get_settings
 from core.logging import setup_logging
+from core.scheduler import start_scheduler
 from core.worker import DownloadManager
-
 from handler.admin import register_admin_handlers
 from handler.bypass import register_bypass_handler
 from handler.handler import install
-from handler.setting import register_setting_handlers
 from handler.login import register_login_handlers
+from handler.setting import register_setting_handlers
 from utils import paths
 
 setup_logging()
@@ -81,14 +81,28 @@ register_login_handlers(bot)
 logger.info("All handlers registered")
 
 _shutdown_event = asyncio.Event()
+_scheduler_task: asyncio.Task[None] | None = None
 
 
 async def _handle_shutdown(signal_name: str) -> None:
+    global _scheduler_task
+
     if _shutdown_event.is_set():
         return
     _shutdown_event.set()
     log = logger.bind(signal=signal_name)
     log.info("Shutdown signal received — stopping gracefully")
+
+    if _scheduler_task is not None:
+        _scheduler_task.cancel()
+        try:
+            await _scheduler_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("Background scheduler failed during shutdown")
+        _scheduler_task = None
+        log.info("Background scheduler stopped")
 
     await download_manager.stop()
     log.info("Download manager stopped")
@@ -125,18 +139,22 @@ def main() -> None:
         signal.signal(signal.SIGTERM, _win_handler)
 
     async def run() -> None:
-        paths.ensure_directories()
-        db.init_db()
-        shutil.rmtree(paths.DOWNLOADS_DIR, ignore_errors=True)
-        paths.DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
+        global _scheduler_task
 
-        download_manager.start()
-        await bot.start(bot_token=_settings.tg_bot_token)
-        logger.info("Bot is running and listening for messages")
-        await bot.run_until_disconnected()
+        try:
+            paths.ensure_directories()
+            db.init_db()
+            _scheduler_task = await start_scheduler()
+            shutil.rmtree(paths.DOWNLOADS_DIR, ignore_errors=True)
+            paths.DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
-        if not _shutdown_event.is_set():
-            await _handle_shutdown("clean-exit")
+            download_manager.start()
+            await bot.start(bot_token=_settings.tg_bot_token)
+            logger.info("Bot is running and listening for messages")
+            await bot.run_until_disconnected()
+        finally:
+            if not _shutdown_event.is_set():
+                await _handle_shutdown("run-exit")
 
     try:
         loop.run_until_complete(run())
