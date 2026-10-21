@@ -2,7 +2,7 @@
 
 ## Status
 
-Plan only. No application code or dependency files have been changed. Implementation requires separate approval.
+Deferred. The project will continue using Telethon; this migration is not an active work item.
 
 ## Scope
 

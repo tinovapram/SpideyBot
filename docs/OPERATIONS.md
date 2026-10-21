@@ -7,6 +7,14 @@ worker startup, and Telegram startup all succeed. The bot then writes
 `data/ready`; Docker checks that the recorded process is still alive. A stale
 marker is removed at startup and shutdown.
 
+## Event loop
+
+The application uses `winuvloop` at process startup. It selects `uvloop` on
+Linux/macOS and `winloop` on Windows, before the bot creates its event loop.
+Startup logs include the selected backend. If the accelerator is unavailable,
+the application falls back to Python's default asyncio policy and logs a
+warning.
+
 ## Database migrations
 
 Run migrations before starting the bot:

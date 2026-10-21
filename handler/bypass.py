@@ -17,13 +17,16 @@ import base64
 import json
 import os
 import re
+import socket
 import sys
 from contextlib import asynccontextmanager
+from ipaddress import ip_address
 from urllib.parse import urlparse
 
+import structlog
 from telethon import TelegramClient, events
 
-import structlog
+from core.metrics import get_metrics
 
 logger = structlog.get_logger(__name__)
 
@@ -117,6 +120,97 @@ _MOVE2LINK_API = "https://api.move2link.com/api/v1"
 
 _JWT_RE = re.compile(r"^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$")
 _URL_RE = re.compile(r"^https?://", re.IGNORECASE)
+_BLOCKED_HOSTNAMES = {
+    "localhost",
+    "localhost.localdomain",
+    "ip6-localhost",
+    "ip6-loopback",
+}
+
+
+def _max_browser_concurrency() -> int:
+    """Return the configured upper bound for concurrent browser sessions."""
+    try:
+        return max(1, min(int(os.environ.get("CAMOUFOX_MAX_CONCURRENCY", "2")), 16))
+    except ValueError:
+        return 2
+
+
+_BROWSER_SEMAPHORE = asyncio.Semaphore(_max_browser_concurrency())
+
+
+async def _validate_public_url(raw_url: str) -> str:
+    """Validate a URL before navigation and reject common SSRF targets."""
+    candidate = raw_url.strip()
+    parsed = urlparse(candidate)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("Only public HTTP(S) URLs are supported")
+    if parsed.username or parsed.password:
+        raise ValueError("URLs with embedded credentials are not supported")
+
+    hostname = parsed.hostname.rstrip(".").lower()
+    if hostname in _BLOCKED_HOSTNAMES or hostname.endswith((".local", ".internal")):
+        raise ValueError("Private or local destinations are not supported")
+
+    try:
+        literal = ip_address(hostname)
+        addresses = [literal]
+    except ValueError:
+        try:
+            infos = await asyncio.to_thread(
+                socket.getaddrinfo,
+                hostname,
+                parsed.port or (443 if parsed.scheme.lower() == "https" else 80),
+                type=socket.SOCK_STREAM,
+            )
+        except OSError as exc:
+            raise ValueError("The destination host could not be resolved") from exc
+        addresses = [ip_address(info[4][0]) for info in infos]
+
+    if not addresses or any(
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_reserved
+        or address.is_multicast
+        or address.is_unspecified
+        for address in addresses
+    ):
+        raise ValueError("Private or local destinations are not supported")
+    return candidate
+
+
+def _is_obviously_private_request(raw_url: str) -> bool:
+    """Reject private literal hosts in browser subrequests and redirects."""
+    try:
+        parsed = urlparse(raw_url)
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+            return parsed.scheme.lower() not in {"", "about", "data", "blob"}
+        hostname = parsed.hostname.rstrip(".").lower()
+        if hostname in _BLOCKED_HOSTNAMES or hostname.endswith((".local", ".internal")):
+            return True
+        try:
+            address = ip_address(hostname)
+        except ValueError:
+            return False
+        return (
+            address.is_private
+            or address.is_loopback
+            or address.is_link_local
+            or address.is_reserved
+            or address.is_multicast
+            or address.is_unspecified
+        )
+    except ValueError:
+        return True
+
+
+async def _guard_browser_request(route, request) -> None:
+    """Stop obvious private-network browser requests before they are sent."""
+    if _is_obviously_private_request(request.url):
+        await route.abort()
+        return
+    await route.continue_()
 
 def _default_headless() -> bool | str:
     """Pick the Camoufox display mode.
@@ -209,7 +303,13 @@ async def _unlock_move2link(token: str) -> str | None:
 
     data = await _move2link_api("/views/finalize", "POST", current)
     dest = str(data.get("redirect_url") or "").strip()
-    return dest if _URL_RE.match(dest) else None
+    if not _URL_RE.match(dest):
+        return None
+    try:
+        return await _validate_public_url(dest)
+    except ValueError:
+        logger.warning("move2link_private_destination", destination=dest)
+        return None
 
 
 async def _capture_move2link_token(url: str, *, timeout_ms: int) -> str | None:
@@ -332,11 +432,23 @@ async def _camoufox_page(*, inject_bypass: bool = False):
     """
     from camoufox.async_api import AsyncCamoufox
 
-    async with AsyncCamoufox(headless=_HEADLESS) as browser:
-        page = await browser.new_page()
-        if inject_bypass:
-            await page.add_init_script(_INJECT_JS)
-        yield page
+    async with _BROWSER_SEMAPHORE:
+        metrics = get_metrics()
+        metrics.incr("camoufox_sessions_started")
+        metrics.incr("active_camoufox_sessions")
+        try:
+            async with AsyncCamoufox(headless=_HEADLESS) as browser:
+                page = await browser.new_page()
+                await page.route("**/*", _guard_browser_request)
+                if inject_bypass:
+                    await page.add_init_script(_INJECT_JS)
+                yield page
+        except Exception:
+            metrics.incr("camoufox_sessions_failed")
+            raise
+        finally:
+            metrics.incr("camoufox_sessions_completed")
+            metrics.incr("active_camoufox_sessions", -1)
 
 
 async def resolve_url(url: str, *, timeout_ms: int = 45_000) -> str:
@@ -345,6 +457,7 @@ async def resolve_url(url: str, *, timeout_ms: int = 45_000) -> str:
     move2link.co-family links take a dedicated gate + API path; everything else
     falls back to the generic Camoufox + bypass-JS flow.
     """
+    url = await _validate_public_url(url)
     host = urlparse(url).hostname or url
     if _is_move2link_host(host):
         destination = await _resolve_move2link(url, timeout_ms=timeout_ms)
@@ -357,13 +470,15 @@ async def resolve_url(url: str, *, timeout_ms: int = 45_000) -> str:
 async def _resolve_generic(url: str, *, timeout_ms: int = 45_000) -> str:
     """Resolve *url* through Camoufox with bypass JS. Returns the final URL."""
     async with _camoufox_page(inject_bypass=True) as page:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(timeout_ms, 1_000) / 1000
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
         except Exception as exc:
             logger.debug("bypass_goto", url=url, error=str(exc))
 
-        # Let bypass JS kick in
-        await page.wait_for_timeout(3000)
+        # Let bypass JS kick in without adding an unbounded fixed delay.
+        await page.wait_for_timeout(min(1000, max(1, int((deadline - loop.time()) * 1000))))
 
         # Try clicking through "get link" buttons
         for sel in _CLICK_SELS:
@@ -371,20 +486,23 @@ async def _resolve_generic(url: str, *, timeout_ms: int = 45_000) -> str:
                 el = await page.query_selector(sel)
                 if el and await el.is_visible():
                     await el.click()
-                    await page.wait_for_timeout(3000)
+                    remaining_ms = max(1, int((deadline - loop.time()) * 1000))
+                    await page.wait_for_timeout(min(1000, remaining_ms))
                     break
             except Exception:
                 pass
 
         # Cloudflare challenge auto-solve wait
-        for _ in range(5):
+        while loop.time() < deadline:
             title = await page.title()
             if "Just a moment" in title or "Attention Required" in title:
-                await page.wait_for_timeout(3000)
+                remaining_ms = max(1, int((deadline - loop.time()) * 1000))
+                await page.wait_for_timeout(min(1000, remaining_ms))
             else:
                 break
 
-        return page.url
+        final_url = await _validate_public_url(page.url)
+        return final_url
 
 
 # ── /bypass command ───────────────────────────────────────────────────────────
@@ -411,9 +529,13 @@ async def bypass_handler(event):
             "Run: `pip install camoufox && camoufox fetch`"
         )
         raise events.StopPropagation
-    except Exception as exc:
-        logger.error("bypass_failed", url=url, error=str(exc))
-        await status_msg.edit(f"❌ **Failed to resolve:** {exc!s:.200}")
+    except ValueError as exc:
+        logger.warning("bypass_rejected", url=url, reason=str(exc))
+        await status_msg.edit("❌ **This URL is not supported or points to a private destination.**")
+        raise events.StopPropagation
+    except Exception:
+        logger.exception("bypass_failed", url=url)
+        await status_msg.edit("❌ **Failed to resolve this URL. Please try again later.**")
         raise events.StopPropagation
 
     await status_msg.edit(

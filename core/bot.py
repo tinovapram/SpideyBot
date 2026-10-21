@@ -16,9 +16,10 @@ from telethon import TelegramClient
 
 from core import config, db, sessions
 from core.config import Settings, get_settings
+from core.event_loop import configure_event_loop
 from core.logging import setup_logging
-from core.scheduler import start_scheduler
 from core.observability import set_component_status, start_server, stop_server
+from core.scheduler import start_scheduler
 from core.worker import DownloadManager
 from handler.admin import register_admin_handlers
 from handler.bypass import register_bypass_handler
@@ -149,6 +150,7 @@ async def _handle_shutdown(signal_name: str) -> None:
 def main() -> None:
     global _shutdown_event
 
+    configure_event_loop()
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 

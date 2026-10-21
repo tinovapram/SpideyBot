@@ -32,6 +32,10 @@ class Metrics:
     rate_limited: int = 0
     tasks_enqueued: int = 0
     tasks_cancelled: int = 0
+    camoufox_sessions_started: int = 0
+    camoufox_sessions_completed: int = 0
+    camoufox_sessions_failed: int = 0
+    active_camoufox_sessions: int = 0
 
     _lock: Lock = field(default_factory=Lock, repr=False, compare=False)
 
@@ -81,6 +85,18 @@ class Metrics:
             "# HELP spideybot_active_sessions Current active user sessions.",
             "# TYPE spideybot_active_sessions gauge",
             f"spideybot_active_sessions {snapshot['active_sessions']}",
+            "# HELP spideybot_camoufox_sessions_started_total Camoufox browser sessions started.",
+            "# TYPE spideybot_camoufox_sessions_started_total counter",
+            f"spideybot_camoufox_sessions_started_total {snapshot['camoufox_sessions_started']}",
+            "# HELP spideybot_camoufox_sessions_completed_total Camoufox browser sessions closed.",
+            "# TYPE spideybot_camoufox_sessions_completed_total counter",
+            f"spideybot_camoufox_sessions_completed_total {snapshot['camoufox_sessions_completed']}",
+            "# HELP spideybot_camoufox_sessions_failed_total Camoufox browser sessions that failed.",
+            "# TYPE spideybot_camoufox_sessions_failed_total counter",
+            f"spideybot_camoufox_sessions_failed_total {snapshot['camoufox_sessions_failed']}",
+            "# HELP spideybot_active_camoufox_sessions Current active Camoufox browser sessions.",
+            "# TYPE spideybot_active_camoufox_sessions gauge",
+            f"spideybot_active_camoufox_sessions {snapshot['active_camoufox_sessions']}",
         ]
         with self._lock:
             for site, count in sorted(self.downloads_by_site.items()):
