@@ -54,11 +54,13 @@ logger = structlog.get_logger(__name__)
 # ── pricing / copy ────────────────────────────────────────────────────────────
 
 _FREE_NOTE = "🆓 **Free plan:** one download at a time with a per-file size limit."
+# Commands that take arguments are shown in `code` so a tap copies the template;
+# bare commands stay plain text so Telegram renders them as tappable commands.
 _START_GUIDE = (
     "**Ready to download**\n"
-    "Send `/dl <URL>` for a public link, or use `/login` followed by "
+    "Send `/dl <URL>` for a public link, or use /login followed by "
     "`/dt <t.me link>` for Telegram media.\n\n"
-    "Use `/help` for all commands and tips."
+    "Use /help for all commands and tips."
 )
 
 _HELP_HEADER = (
@@ -67,27 +69,27 @@ _HELP_HEADER = (
     "Reddit, Instagram, and more.\n\n"
     "**Quick start**\n"
     "1. Send `/dl <URL>` to download a public link.\n"
-    "2. Use `/login` before downloading from Telegram.\n"
+    "2. Use /login before downloading from Telegram.\n"
     "3. Send `/dt <t.me link>` for Telegram media.\n"
 )
 _HELP_COMMANDS = """
 **Commands**
 
-- `/start` — Create your account or refresh your status
-- `/help` — Show this guide
+- /start — Create your account or refresh your status
+- /help — Show this guide
 - `/dl <URL>` — Download from a public link
 - `/dt <t.me link>` — Download Telegram media
-- `/login` — Connect your Telegram session
-- `/stop` — Disconnect temporarily; keep the session saved
-- `/logout` — Disconnect and delete your saved session
+- /login — Connect your Telegram session
+- /stop — Disconnect temporarily; keep the session saved
+- /logout — Disconnect and delete your saved session
 - `/cancel [ID]` — Cancel a queued download
-- `/status` — View active downloads
-- `/account` — View account and session status
-- `/quota` — View usage and limits
-- `/sites` — List supported platforms
-- `/setting` — Configure your magic word and media settings
+- /status — View active downloads
+- /account — View account and session status
+- /quota — View usage and limits
+- /sites — List supported platforms
+- /setting — Configure your magic word and media settings
 - `/bypass <URL>` — Resolve a link shortener
-- `/referral` — View your invite link and referral stats
+- /referral — View your invite link and referral stats
 """
 _HELP_NOTES = """
 **Good to know**
@@ -96,7 +98,7 @@ _HELP_NOTES = """
 • Large files are split automatically when needed.
 • TeraBox links require a logged-in account.
 • Reply to media and send your magic word (default: `WOW`) to download it.
-• Private photos and videos can be auto-saved; manage this in `/setting`.
+• Private photos and videos can be auto-saved; manage this in /setting.
 """
 _HELP_ADMIN = """
 

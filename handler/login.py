@@ -131,9 +131,9 @@ def register_login_handlers(bot) -> None:
                 started = await sessions.start_client(user_id)
                 message = (
                     f"✅ **Login successful!**\n\nLogged in as `{masked}`.\n\n"
-                    "Use `/stop` to disconnect, or `/logout` to revoke."
+                    "Use /stop to disconnect, or /logout to revoke."
                     if started
-                    else f"✅ **Login successful!**\n\nLogged in as `{masked}`.\nSession saved. Use `/start` to connect."
+                    else f"✅ **Login successful!**\n\nLogged in as `{masked}`.\nSession saved. Use /start to connect."
                 )
                 await conv.send_message(message, buttons=Button.clear())
                 logger.info("Login completed", user_id=user_id, client_started=started)
