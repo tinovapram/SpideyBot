@@ -5,6 +5,7 @@ Bot core: initialization, service wiring, handler registration and lifecycle.
 from __future__ import annotations
 
 import asyncio
+import faulthandler
 import os
 import signal
 import sys
@@ -13,7 +14,7 @@ import structlog
 from sqlalchemy import text
 from telethon import TelegramClient
 
-from core import config, db, sendgate, sessions
+from core import config, db, sendgate, sessions, watchdog
 from core.config import Settings, get_settings
 from core.event_loop import configure_event_loop
 from core.logging import setup_logging
@@ -36,6 +37,40 @@ terabox_downloader = None
 download_manager: DownloadManager | None = None
 _shutdown_event: asyncio.Event | None = None
 _scheduler_task: asyncio.Task[None] | None = None
+_watchdog_tasks: list[asyncio.Task[None]] = []
+
+
+def _start_watchdogs(client: TelegramClient, settings: Settings) -> None:
+    """Watch for a blocked event loop and a dropped Telegram connection."""
+    _watchdog_tasks.append(
+        asyncio.create_task(
+            watchdog.monitor_loop_lag(threshold=settings.loop_lag_threshold_seconds),
+            name="spideybot-loop-lag",
+        )
+    )
+    _watchdog_tasks.append(
+        asyncio.create_task(
+            watchdog.watch_connections(
+                client,
+                interval=settings.watchdog_interval_seconds,
+                grace=settings.watchdog_grace_seconds,
+                max_failures=settings.watchdog_max_reconnects,
+            ),
+            name="spideybot-connection-watchdog",
+        )
+    )
+    logger.info(
+        "Watchdogs started",
+        loop_lag_threshold=settings.loop_lag_threshold_seconds,
+        interval=settings.watchdog_interval_seconds,
+        max_reconnects=settings.watchdog_max_reconnects,
+    )
+
+
+def _stop_watchdogs() -> None:
+    for task in _watchdog_tasks:
+        task.cancel()
+    _watchdog_tasks.clear()
 
 
 def initialize() -> None:
@@ -134,6 +169,8 @@ async def _handle_shutdown(signal_name: str) -> None:
         _scheduler_task = None
         log.info("Background scheduler stopped")
 
+    _stop_watchdogs()
+
     if download_manager is not None:
         await download_manager.stop()
         log.info("Download manager stopped")
@@ -159,6 +196,9 @@ def main() -> None:
     asyncio.set_event_loop(loop)
 
     if sys.platform != "win32":
+        # Stack dump on demand: `docker exec spideybot kill -USR1 1` prints every
+        # thread's stack to stderr, no py-spy or SYS_PTRACE needed.
+        faulthandler.register(signal.SIGUSR1, all_threads=True)
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, lambda s=sig: asyncio.ensure_future(_handle_shutdown(s.name)))
     else:
@@ -199,6 +239,7 @@ def main() -> None:
             set_component_status("telegram", True)
             # Keep /readyz honest: report a dropped Telegram connection.
             register_probe("telegram", lambda: bot is not None and bot.is_connected())
+            _start_watchdogs(bot, _settings)
             paths.READY_FILE.write_text(str(os.getpid()), encoding="ascii")
             logger.info("Bot is running and listening for messages")
             await bot.run_until_disconnected()

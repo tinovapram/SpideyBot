@@ -19,6 +19,9 @@ from core.sendgate import FileExpiredError
 logger = structlog.get_logger(__name__)
 
 ALBUM_LIMIT = 10
+# Telegram's own hard limit is 10, but ten large videos make its workers answer
+# with WorkerBusyTooLongRetryError, so video albums are grouped more tightly.
+VIDEO_ALBUM_LIMIT = 5
 
 
 def is_album_media(item: object) -> bool:
@@ -29,12 +32,40 @@ def is_album_media(item: object) -> bool:
     """
     if isinstance(item, types.InputMediaUploadedPhoto):
         return True
-    if isinstance(item, types.InputMediaUploadedDocument):
-        attributes = item.attributes or []
-        if any(isinstance(attr, types.DocumentAttributeAnimated) for attr in attributes):
-            return False
-        return any(isinstance(attr, types.DocumentAttributeVideo) for attr in attributes)
-    return False
+    return _is_video_media(item)
+
+
+def _is_video_media(item: object) -> bool:
+    """Return True for an uploaded video (animations excluded)."""
+    if not isinstance(item, types.InputMediaUploadedDocument):
+        return False
+    attributes = item.attributes or []
+    if any(isinstance(attr, types.DocumentAttributeAnimated) for attr in attributes):
+        return False
+    return any(isinstance(attr, types.DocumentAttributeVideo) for attr in attributes)
+
+
+def album_chunks(
+    batch: list,
+    *,
+    limit: int = ALBUM_LIMIT,
+    video_limit: int = VIDEO_ALBUM_LIMIT,
+) -> list[tuple[int, int]]:
+    """Split *batch* into ``(start, end)`` windows of album-sized sends.
+
+    A window containing a video is capped at *video_limit*; photos alone may use
+    the full Telegram limit.
+    """
+    windows: list[tuple[int, int]] = []
+    start = 0
+    total = len(batch)
+    while start < total:
+        window = batch[start:start + limit]
+        size = video_limit if any(_is_video_media(item) for item in window) else limit
+        end = min(start + max(1, size), total)
+        windows.append((start, end))
+        start = end
+    return windows
 
 
 async def safe_edit(message, text: str, **kwargs) -> bool:
@@ -127,12 +158,12 @@ async def send_album(
         batch_captions = pending_captions[:]
         pending.clear()
         pending_captions.clear()
-        for start in range(0, len(batch), ALBUM_LIMIT):
+        for start, end in album_chunks(batch):
             sent += await _send_album_batch(
                 client,
                 chat_id,
-                batch[start:start + ALBUM_LIMIT],
-                batch_captions[start:start + ALBUM_LIMIT],
+                batch[start:end],
+                batch_captions[start:end],
                 reply_to,
                 **kwargs,
             )

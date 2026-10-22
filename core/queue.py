@@ -29,27 +29,93 @@ CANCELLED = "cancelled"
 _ids = itertools.count(1)
 _jobs: dict[int, Job] = {}
 _lock = asyncio.Lock()
-_work_available = asyncio.Event()
+_work_available: asyncio.Event | None = None
+_work_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _work_event() -> asyncio.Event:
+    """Return the wake-up event, rebinding it when the running loop changed."""
+    global _work_available, _work_loop
+    loop = asyncio.get_running_loop()
+    if _work_available is None or _work_loop is not loop:
+        _work_available = asyncio.Event()
+        _work_loop = loop
+    return _work_available
 
 
 def notify_work() -> None:
     """Wake up an idle worker: a job may now be claimable."""
-    _work_available.set()
+    if _work_available is not None:
+        _work_available.set()
 
 
-async def wait_for_work(timeout: float = 1.0) -> None:
-    """Block until a job may be claimable, or *timeout* elapses.
+def _running_state() -> tuple[dict[int, int], int]:
+    """Return running jobs per user and the number of running sessionless jobs."""
+    active_by_user: dict[int, int] = {}
+    sessionless_running = 0
+    for job in _jobs.values():
+        if job.status != RUNNING:
+            continue
+        active_by_user[job.user_id] = active_by_user.get(job.user_id, 0) + 1
+        if job.sessionless:
+            sessionless_running += 1
+    return active_by_user, sessionless_running
+
+
+def _sessionless_cap_hit(sessionless_running: int) -> bool:
+    cap = max(0, get_settings().sessionless_worker_slots)
+    return bool(cap) and sessionless_running >= cap
+
+
+def _split_candidates(
+    active_by_user: dict[int, int],
+    cap_hit: bool,
+) -> tuple[list[Job], int]:
+    """Return ``(claimable_jobs, deferred_sessionless_count)``."""
+    candidates: list[Job] = []
+    deferred = 0
+    for job in _jobs.values():
+        if job.status != QUEUED:
+            continue
+        if active_by_user.get(job.user_id, 0) >= tier_policy(job.tier).concurrent:
+            continue
+        if cap_hit and _is_sessionless(job):
+            deferred += 1
+            continue
+        candidates.append(job)
+    return candidates, deferred
+
+
+def _has_claimable_work() -> bool:
+    """True when at least one queued job could be claimed right now."""
+    active_by_user, sessionless_running = _running_state()
+    candidates, _ = _split_candidates(
+        active_by_user, _sessionless_cap_hit(sessionless_running)
+    )
+    return bool(candidates)
+
+
+async def wait_for_work(timeout: float = 1.0) -> bool:
+    """Block until a job is claimable, or *timeout* elapses.
+
+    Returns ``True`` when the caller actually waited. Returning early merely
+    because *some* job is queued would spin the worker loop at 100 % CPU
+    whenever those jobs are ineligible (per-user slots full, or the sessionless
+    share full); that starves the event loop and the bot stops answering
+    Telegram. So the check mirrors :func:`claim_next`.
 
     Clearing before the check keeps an ``enqueue()`` that lands in between from
     being lost.
     """
-    _work_available.clear()
-    if any(job.status == QUEUED for job in _jobs.values()):
-        return
+    event = _work_event()
+    event.clear()
+    if _has_claimable_work():
+        return False
     try:
-        await asyncio.wait_for(_work_available.wait(), timeout)
+        await asyncio.wait_for(event.wait(), timeout)
     except TimeoutError:
         pass
+    return True
 
 
 async def position(job_id: int) -> int:
@@ -135,29 +201,9 @@ async def claim_next() -> Job | None:
     reservation for logged-in users). ``0`` disables the cap.
     """
     async with _lock:
-        active_by_user: dict[int, int] = {}
-        sessionless_running = 0
-        for running_job in _jobs.values():
-            if running_job.status != RUNNING:
-                continue
-            active_by_user[running_job.user_id] = active_by_user.get(running_job.user_id, 0) + 1
-            if running_job.sessionless:
-                sessionless_running += 1
-
-        cap = max(0, get_settings().sessionless_worker_slots)
-        cap_hit = bool(cap) and sessionless_running >= cap
-
-        candidates: list[Job] = []
-        deferred = 0
-        for job in _jobs.values():
-            if job.status != QUEUED:
-                continue
-            if active_by_user.get(job.user_id, 0) >= tier_policy(job.tier).concurrent:
-                continue
-            if cap_hit and _is_sessionless(job):
-                deferred += 1
-                continue
-            candidates.append(job)
+        active_by_user, sessionless_running = _running_state()
+        cap_hit = _sessionless_cap_hit(sessionless_running)
+        candidates, deferred = _split_candidates(active_by_user, cap_hit)
         if deferred:
             get_metrics().incr("sessionless_deferred", deferred)
         if not candidates:

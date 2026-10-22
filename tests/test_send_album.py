@@ -7,7 +7,13 @@ from typing import Any
 import pytest
 from telethon import types
 
-from utils.telethon import ALBUM_LIMIT, is_album_media, send_album
+from utils.telethon import (
+    ALBUM_LIMIT,
+    VIDEO_ALBUM_LIMIT,
+    album_chunks,
+    is_album_media,
+    send_album,
+)
 
 
 def _handle() -> Any:
@@ -97,6 +103,32 @@ async def test_albums_are_chunked_to_the_telegram_limit() -> None:
 
     assert sent == ALBUM_LIMIT + 2
     assert [len(call[1]) for call in client.calls] == [ALBUM_LIMIT, 2]
+
+
+async def test_video_albums_are_grouped_more_conservatively() -> None:
+    """Ten heavy videos make Telegram answer WorkerBusyTooLongRetryError."""
+    client = FakeClient()
+    media = [_video() for _ in range(VIDEO_ALBUM_LIMIT + 1)]
+
+    sent = await send_album(client, 1, media, [""] * len(media))
+
+    assert sent == VIDEO_ALBUM_LIMIT + 1
+    assert [len(call[1]) for call in client.calls] == [VIDEO_ALBUM_LIMIT, 1]
+
+
+def test_album_chunks_respect_the_media_mix() -> None:
+    photos = [_photo() for _ in range(12)]
+    assert album_chunks(photos) == [(0, 10), (10, 12)]
+
+    videos = [_video() for _ in range(12)]
+    assert album_chunks(videos) == [(0, 5), (5, 10), (10, 12)]
+
+    mixed = [_video(), *[_photo() for _ in range(11)]]
+    # The first window holds the video, so it is capped at 5; the remaining
+    # seven photos fit in one full-size window.
+    assert album_chunks(mixed) == [(0, 5), (5, 12)]
+
+    assert album_chunks([]) == []
 
 
 async def test_missing_captions_do_not_drop_media() -> None:

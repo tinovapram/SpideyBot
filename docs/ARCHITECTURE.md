@@ -178,6 +178,14 @@ Telegram session, so the remaining slots stay reserved for logged-in users. It i
 (no borrowing) and `0` disables it; admins are exempt. Sessionless users see the split in the
 "Queued — position #N" reply and in `/quota`.
 
+A worker that cannot claim **must block**, and `wait_for_work()` enforces that by evaluating the
+same eligibility rules as `claim_next()` (shared `_running_state` / `_sessionless_cap_hit` /
+`_split_candidates` helpers). Returning early because *some* job merely exists in the queue burned
+~110 % of one core with 20 workers once either the per-user slots or the sessionless share were
+full, which starved the event loop until Telegram dropped the connection and `/readyz` timed out.
+`_worker_loop` keeps a last-resort guard: if a claim is lost to a race, it sleeps briefly instead
+of iterating without awaiting.
+
 ## 6. User session lifecycle (1000-user fix)
 
 - `_active_clients` is an **LRU with a configured hard cap** and an **idle timeout** that is
@@ -277,6 +285,8 @@ SPIDEY_FLOOD_JITTER_SECONDS, SPIDEY_SEND_MAX_ATTEMPTS
 SPIDEY_SESSIONLESS_WORKER_SLOTS
 SPIDEY_SESSION_MAX_LIVE / _IDLE_SECONDS
 SPIDEY_METRICS_HOST / _PORT
+SPIDEY_LOOP_LAG_THRESHOLD_SECONDS, SPIDEY_WATCHDOG_{INTERVAL,GRACE}_SECONDS
+SPIDEY_WATCHDOG_MAX_RECONNECTS
 SPIDEY_TIER_{FREE,PRO,PREMIUM}_*   # limits, priority, concurrent mode
 SPIDEY_CAMOUFOX_MAX_CONCURRENCY / _HEADLESS
 SPIDEY_DEFAULT_TIMER_MEDIA / _MAGIC_WORD

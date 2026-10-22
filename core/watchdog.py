@@ -17,11 +17,14 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import structlog
 
 logger = structlog.get_logger(__name__)
+
+Sleep = Callable[[float], Awaitable[None]]
 
 _REPORT_EVERY_SECONDS = 30.0
 
@@ -30,6 +33,8 @@ async def monitor_loop_lag(
     *,
     threshold: float,
     interval: float = 0.5,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Sleep = asyncio.sleep,
 ) -> None:
     """Log when the event loop is blocked longer than *threshold* seconds.
 
@@ -40,9 +45,9 @@ async def monitor_loop_lag(
     last_report = 0.0
 
     while True:
-        started = time.monotonic()
-        await asyncio.sleep(interval)
-        now = time.monotonic()
+        started = clock()
+        await sleep(interval)
+        now = clock()
         lag = now - started - interval
 
         if lag >= threshold:
@@ -70,26 +75,28 @@ async def watch_connections(
     interval: int,
     grace: int,
     max_failures: int,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Sleep = asyncio.sleep,
 ) -> None:
     """Reconnect the bot client; forget user clients whose transport died."""
     if bot is None:
         return
 
-    healthy_since = time.monotonic()
+    healthy_since = clock()
     failures = 0
 
     while True:
-        await asyncio.sleep(interval)
+        await sleep(interval)
         await _prune_user_clients(grace)
 
         if bot.is_connected():
             if failures:
                 logger.info("bot connection restored", attempts=failures)
             failures = 0
-            healthy_since = time.monotonic()
+            healthy_since = clock()
             continue
 
-        if time.monotonic() - healthy_since < grace:
+        if clock() - healthy_since < grace:
             continue
 
         failures += 1

@@ -396,13 +396,19 @@ class DownloadManager:
     # ── Worker loop ─────────────────────────────────────────────
 
     async def _worker_loop(self) -> None:
-        """Claim and execute jobs from the process-local queue."""
+        """Claim and execute jobs from the process-local queue.
+
+        A worker that cannot claim must genuinely wait: spinning here burns the
+        GIL, starves the event loop and makes the bot stop answering Telegram.
+        The guard below is a last resort in case a claim is lost to a race.
+        """
         logger.info("Worker loop starting")
         while self._running:
             try:
                 job = await Q.claim_next()
                 if job is None:
-                    await Q.wait_for_work()
+                    if not await Q.wait_for_work():
+                        await asyncio.sleep(0.05)
                     continue
                 await self._run_job(job)
             except asyncio.CancelledError:

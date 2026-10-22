@@ -45,6 +45,55 @@ databases — the Fernet key does not cover them. To rotate a user session,
 delete the file and have the user run `/login` again; to protect the data at
 rest, rely on volume permissions or full-disk encryption.
 
+## When the bot goes silent
+
+The process can stay up while answering nothing. Triage with the health data first:
+
+| Observation | Meaning |
+|:--|:--|
+| `(unhealthy)` with `Health check exceeded timeout`, and `docker stats` shows ~100 % CPU | the **worker loop was spinning** on queued-but-ineligible jobs. Fixed in `queue.wait_for_work()`; if it reappears, `py-spy dump` will show `claim_next` in the hot stack |
+| `(unhealthy)` with `Health check exceeded timeout`, CPU normal | the event loop is **blocked** — something synchronous is holding it (hachoir media parsing, ffmpeg, a blocking HTTP client) |
+| `(unhealthy)` with a `503` body from `/readyz` | a probe failed; the JSON names the component (`telegram: false` = dropped connection) |
+| `(healthy)` but no replies | handler-level exception; check `docker logs` for the traceback |
+
+Useful commands:
+
+```bash
+docker inspect --format '{{json .State.Health.Log}}' spideybot | tail -c 600; echo
+docker exec spideybot kill -USR1 1 && docker logs --tail 200 spideybot   # thread stacks
+docker exec spideybot sh -c 'ls /proc/1/fd | wc -l'     # file-descriptor leak?
+docker exec spideybot /opt/venv/bin/python -c \
+  "import socket;s=socket.socket();s.settimeout(5);print(s.connect_ex(('91.108.56.163',443)))"
+```
+
+`SIGUSR1` is wired to `faulthandler`, so the process prints a full stack dump of every
+thread to its log — enough to see what is holding the loop, with no debugger, extra image, or
+`SYS_PTRACE` capability. (`py-spy` works too but needs `ghcr.io` reachable and
+`--cap-add SYS_PTRACE`; `faulthandler` is stdlib.)
+
+The application logs both failure modes itself:
+
+- `event loop blocked lag_seconds=…` then `event loop recovered blocked_seconds=…` — a synchronous
+  call froze the loop (see the watchdog below).
+- `bot disconnected, reconnecting attempt=…`, `bot connection restored`, and finally
+  `bot could not reconnect — exiting so the container restarts`.
+
+`restart: unless-stopped` does **not** restart an unhealthy container, so the watchdogs (not
+Docker) are what recover the process. If the loop is blocked repeatedly, lower
+`SPIDEY_MAX_CONCURRENT_DOWNLOADS` (20 → 8) so fewer video pipelines run at once.
+
+## Watchdogs
+
+| Setting | Default | Meaning |
+|:--|--:|:--|
+| `SPIDEY_LOOP_LAG_THRESHOLD_SECONDS` | 2.0 | log `event loop blocked` once a 0.5 s tick is this late |
+| `SPIDEY_WATCHDOG_INTERVAL_SECONDS` | 30 | how often the connection watchdog checks |
+| `SPIDEY_WATCHDOG_GRACE_SECONDS` | 60 | tolerate a short Telethon reconnect before acting |
+| `SPIDEY_WATCHDOG_MAX_RECONNECTS` | 5 | failed reconnects before the process exits for a container restart |
+
+The same watchdog drops user clients that stay disconnected past the grace period, so they are
+rebuilt on demand instead of silently falling back to the shared bot client.
+
 ## Docker build cache
 
 The Dockerfile is split so that source edits only redo the cheap layers:
