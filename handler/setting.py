@@ -78,8 +78,16 @@ async def _cookie_status_text(user_id: int) -> str:
     if not cookie:
         return (
             "\U0001f511 **TeraBox Cookie**\n\n"
-            "No cookie saved yet.\n"
-            "Set one to download from TeraBox with your own account."
+            "No cookie saved yet — **TeraBox downloads are blocked until you add one**.\n"
+            "Your own account keeps your downloads off other users' quotas."
+        )
+
+    problem = cookie_store.validate_cookie(cookie)
+    if problem:
+        return (
+            "\U0001f511 **TeraBox Cookie**\n\n"
+            f"\u26a0\ufe0f Stored cookie is unusable: {problem}\n"
+            "Set a fresh one to re-enable TeraBox downloads."
         )
 
     return (

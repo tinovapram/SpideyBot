@@ -26,7 +26,7 @@ import re
 import structlog
 from telethon import TelegramClient, events
 
-from core import sessions
+from core import cookies, sessions
 from core.config import get_settings, is_admin
 from core.db import session_scope
 from core.metrics import get_metrics
@@ -35,7 +35,7 @@ from core.quota import QuotaExceeded, get_snapshot, release_download, reserve_do
 from core.ratelimit import get_limiter
 from core.referral import parse_start_payload, record_referral, referral_stats
 from core.tiers import size_limit
-from core.worker import DownloadManager, _MessageStub
+from core.worker import DownloadManager, _MessageStub, detect_site
 from downloader.telegram import (
     download_tg_message,
     download_tg_range,
@@ -53,36 +53,50 @@ logger = structlog.get_logger(__name__)
 
 # ── pricing / copy ────────────────────────────────────────────────────────────
 
-_FREE_NOTE = "🆓 Free tier: one file at a time, size limit per download."
+_FREE_NOTE = "🆓 **Free plan:** one download at a time with a per-file size limit."
+_START_GUIDE = (
+    "**Ready to download**\n"
+    "Send `/dl <URL>` for a public link, or use `/login` followed by "
+    "`/dt <t.me link>` for Telegram media.\n\n"
+    "Use `/help` for all commands and tips."
+)
 
 _HELP_HEADER = (
-    "**Welcome to SpideyBot**\n"
-    "Download videos, files, and media from 30+ platforms — including Terabox, "
-    "YouTube, Reddit, Instagram, and more.\n"
+    "**SpideyBot help**\n"
+    "Download media and files from 30+ platforms, including TeraBox, YouTube, "
+    "Reddit, Instagram, and more.\n\n"
+    "**Quick start**\n"
+    "1. Send `/dl <URL>` to download a public link.\n"
+    "2. Use `/login` before downloading from Telegram.\n"
+    "3. Send `/dt <t.me link>` for Telegram media.\n"
 )
 _HELP_COMMANDS = """
-**Essential commands**
+**Commands**
 
-    /start  — Sign up or refresh your status
-    /help   — Show this help guide
-    /dl *URL*  — Download a file
-    /dt *t.me link* — Download from a Telegram message (needs /login)
-    /cancel *ID*  — Cancel a queued download
-    /status — View your active downloads
-    /account — Account & session status
-    /quota — View your usage & limits
-    /sites — List supported platforms
-    /bypass *URL* — Resolve link shorteners to final destination
-    /referral — Get your invite link & stats
+- `/start` — Create your account or refresh your status
+- `/help` — Show this guide
+- `/dl <URL>` — Download from a public link
+- `/dt <t.me link>` — Download Telegram media
+- `/login` — Connect your Telegram session
+- `/stop` — Disconnect temporarily; keep the session saved
+- `/logout` — Disconnect and delete your saved session
+- `/cancel [ID]` — Cancel a queued download
+- `/status` — View active downloads
+- `/account` — View account and session status
+- `/quota` — View usage and limits
+- `/sites` — List supported platforms
+- `/setting` — Configure your magic word and media settings
+- `/bypass <URL>` — Resolve a link shortener
+- `/referral` — View your invite link and referral stats
 """
 _HELP_NOTES = """
-**Notes**
- 
-    • One file at a time. Large files are split automatically if needed.
-    • Terabox links require a logged-in account — use /account to manage sessions.
-    • `/stop` disconnects your session; `/logout` revokes and deletes it.
-    • Reply to media and send your magic word (default: `WOW`) to download it.
-    • Private photos/videos are auto-saved — manage via /setting.
+**Good to know**
+
+• Free accounts are limited to one download at a time.
+• Large files are split automatically when needed.
+• TeraBox links require a logged-in account.
+• Reply to media and send your magic word (default: `WOW`) to download it.
+• Private photos and videos can be auto-saved; manage this in `/setting`.
 """
 _HELP_ADMIN = """
 
@@ -172,6 +186,27 @@ class Handler:
 
     # ── download plumbing ─────────────────────────────────────────────────────
 
+    async def _terabox_cookie_missing(self, user_id: int, link: str) -> bool:
+        """True when *link* is TeraBox and the sender may not use it.
+
+        Every non-admin must bring their own TeraBox ``ndus`` cookie; admins may
+        fall back to the bot's own pool. The worker re-checks, so a cookie that
+        disappears between queueing and the claim is still caught.
+        """
+        if is_admin(user_id):
+            return False
+        try:
+            if detect_site(link) != "terabox":
+                return False
+        except Exception:
+            return False
+        try:
+            async with session_scope() as session:
+                return not await cookies.has_valid_cookie(session, user_id)
+        except Exception:
+            logger.exception("TeraBox cookie gate failed")
+            return True  # fail closed
+
     async def _enqueue_download(self, event, link: str) -> None:
         """Queue *link* for the sender and report back the queue position."""
         user_id = event.sender_id
@@ -181,6 +216,17 @@ class Handler:
             await event.client.send_message(
                 event.chat_id,
                 f"⚠️ **SpideyBot:** {exc}",
+                reply_to=event.message,
+            )
+            return
+
+        if await self._terabox_cookie_missing(user_id, link):
+            await event.client.send_message(
+                event.chat_id,
+                "🔐 **TeraBox needs your own account.**\n\n"
+                "Save your `ndus` cookie first — open /setting → **TeraBox cookie**, "
+                "or send `/setting tera set ndus=YOUR_VALUE`.\n\n"
+                "_Your own account keeps TeraBox downloads off other users' quotas._",
                 reply_to=event.message,
             )
             return
@@ -376,15 +422,18 @@ class Handler:
         badge = await self._tier_label(user_id)
         session_label = await self._session_badge(user_id)
         lines = [
-            f"**Welcome, {event.sender.first_name}!**",
+            f"**Welcome, {event.sender.first_name}! 👋**",
+            "",
+            "Your SpideyBot account is ready.",
             "",
             badge,
-            f"    Sessions: {session_label}",
+            f"🔐 Telegram session: {session_label}",
             "",
         ]
         if user.tier == "free" and not is_admin(user_id):
             lines.append(_FREE_NOTE)
-        lines.append(_HELP_COMMANDS)
+            lines.append("")
+        lines.append(_START_GUIDE)
         await event.client.send_message(event.chat_id, "\n".join(lines))
         raise events.StopPropagation
 
@@ -402,9 +451,9 @@ class Handler:
 
         lines = [
             _HELP_HEADER,
-            f"    Tier: {tier_label}",
-            f"    Link limit: {limit_label}",
-            f"    Sessions: {session_label}",
+            f"👤 Plan: {tier_label}",
+            f"📦 Link limit: {limit_label}",
+            f"🔐 Telegram session: {session_label}",
             "",
             _HELP_COMMANDS,
             _HELP_NOTES,

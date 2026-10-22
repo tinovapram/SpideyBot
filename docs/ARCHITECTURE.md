@@ -154,7 +154,11 @@ class QuotaPolicy:
 TIERS: dict[str, QuotaPolicy] = { "free": ..., "pro": ..., "premium": ... }
 ```
 
-All users can access all sites — no site gating.
+All sites are available to every tier. The one exception is a **credential gate, not a tier
+gate**: TeraBox downloads require the user's own valid `ndus` cookie (`/setting` → TeraBox
+cookie), because TeraBox quotas are per account. Admins are exempt and may use the bot's
+configured pool (`SPIDEY_TERABOX_COOKIES`). A cookie that is missing, undecryptable or malformed
+blocks the request at `/dl` and again at claim time.
 
 ## 5. Quota flow (per download request)
 

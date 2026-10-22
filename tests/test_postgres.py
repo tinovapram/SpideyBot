@@ -129,6 +129,10 @@ async def test_shared_cookies_exclude_admins_and_paid_tiers(
 ) -> None:
     monkeypatch.setattr(cookies_module, "_cipher", Fernet(Fernet.generate_key()))
 
+    def cookie(tag: str) -> str:
+        # The validator rejects truncated ndus values, so keep these plausible.
+        return f"ndus={tag}-" + "0" * 24
+
     free_user = await _add_user(session)
     pro_user = await _add_user(session, user_id=_TEST_USER_ID + 1)
     pro_user.tier = "pro"
@@ -138,9 +142,9 @@ async def test_shared_cookies_exclude_admins_and_paid_tiers(
     admin_user = await _add_user(session, user_id=_TEST_USER_ID + 3, admin=True)
     await session.flush()
 
-    await save_cookie(session, free_user.id, "ndus=free")
-    await save_cookie(session, pro_user.id, "ndus=pro")
-    await save_cookie(session, expired_user.id, "ndus=expired")
-    await save_cookie(session, admin_user.id, "ndus=admin")
+    await save_cookie(session, free_user.id, cookie("free"))
+    await save_cookie(session, pro_user.id, cookie("pro"))
+    await save_cookie(session, expired_user.id, cookie("expired"))
+    await save_cookie(session, admin_user.id, cookie("admin"))
 
-    assert sorted(await shared_cookies(session)) == ["ndus=expired", "ndus=free"]
+    assert sorted(await shared_cookies(session)) == [cookie("expired"), cookie("free")]

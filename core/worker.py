@@ -46,7 +46,7 @@ def _retry_delay(attempt: int) -> float:
 
 
 class _MessageStub:
-    """Minimal Telethon ``Message`` stand-in with ``.id`` and ``.edit()``."""
+    """Minimal Telethon ``Message`` stand-in with ``.id``, ``.edit()`` and ``.delete()``."""
 
     __slots__ = ("id", "_client", "_chat_id", "_text")
 
@@ -63,6 +63,12 @@ class _MessageStub:
                 await self._client.edit_message(self._chat_id, self.id, text)
             except Exception:
                 pass  # status updates are best-effort
+
+    async def delete(self) -> None:
+        """Delete the status message; the final report is sent separately."""
+        if self._client is None or not self.id:
+            return
+        await self._client.delete_messages(self._chat_id, [self.id])
 
 
 class _TaskEvent:
@@ -434,22 +440,26 @@ class DownloadManager:
 
         # ── Site gating ─────────────────────────────────────────
         if task.site and task.site in HEAVY_SITES:
-            # Heavy sites require a cookie — check bot pool or user cookie
+            # TeraBox needs an account: the user's own cookie, or — for admins
+            # only — the bot's configured pool.
             has_bot_pool = self._terabox_downloader is not None
             has_user_cookie = False
             try:
-                from core.cookies import has_cookie
+                from core.cookies import has_valid_cookie
 
                 async with session_scope() as session:
-                    has_user_cookie = await has_cookie(session, job.user_id)
+                    has_user_cookie = await has_valid_cookie(session, job.user_id)
             except Exception:
                 pass
 
-            if not has_bot_pool and not has_user_cookie:
+            if not has_user_cookie and not (task.is_admin and has_bot_pool):
                 if task.status_msg is not None:
                     try:
                         await task.status_msg.edit(
-                            "⚠️ **SpideyBot:** TeraBox is not configured. "
+                            "🔐 **TeraBox needs your own account.**\n"
+                            "Save your `ndus` cookie with /setting → TeraBox cookie."
+                            if not task.is_admin
+                            else "⚠️ **SpideyBot:** TeraBox is not configured. "
                             "No bot cookie or user cookie available."
                         )
                     except Exception:
@@ -459,7 +469,7 @@ class DownloadManager:
                 self.task_done(entry_id)
                 return
         else:
-            pass  # site gating removed — all tiers access all sites
+            pass  # no other site needs a per-user credential
 
         # ── Pin the user client and size its upload budget ──────
         client = sessions.get_client(job.user_id)

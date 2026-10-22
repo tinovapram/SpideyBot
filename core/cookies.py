@@ -49,16 +49,34 @@ def _decrypt(token: str) -> str:
     return _fernet().decrypt(token.encode()).decode()
 
 
+_MIN_NDUS_LENGTH = 16
+
+
+def parse_ndus(cookie: str) -> str | None:
+    """Return the ``ndus`` value from *cookie*, or ``None`` when absent/empty."""
+    for part in cookie.split(";"):
+        name, _, value = part.strip().partition("=")
+        if name.strip().lower() == "ndus":
+            value = value.strip()
+            return value or None
+    return None
+
+
 def validate_cookie(cookie: str) -> str | None:
     """Return an error string when *cookie* is unusable, else ``None``.
 
-    A valid TeraBox cookie must contain a non-empty ``ndus=...`` entry.
+    A usable TeraBox cookie carries a non-empty, plausibly sized ``ndus=...``.
+    This is a format check only — a stale ``ndus`` can still be rejected by
+    TeraBox at download time.
     """
     stripped = cookie.strip()
     if not stripped:
         return "Cookie is empty."
-    if "ndus=" not in stripped:
-        return "Cookie must contain an `ndus=...` value."
+    value = parse_ndus(stripped)
+    if value is None:
+        return "Cookie must contain a non-empty `ndus=...` value."
+    if len(value) < _MIN_NDUS_LENGTH:
+        return "That `ndus` value looks truncated — copy the whole cookie again."
     return None
 
 
@@ -96,6 +114,19 @@ async def get_cookie(session: AsyncSession, user_id: int) -> str | None:
 
 async def has_cookie(session: AsyncSession, user_id: int) -> bool:
     return await session.get(UserCookie, user_id) is not None
+
+
+async def has_valid_cookie(session: AsyncSession, user_id: int) -> bool:
+    """True when *user_id* stored a cookie that still passes validation.
+
+    Used as the TeraBox access gate: a cookie that cannot be decrypted or no
+    longer parses must behave like no cookie at all.
+    """
+    try:
+        cookie = await get_cookie(session, user_id)
+    except Exception:  # noqa: BLE001 — any read failure must gate the user
+        return False
+    return bool(cookie) and validate_cookie(cookie) is None
 
 
 async def delete_cookie(session: AsyncSession, user_id: int) -> bool:

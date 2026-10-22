@@ -13,7 +13,7 @@ platforms — all from a single Telegram bot. Send a link, get the files in chat
 - **In-memory queue** — process-local priority scheduling; queued jobs are cleared on restart
 - **Rate limiting** — per-user command limits, plus paced media preparation and sends so large requests stay flood-safe
 - **Referral system** — Earn bonus downloads by inviting friends
-- **Per-user cookies** — Encrypted per-user TeraBox session cookies
+- **Per-user cookies** — Encrypted per-user TeraBox session cookies; TeraBox downloads require your own `ndus` (admins exempt)
 - **User sessions** — On-demand Telegram account sessions with automatic lifecycle
 - **Admin tools** — Stats, premium management, and user oversight
 - **Camoufox browser** — Anti-detection browser for sites that block headless clients
@@ -81,7 +81,7 @@ All settings use the `SPIDEY_` env prefix. Copy `.env.example` to `.env` and fil
 | `SPIDEY_DATABASE_URL` | Yes | PostgreSQL connection string |
 | `SPIDEY_SESSION_ENCRYPT_KEY` | Yes | Fernet key for TeraBox cookies and legacy session files |
 | `SPIDEY_ADMIN_IDS` | Yes | Comma-separated Telegram user IDs |
-| `SPIDEY_TERABOX_COOKIES` | No | TeraBox cookie(s) — single or `\|`-delimited for multi-account |
+| `SPIDEY_TERABOX_COOKIES` | No | Bot-owned TeraBox account(s) — single or `\|`-delimited. Used by admins and the shared pool; **users still need their own `ndus` cookie** for TeraBox downloads |
 | `SPIDEY_MEDIA_CONCURRENCY` | No | Media prepared in parallel on the shared bot client (default 5; `0` follows `SPIDEY_SESSIONLESS_WORKER_SLOTS`). Logged-in users prepare on their own session, bounded by their tier concurrency |
 | `SPIDEY_MEDIA_PER_MINUTE` / `SPIDEY_MEDIA_BURST` | No | Media prepared per minute per client (default 60), and how many may start at once (default 5) |
 | `SPIDEY_SEND_CHAT_PER_MINUTE` / `SPIDEY_SEND_BURST` | No | Message RPCs per chat (defaults 20 / 5); an album of 10 media costs one |
