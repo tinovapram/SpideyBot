@@ -109,6 +109,13 @@ class Settings(BaseSettings):
     metrics_host: str = "0.0.0.0"
     metrics_port: int = 9090
 
+    # ── Watchdogs (core/watchdog.py) ────────────────────────────
+    # A blocked event loop is logged once it exceeds this lag.
+    loop_lag_threshold_seconds: float = 2.0
+    watchdog_interval_seconds: int = 30
+    watchdog_grace_seconds: int = 60  # tolerate a short reconnect blip
+    watchdog_max_reconnects: int = 5  # then exit so the container restarts
+
     # ── Browser (Camoufox) ──────────────────────────────────────
     camoufox_max_concurrency: int = 2
     camoufox_headless: str = ""  # "" | "virtual" | "1" | "0"

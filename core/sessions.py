@@ -33,6 +33,7 @@ _active_clients: dict[int, TelegramClient] = {}
 _last_used: dict[int, float] = {}
 _leases: dict[int, int] = {}
 _tiers: dict[int, str] = {}
+_disconnected_since: dict[int, float] = {}
 _fernet: Fernet | None = None
 
 
@@ -255,11 +256,18 @@ async def start_client(user_id: int) -> bool:
 async def stop_client(user_id: int) -> bool:
     client = _active_clients.pop(user_id, None)
     _tiers.pop(user_id, None)
+    _disconnected_since.pop(user_id, None)
     if client is None:
         _last_used.pop(user_id, None)
         return False
     try:
         await client.disconnect()
+    except Exception:
+        pass
+    # disconnect() only stops the network loop; the SQLite session keeps its
+    # file handle until closed, so several login/evict cycles would leak them.
+    try:
+        client.session.close()
     except Exception:
         pass
     _last_used.pop(user_id, None)
@@ -375,6 +383,30 @@ async def evict_idle_clients() -> int:
 def active_count() -> int:
     """Return the number of live user clients."""
     return len(_active_clients)
+
+
+async def drop_disconnected_clients(grace_seconds: float = 60.0) -> int:
+    """Forget live clients whose transport died, so they rebuild on demand.
+
+    Telethon reconnects on its own for a short while, so a client is only
+    dropped once it has stayed disconnected for *grace_seconds*.
+    """
+    now = time.monotonic()
+    stale: list[int] = []
+
+    for user_id, client in list(_active_clients.items()):
+        if is_leased(user_id) or client.is_connected():
+            _disconnected_since.pop(user_id, None)
+            continue
+        since = _disconnected_since.setdefault(user_id, now)
+        if now - since >= grace_seconds:
+            stale.append(user_id)
+
+    for user_id in stale:
+        logger.info("Dropping disconnected user client", user_id=user_id)
+        await stop_client(user_id)
+
+    return len(stale)
 
 
 async def stop_all_clients() -> None:

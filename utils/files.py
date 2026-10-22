@@ -232,7 +232,11 @@ async def prepare_media(
     if supports_streaming is None:
         supports_streaming = is_video
 
-    attrs, mime = get_attributes(
+    # Telethon parses the container with hachoir here — CPU-bound and fully
+    # synchronous. On the event loop it freezes the whole bot (no MTProto I/O,
+    # no readiness probe) for as long as the parse takes, so run it off-loop.
+    attrs, mime = await asyncio.to_thread(
+        get_attributes,
         file_path,
         force_document=force_document,
         supports_streaming=supports_streaming,

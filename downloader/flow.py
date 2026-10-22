@@ -32,6 +32,21 @@ _ALBUM_LIMIT = 10
 _QUEUE_SIZE = 4
 
 
+def _failed_files_message(failed: list[tuple[str, str]], source_link: str) -> str:
+    """Render failed filenames as links back to the source URL."""
+    if not failed:
+        return ""
+    lines = ["⚠️ **Failed files**"]
+    for filename, reason in failed:
+        safe_name = (
+            filename.replace("\\", "\\\\")
+            .replace("[", "\\[")
+            .replace("]", "\\]")
+        )
+        lines.append(f"• [{safe_name}]({source_link}) — {reason}")
+    return "\n".join(lines)
+
+
 async def run_download(task, client) -> None:
     """Execute a generic (non-TeraBox) download task end-to-end."""
     footer = f"Send `/cancel {task.entry_id}` to abort."
@@ -52,9 +67,11 @@ async def run_download(task, client) -> None:
 
     try:
         if detected is not None:
-            sent = await _run_streaming(task, client, detected[0], detected[1], status, max_size_bytes)
+            sent, failed = await _run_streaming(
+                task, client, detected[0], detected[1], status, max_size_bytes
+            )
         else:
-            sent = await _run_gallerydl(task, client, status, max_size_bytes)
+            sent, failed = await _run_gallerydl(task, client, status, max_size_bytes)
     except Exception as exc:
         logger.exception("Download failed", link=task.link, error=str(exc))
         await status.cleanup_close(f"❌ **SpideyBot: Failed to download media.**\nReason: `{exc}`", edit_only=True)
@@ -62,9 +79,15 @@ async def run_download(task, client) -> None:
 
     if sent > 0:
         task.completed = True
-        await status.cleanup_close(f"✅ **SpideyBot: Done!** Sent {sent} file(s).")
+        text = f"✅ **SpideyBot: Done!** Sent {sent} file(s)."
+        if failed:
+            text += f"\n\n{_failed_files_message(failed, task.link)}"
+        await status.cleanup_close(text, edit_only=bool(failed))
     else:
-        await status.cleanup_close("❌ **SpideyBot:** No files were successfully sent.", edit_only=True)
+        text = "❌ **SpideyBot:** No files were successfully sent."
+        if failed:
+            text += f"\n\n{_failed_files_message(failed, task.link)}"
+        await status.cleanup_close(text, edit_only=True)
 
 
 def _staging_dir(task, site: str) -> str:
@@ -72,7 +95,7 @@ def _staging_dir(task, site: str) -> str:
     return str(paths.DOWNLOADS_DIR / str(task.user_id) / site / str(task.entry_id) / stamp)
 
 
-async def _run_streaming(task, client, site, downloader, status, max_size_bytes) -> int:
+async def _run_streaming(task, client, site, downloader, status, max_size_bytes) -> tuple[int, list[tuple[str, str]]]:
     dest_dir = _staging_dir(task, site)
     loop = asyncio.get_running_loop()
     downloader._progress_callback = status.bytes_cb("dl", "📥", "Downloading")
@@ -81,7 +104,7 @@ async def _run_streaming(task, client, site, downloader, status, max_size_bytes)
         source = await loop.run_in_executor(
             None, lambda: downloader.download_streaming(task.link, dest_dir)
         )
-        sent = await _stream_upload(task, client, source, status)
+        sent, failed = await _stream_upload(task, client, source, status)
     except Exception as exc:
         logger.warning("Streaming download failed, falling back to gallery-dl", error=str(exc))
         status.set_header("⚠️ **SpideyBot:** Primary download failed, trying gallery-dl")
@@ -100,15 +123,19 @@ async def _run_streaming(task, client, site, downloader, status, max_size_bytes)
             downloaded = await _try_cyberdrop_dl(
                 task, _staging_dir(task, "cdl_fallback"), max_size_bytes, status,
             )
-        sent = await _send_all_at_once(task, client, downloaded, status) if downloaded else 0
+        sent, failed = (
+            await _send_all_at_once(task, client, downloaded, status)
+            if downloaded
+            else (0, [])
+        )
     finally:
         downloader._progress_callback = None
         shutil.rmtree(dest_dir, ignore_errors=True)
 
-    return sent
+    return sent, failed
 
 
-async def _run_gallerydl(task, client, status, max_size_bytes) -> int:
+async def _run_gallerydl(task, client, status, max_size_bytes) -> tuple[int, list[tuple[str, str]]]:
     staging = _staging_dir(task, "gallery-dl")
     try:
         from downloader.gallerydl import GalleryDLDownloader
@@ -124,11 +151,11 @@ async def _run_gallerydl(task, client, status, max_size_bytes) -> int:
 
     if not downloaded:
         await status.cleanup_close("❌ **SpideyBot: No files downloaded from the link.**", edit_only=True)
-        return 0
+        return 0, []
 
-    sent = await _send_all_at_once(task, client, downloaded, status)
+    sent, failed = await _send_all_at_once(task, client, downloaded, status)
     shutil.rmtree(staging, ignore_errors=True)
-    return sent
+    return sent, failed
 
 
 async def _try_cyberdrop_dl(task, staging_dir: str, max_size_bytes: float, status: StatusMessage) -> list[str]:
@@ -157,12 +184,13 @@ async def _gallerydl_hook(status: StatusMessage):
     return hook
 
 
-async def _stream_upload(task, client, source, status) -> int:
+async def _stream_upload(task, client, source, status) -> tuple[int, list[tuple[str, str]]]:
     """Producer/consumer pipeline: download → upload → album (bounded memory)."""
     queue: asyncio.Queue = asyncio.Queue(maxsize=_QUEUE_SIZE)
     loop = asyncio.get_running_loop()
     sent = 0
     uploaded = 0
+    failed: list[tuple[str, str]] = []
     upload_cb = status.bytes_cb("ul", "📤", "Uploading")
     # Shared state: producer writes downloaded count, consumer reads it.
     state = {"downloaded": 0, "total": None}
@@ -207,6 +235,8 @@ async def _stream_upload(task, client, source, status) -> int:
                 client, task.event.chat_id, media, captions,
                 reply_to=task.event.command_msg_id,
             )
+            total = state.get("total")
+            status.row("sent", count_line("✅", "Sent", sent, total))
 
         while True:
             file_path = await queue.get()
@@ -231,21 +261,24 @@ async def _stream_upload(task, client, source, status) -> int:
                 )
                 uploaded += 1
                 total = state.get("total")
-                status.row("ul", count_line("📤", "Uploaded", uploaded, total))
+                status.row("uploaded", count_line("📤", "Uploaded media", uploaded, total))
                 if len(pending_media) >= _ALBUM_LIMIT:
                     await flush()
             except Exception as exc:
                 logger.warning("Upload failed", file=clean, error=str(exc))
+                failed.append((os.path.basename(clean), str(exc) or type(exc).__name__))
             finally:
                 _remove(clean)
 
         await flush()
 
     await asyncio.gather(produce(), consume())
-    return sent
+    return sent, failed
 
 
-async def _send_all_at_once(task, client, downloaded_files, status) -> int:
+async def _send_all_at_once(
+    task, client, downloaded_files, status
+) -> tuple[int, list[tuple[str, str]]]:
     json_paths = [
         fp for fp in downloaded_files
         if os.path.exists(fp) and fp.lower().endswith(".json")
@@ -258,13 +291,14 @@ async def _send_all_at_once(task, client, downloaded_files, status) -> int:
         if os.path.exists(fp) and os.path.getsize(fp) > 0 and not fp.lower().endswith(".json")
     ]
     if not media_files:
-        return 0
+        return 0, []
 
     task.downloaded_bytes += sum(os.path.getsize(fp) for fp in media_files)
 
     media, captions = [], []
     upload_cb = status.bytes_cb("ul", "📤", "Uploading")
     uploaded = 0
+    failed: list[tuple[str, str]] = []
     native_used = False
     for fp in media_files:
         try:
@@ -274,20 +308,23 @@ async def _send_all_at_once(task, client, downloaded_files, status) -> int:
                 native_used = True
             captions.append(build_caption(os.path.basename(fp), task.link, native=native))
             uploaded += 1
-            status.row("up", count_line("📤", "Uploaded", uploaded))
+            status.row("uploaded", count_line("📤", "Uploaded media", uploaded, len(media_files)))
         except Exception as exc:
             logger.warning("Upload failed", file=fp, error=str(exc))
+            failed.append((os.path.basename(fp), str(exc) or type(exc).__name__))
         finally:
             _remove(fp)
 
     status.drop("ul")
     if not media:
-        return 0
+        return 0, failed
 
-    return await send_album(
+    sent = await send_album(
         client, task.event.chat_id, media, captions,
         reply_to=task.event.command_msg_id,
     )
+    status.row("sent", count_line("✅", "Sent", sent, len(media)))
+    return sent, failed
 
 
 def _sanitize_path(file_path: str) -> str:
