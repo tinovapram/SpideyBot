@@ -331,7 +331,7 @@ class Handler:
                     reply_to=event.message,
                 )
             else:
-                await event.client.send_message(event.chat_id, "✅ **SpideyBot:** Downloaded but nothing to send.")
+                await event.client.send_message(event.chat_id, "✅ **SpideyBot:** Downloaded but nothing to send.",reply_to=event.message)
 
             if is_range:
                 final = (
@@ -573,7 +573,7 @@ class Handler:
         if not snap.can_download:
             lines.append("\n⚠️ **Quota reached** — try again tomorrow.")
 
-        await event.client.send_message(event.chat_id, "\n".join(lines))
+        await event.client.send_message(event.chat_id, "\n".join(lines),reply_to=event.message)
         raise events.StopPropagation
 
     # ── /sites ────────────────────────────────────────────────────────────────
@@ -588,7 +588,7 @@ class Handler:
             "",
             "Send any link with /dl or /dt to download.",
         ]
-        await event.client.send_message(event.chat_id, "\n".join(lines))
+        await event.client.send_message(event.chat_id, "\n".join(lines),reply_to=event.message)
         raise events.StopPropagation
 
     # ── /referral ─────────────────────────────────────────────────────────────
@@ -601,7 +601,8 @@ class Handler:
         if not bot_username:
             await event.client.send_message(event.chat_id, 
                 "⚠️ **Can't build your invite link.**\n"
-                "Invite links need a public @username for the bot."
+                "Invite links need a public @username for the bot.",
+                reply_to=event.message
             )
             raise events.StopPropagation
 
@@ -620,7 +621,7 @@ class Handler:
             f"  💰 Bonus: +{settings.referral_daily_bonus} downloads/day per credited invite",
             f"     (valid for {settings.referral_bonus_days} days after credit)",
         ]
-        await event.client.send_message(event.chat_id, "\n".join(lines))
+        await event.client.send_message(event.chat_id, "\n".join(lines),reply_to=event.message)
         raise events.StopPropagation
 
     # ── user-side handlers (run on the user's own client) ─────────────────────
@@ -643,7 +644,8 @@ class Handler:
         if not _is_telegram_link(link):
             await event.client.send_message(event.chat_id, 
                 "⚠️ **/dt is for Telegram links only.**\n"
-                "Use `/dl <URL>` for other sites."
+                "Use `/dl <URL>` for other sites.",
+                reply_to=event.message
             )
             raise events.StopPropagation
         await self._download_tg(event, link)
