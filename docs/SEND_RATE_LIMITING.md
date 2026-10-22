@@ -180,7 +180,7 @@ already prepared across accounts. The slot budget follows that split:
 
 | Client | Media slots | Rationale |
 |:--|:--|:--|
-| user-session client | `tier.concurrent` (1 / 3 / 5) | Telegram limits are per account, and the tier already caps how many of *that user's* jobs run at once — no extra setting, no way to exceed it |
+| user-session client | `tier.concurrent` (1 / 2 / 3) | Telegram limits are per account, and the tier already caps how many of *that user's* jobs run at once — no extra setting, no way to exceed it |
 | bot client (no session, or session offline) | `SPIDEY_MEDIA_CONCURRENCY` (default 5; `0` follows `SPIDEY_SESSIONLESS_WORKER_SLOTS`) | this client is shared by every sessionless user, so it needs its own conservative budget that tracks the sessionless worker share |
 
 Consequences:
@@ -336,7 +336,7 @@ Unit tests with a fake client and a virtual clock (no network), in
   untouched.
 - **Session eviction.** Relying on user clients makes the idle sweep a correctness dependency;
   the lease in §5.4 is mandatory, not optional.
-- **Tier concurrency is a ceiling, not a guarantee.** A Premium user with five slots still ends
+- **Tier concurrency is a ceiling, not a guarantee.** A Premium user with three slots still ends
   up queueing on their own account's budget; the tier value only bounds parallelism.
 - **The bot client stays shared.** Users without a session all go through one client, so
   `SPIDEY_MEDIA_CONCURRENCY`, `SPIDEY_MEDIA_PER_MINUTE` and the per-chat buckets carry the load.

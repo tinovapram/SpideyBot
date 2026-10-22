@@ -85,6 +85,45 @@ async def test_reserve_download_without_a_limit_never_blocks(session: AsyncSessi
     assert snapshot.tier == "premium"
 
 
+async def test_user_is_rejected_when_concurrent_slots_are_full(session: AsyncSession) -> None:
+    from core import queue as queue_module
+
+    await queue_module.clear()
+    user = await _add_user(session)
+    job = await queue_module.enqueue(
+        user_id=user.id, link="https://example.com/a", tier="free"
+    )
+    assert await queue_module.claim_next() is job  # free tier = 1 slot
+
+    try:
+        with pytest.raises(QuotaExceeded, match="Concurrent download limit"):
+            await reserve_download(session, user)
+    finally:
+        await queue_module.clear()
+
+
+async def test_admin_queues_past_the_concurrency_limit(session: AsyncSession) -> None:
+    from core import queue as queue_module
+
+    await queue_module.clear()
+    admin = await _add_user(session, user_id=_TEST_USER_ID + 10, admin=True)
+    concurrent = tier_policy("premium").concurrent
+    assert concurrent == 3
+
+    for index in range(concurrent):
+        job = await queue_module.enqueue(
+            user_id=admin.id, link=f"https://example.com/{index}", tier="premium"
+        )
+        assert await queue_module.claim_next() is job
+
+    try:
+        # Slots are full, but an admin queues instead of being rejected.
+        snapshot = await reserve_download(session, admin)
+        assert snapshot.policy.concurrent == concurrent
+    finally:
+        await queue_module.clear()
+
+
 async def test_consume_records_bytes_and_blocks_bandwidth(session: AsyncSession) -> None:
     user = await _add_user(session)
     daily_bytes = tier_policy("free").daily_bytes

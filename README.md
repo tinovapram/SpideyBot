@@ -107,13 +107,15 @@ Unknown `SPIDEY_*` keys are logged at startup instead of being silently ignored,
 | Tier | Downloads/day | Per-link size | Daily bandwidth | Concurrency | Queue priority |
 |------|---------------|---------------|-----------------|-------------|----------------|
 | Free | 10 | 500 MB | 1 GB | 1 | 2.0 |
-| Pro | 50 | 10 GB | 25 GB | 3 | 1.0 |
-| Premium | 200 | Unlimited | 100 GB | 5 | 0.5 |
+| Pro | 50 | 10 GB | 25 GB | 2 | 1.0 |
+| Premium | 200 | Unlimited | 100 GB | 3 | 0.5 |
 
 All tiers can use every supported site. Every value is overridable through the
 `SPIDEY_TIER_*` environment variables (`..._CONCURRENT_MODE` chooses whether a request is
-rejected or queued when the concurrency slots are full). Admins bypass the daily limits and
-queue ahead of everyone (priority 0.2).
+rejected or queued when the concurrency slots are full; the default is **reject**).
+
+Admins use the Premium limits (3 concurrent downloads) but are **never rejected at the
+concurrency limit** — their extra requests join the queue, ahead of everyone (priority 0.2).
 
 ## Commands
 

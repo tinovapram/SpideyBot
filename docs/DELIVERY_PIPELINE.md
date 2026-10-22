@@ -231,7 +231,7 @@ faster" untrue in the common case. Revisit only if the idle-worker cost shows up
   sessioned and admin jobs are always eligible. A slot frees itself when a sessionless job
   reaches a terminal state (complete / fail / cancel), the same way per-user concurrency already
   works.
-- Per-user concurrency applies on top (free 1, pro 3, premium 5), so a premium user without a
+- Per-user concurrency applies on top (free 1, pro 2, premium 3), so a premium user without a
   session can occupy all 5 sessionless slots — see open point 2.
 - Config `SPIDEY_SESSIONLESS_WORKER_SLOTS=0` disables the split.
 

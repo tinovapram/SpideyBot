@@ -133,12 +133,13 @@ boolean, not a tier.
 | per-link total size | 500 MB | 10 GB | unlimited |
 | daily downloads | 10 | 50 | 200 |
 | daily bandwidth | 1 GB | 25 GB | 100 GB |
-| concurrent downloads | 1 | 3 | 5 |
+| concurrent downloads | 1 | 2 | 3 |
 | queue priority | 2.0 | 1.0 | 0.5 (admin 0.2) |
 | slots full (`*_CONCURRENT_MODE`) | reject | reject | reject |
 
 `concurrent_mode` can be set to `queue` per tier, in which case a request waits for a slot
-instead of being rejected at admission.
+instead of being rejected at admission. Admins are the exception to the admission check: they
+use Premium's three slots but are never rejected — their extra requests queue at claim time.
 
 All tier parameters are configurable via `SPIDEY_TIER_*` env vars.
 

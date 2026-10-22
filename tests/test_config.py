@@ -17,6 +17,14 @@ def test_unknown_spidey_keys_are_reported(monkeypatch: pytest.MonkeyPatch) -> No
     assert "SPIDEY_TG_API_ID" not in keys
 
 
+def test_tier_concurrency_defaults() -> None:
+    from core.tiers import tier_policy
+
+    assert tier_policy("free").concurrent == 1
+    assert tier_policy("pro").concurrent == 2
+    assert tier_policy("premium").concurrent == 3
+
+
 def test_known_settings_are_derived_from_the_model() -> None:
     known = config._known_env_keys()
 
