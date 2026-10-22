@@ -45,6 +45,21 @@ databases — the Fernet key does not cover them. To rotate a user session,
 delete the file and have the user run `/login` again; to protect the data at
 rest, rely on volume permissions or full-disk encryption.
 
+## Docker build cache
+
+The Dockerfile is split so that source edits only redo the cheap layers:
+
+| Stage | Invalidated by |
+|:--|:--|
+| `deps` | `pyproject.toml` / `uv.lock` only (it copies nothing else) |
+| `camoufox` | changes to `deps` — application edits never re-download the browser |
+| `builder` | any shipped file (`COPY . .` + a `--no-deps` project install, seconds) |
+| `runtime` | the staging copy of the source tree |
+
+`docs/`, `tests/`, `*.md`, `.git/`, `data/`, `downloads/`, `user_sessions/` and `.venv/` are in
+`.dockerignore`, so editing them does not start a rebuild at all. To confirm which layers were
+reused, build with `--progress=plain` and look for `CACHED`.
+
 ## Logs and metrics
 
 Sensitive fields and URL query parameters are redacted by the structured
@@ -63,6 +78,9 @@ Telegram starts refusing sends:
 | `spideybot_send_flood_waits_total` climbing | which client | lower `SPIDEY_MEDIA_PER_MINUTE`, or `SPIDEY_MEDIA_CONCURRENCY` for the shared bot client |
 | `spideybot_media_wait_seconds_total` large, few floods | token budget too tight | raise `SPIDEY_MEDIA_PER_MINUTE` / `SPIDEY_MEDIA_BURST` |
 | `spideybot_media_in_flight` pinned at the slot limit | uploads queued behind slots | raise `SPIDEY_MEDIA_CONCURRENCY` (bot) or the tier's concurrency |
+| `spideybot_sessionless_active` at the share while queue depth stays high | sessionless users waiting on the reserved slots | raise `SPIDEY_SESSIONLESS_WORKER_SLOTS` (or `0` to disable the split) |
+| `spideybot_sessionless_deferred_total` climbing | sessionless claims deferred — that is the `/login` incentive working | leave it alone unless queue depth grows unbounded |
+| `spideybot_active_sessions` pinned at `SPIDEY_SESSION_MAX_LIVE` | the live-client cap, not the idle timeout, is evicting clients (free clients go first) | raise `SPIDEY_SESSION_MAX_LIVE` (memory permitting) or shorten the premium idle |
 | large chats stall while others work | per-chat message budget | `SPIDEY_SEND_CHAT_PER_MINUTE` / `SPIDEY_SEND_BURST` |
 | `user:<id>` floods, bot is fine | that user's own account | nothing to tune — the cooldown is theirs alone |
 

@@ -167,14 +167,29 @@ request → rate-limit check (429 if exceeded)
         → release slot
 ```
 
+`claim_next()` also enforces the **sessionless worker share**: at most
+`SPIDEY_SESSIONLESS_WORKER_SLOTS` (default 5) of the workers run jobs for users without a live
+Telegram session, so the remaining slots stay reserved for logged-in users. It is a hard cap
+(no borrowing) and `0` disables it; admins are exempt. Sessionless users see the split in the
+"Queued — position #N" reply and in `/quota`.
+
 ## 6. User session lifecycle (1000-user fix)
 
-- `_active_clients` is an **LRU with a configured hard cap** and an **idle timeout**.
+- `_active_clients` is an **LRU with a configured hard cap** and an **idle timeout** that is
+  **per tier**: 30 min (free), 12 h (pro), 24 h (premium; admins resolve to premium).
 - Sessions start **on demand** when a job needs the user's account; not on `/start`.
 - `get_dialogs()` is called only when actually needed (deferred).
-- A scheduler task sweeps idle clients every minute and disconnects them.
-- When the cap is hit, the least-recently-used client is evicted (disconnected), never
-  errored.
+- A scheduler task sweeps idle clients every minute and disconnects them, resolving tiers for
+  the live clients in one query (only when a client is older than the shortest timeout).
+- Activity on the user's **own** client (magic word, timer-media, user-side commands) refreshes
+  the idle timer, and so does finishing a job — a long download cannot make the client look idle.
+- When the cap is hit, the **least-recently-used free client** is evicted first (then pro, then
+  premium, oldest first within each tier); the user being admitted is never evicted, and leased
+  clients are skipped.
+- A running job **leases** its client, so neither the sweep nor the LRU cap can disconnect it
+  mid-upload.
+- `/stop` disconnects the live client but keeps `user_sessions/<id>.session`, so `/start`
+  reconnects without a new login; `/logout` deletes it.
 
 This replaces V3's "every logged-in user stays connected forever".
 

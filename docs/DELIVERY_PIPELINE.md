@@ -1,8 +1,8 @@
 # Delivery pipeline — decisions & implementation plan
 
-**Status:** decision record + plan. Done so far: decisions 1–3 and the media half of 6.
-Not started: decisions 4, 5, 7, 8, 9 and the whole of §4 — no file has been changed for the
-delivery work. Nothing committed.
+**Status:** decision record + plan. Done so far: decisions 1–3, 6 (media budget) and 8 (sessionless
+worker share). Not started: decisions 4, 5, 7, 9 and the streaming part of §4. Nothing committed
+for the delivery work.
 **Date:** 2026-10-22.
 
 Legend: ✅ done · ◐ partly done · ⏳ planned (not started).
@@ -12,10 +12,10 @@ Legend: ✅ done · ◐ partly done · ⏳ planned (not started).
 | Album grouping (photos/videos only, ≤10) | ✅ | `utils/telethon.py`, `tests/test_send_album.py` |
 | Delete local file right after upload | ✅ | `downloader/flow.py`, `downloader/terabox_flow.py` |
 | Media/send pacing + leases (phase 1) | ✅ | `core/sendgate.py`, [SEND_RATE_LIMITING.md](./SEND_RATE_LIMITING.md) |
+| Sessionless worker share (5 of 20, hard cap) | ✅ | `core/queue.py` `claim_next()`, `tests/test_sessionless_share.py`, §8 |
 | Streaming `/dt` (resolve → download 1 → upload 1 → delete) | ⏳ | §4.1–4.2 |
 | gallery-dl `-J`-only streaming, CLI fallback removed | ⏳ | §4.3 |
 | Streaming depth parameter (4 site adapters / 1 gallery-dl) | ⏳ | §4.4 |
-| Sessionless worker share (5 of 20) | ⏳ | §8 — `SPIDEY_SESSIONLESS_WORKER_SLOTS` exists in config but is not enforced |
 | Delivery tests (§4.5) | ⏳ | — |
 
 ---
@@ -51,7 +51,7 @@ Legend: ✅ done · ◐ partly done · ⏳ planned (not started).
    the JSON carries no downloadable link, running the gallery-dl CLI would produce the same
    blank result, so the subprocess path is removed. The flow-level fallback to cyberdrop-dl
    stays.
-8. **⏳ Planned — Sessionless worker share.** Sessionless jobs may occupy at most
+8. **✅ Done — Sessionless worker share (hard cap).** Sessionless jobs may occupy at most
    `SPIDEY_SESSIONLESS_WORKER_SLOTS` (default **5**) of the 20 workers, regardless of tier; the
    rest is reserved for users with a live session. Queued sessionless users are told the split
    with a `/login` nudge. Details in §8.
@@ -182,56 +182,57 @@ exception, it has no incremental API.
 
 ## 6. Working-tree state at the time of writing
 
-- **Media/send pacing: ✅ implemented, uncommitted.** New files `core/sendgate.py` and
-  `tests/test_sendgate.py`; modified `utils/files.py`, `utils/telethon.py`, `core/sessions.py`,
-  `core/worker.py`, `core/config.py`, `core/metrics.py`, `core/scheduler.py`, `core/bot.py`,
-  plus docs/. Suite: 76 tests pass, `ruff` clean, `pyright` at its pre-existing baseline.
+- **Committed:** media/send pacing (`22eed77`) and this note (`156377b`), plus the Docker stage
+  restructure (`fd4fe2a`).
+- **Uncommitted:** `/stop` (real command, keeps the session), the sessionless worker share
+  (`core/queue.py`, `core/metrics.py`, `handler/handler.py` nudges), and the doc updates.
 - **Delivery work (§4): ⏳ not started.** The partial `downloader/telegram.py` refactor was
-  reverted (`git checkout -- downloader/telegram.py`); imports and the suite are green.
-- Untracked files: `core/sendgate.py`, `tests/test_sendgate.py`, this note. Nothing committed
-  or pushed; §4 starts only on explicit approval.
+  reverted; imports and the suite are green (87 tests).
 
 ## 7. Related notes from the same review
 
-- **Sessionless majority.** A reserved worker share (§8, ⏳); a media budget on the shared bot
-  client (`SPIDEY_MEDIA_CONCURRENCY` slots, `SPIDEY_MEDIA_PER_MINUTE` tokens) so preparation
-  cannot exceed a fixed budget (✅ done); same-type document albums (Bot API allows up to 10
-  documents of one type) to cut RPCs (⏳); a content-hash → uploaded `file_id` cache for repeat
-  requests (⏳); session incentives (`/login` via QR, extra slot, "login for a faster lane") (⏳).
+- **Sessionless majority.** A reserved worker share (§8, ✅ hard cap: 5 of 20); a media budget on
+  the shared bot client (`SPIDEY_MEDIA_CONCURRENCY` slots, `SPIDEY_MEDIA_PER_MINUTE` tokens) so
+  preparation cannot exceed a fixed budget (✅ done); same-type document albums (Bot API allows
+  up to 10 documents of one type) to cut RPCs (⏳); a content-hash → uploaded `file_id` cache for
+  repeat requests (⏳); session incentives (`/login` via QR, extra slot, "login for a faster
+  lane") (⏳).
 - **Global rate limiting.** See [SEND_RATE_LIMITING.md](./SEND_RATE_LIMITING.md).
 
-## 8. Sessionless worker share (⏳ proposed, not enforced)
+## 8. Sessionless worker share (✅ implemented — hard cap)
 
 **Rule:** at most `SPIDEY_SESSIONLESS_WORKER_SLOTS` (default **5**) of the
 `SPIDEY_MAX_CONCURRENT_DOWNLOADS` workers (default 20) may run jobs for users **without a live
-Telegram session**, regardless of tier. The remaining 15 slots stay available to users whose
-own session is running. Sessionless users are told the split:
+Telegram session**, regardless of tier. The remaining 15 slots stay reserved for users whose own
+session is running. Sessionless users are told the split:
 
-> ⏳ Queued — sessionless jobs share 5 of 20 worker slots.
-> Send `/login` to get your own slot (and a faster lane).
+> 📋 Queued — position **#7**. Send `/cancel 12` to abort.
+>
+> ℹ️ Sessionless jobs share **5 of 20** worker slots. Send /login to get your own slot.
 
 **Why:** every sessionless job competes for the same bot client's media/send budget; a fixed
 share stops users who never logged in from occupying the whole pool, and turns the wait into a
 concrete reason to log in. It is a **concurrency** control, not a content cap — the whole link
 is still delivered.
 
+**Decision: hard cap, not borrowing.** The cap binds always, so a logged-in user always finds a
+free worker and per-chat queue positions stay predictable. Borrowing (using all 20 workers while
+no sessioned job is queued) would shorten sessionless wall-clock when downloads dominate, but it
+lets the sessionless population oversubscribe the shared bot account and makes "logged in =
+faster" untrue in the common case. Revisit only if the idle-worker cost shows up on `/metrics`.
+
 **Enforcement:** [`core/queue.py`](../core/queue.py) `claim_next()`
 
 - A job is sessionless when `sessions.is_client_active(job.user_id)` is false at claim time
-  (cheap dict lookup; no API call). The answer is cached on the in-memory queue entry for the
-  job's lifetime, so completion accounting does not re-check it (process-local, like the rest of
-  `core/queue.py` — no database column).
+  (cheap dict lookup; no API call). The decision is recorded on the in-memory queue entry when
+  the job is claimed, so terminal-state accounting never re-checks it (no database column).
+  Queued jobs are re-evaluated on every claim, so a `/login` mid-queue takes effect immediately.
 - While the number of RUNNING sessionless jobs is at the cap, sessionless jobs are skipped;
-  sessioned jobs are always eligible. A slot frees itself when a sessionless job reaches a
-  terminal state (complete / fail / cancel), the same way per-user concurrency already works.
+  sessioned and admin jobs are always eligible. A slot frees itself when a sessionless job
+  reaches a terminal state (complete / fail / cancel), the same way per-user concurrency already
+  works.
 - Per-user concurrency applies on top (free 1, pro 3, premium 5), so a premium user without a
-  session can occupy all 5 sessionless slots. If that becomes a problem, lower the share or make
-  it per-user.
-- **Borrowing variant (recommended default):** the cap binds only while at least one *sessioned*
-  job is queued. With no sessioned job waiting, sessionless jobs may use all 20 workers, so a
-  mostly-sessionless base does not idle 15 workers; a sessioned arrival then waits at most one
-  job duration for a slot. A hard cap (never borrow) is the simpler alternative when a
-  guaranteed reservation matters more than throughput.
+  session can occupy all 5 sessionless slots — see open point 2.
 - Config `SPIDEY_SESSIONLESS_WORKER_SLOTS=0` disables the split.
 
 **Details**
@@ -240,39 +241,34 @@ is still delivered.
   limited.
 - Queued sessionless jobs stay `QUEUED` — they are claimed as soon as a slot frees, nothing is
   dropped.
-- Admins are exempt (they bypass tier limits already and normally carry a session).
+- Admins are exempt (`Job.is_admin` never counts as sessionless).
 - Tiers keep their daily/bandwidth/concurrency limits; this share is orthogonal.
 - The share is stated in the "Queued — position #N" reply for sessionless users and repeated in
   `/quota`, not only when the cap is actually hit.
-- Metrics: `sessionless_active` (gauge), `sessionless_deferred_total` (jobs skipped because of
-  the cap) so `/login` uptake is measurable.
+- Metrics: `spideybot_sessionless_active` (gauge), `spideybot_sessionless_deferred_total`
+  (claims skipped because of the cap) so `/login` uptake is measurable.
 
-**Tests**
+**Tests** — [`tests/test_sessionless_share.py`](../tests/test_sessionless_share.py), all ✅
 
-1. Cap 5, six sessionless jobs enqueued → five are claimed, the sixth stays `QUEUED`; a
-   sessioned job enqueued afterwards is claimed immediately.
-2. Completing a sessionless job frees its slot → the sixth is claimed.
-3. Borrowing variant: with no sessioned job queued, sessionless jobs may exceed the cap; once a
-   sessioned job is queued, further sessionless claims are held to the cap.
-4. `SPIDEY_SESSIONLESS_WORKER_SLOTS=0` → no restriction.
-5. Admin jobs are claimable regardless of the sessionless count.
+1. ✅ Cap 5 with six sessionless jobs → five are claimed, the sixth stays `QUEUED`.
+2. ✅ Completing a sessionless job frees its slot → the sixth is claimed.
+3. ✅ A sessioned job is claimed while the share is full, ahead of the queued sessionless job.
+4. ✅ `SPIDEY_SESSIONLESS_WORKER_SLOTS=0` → no restriction.
+5. ✅ Admin jobs bypass the share, and the claimed job records `sessionless` correctly.
+6. ✅ Deferred claims are counted in `sessionless_deferred`.
 
 **Open points**
 
-1. **Hard cap vs. borrowing — still undecided:**
+1. ~~Hard cap vs. borrowing~~ **Decided: hard cap** (see above). The comparison that drove it:
 
-   | | Hard cap | Borrowing (current recommendation) |
+   | | Hard cap (chosen) | Borrowing (rejected) |
    |:--|:--|:--|
-   | Sessionless workers | always ≤ 5 | ≤ 5 once a sessioned job is queued, otherwise up to 20 |
-   | Reservation for logged-in users | guaranteed | best-effort: a sessioned arrival waits at most one job |
+   | Sessionless workers | always ≤ 5 | ≤ 5 only while a sessioned job is queued |
+   | Reservation for logged-in users | guaranteed | best-effort |
    | Capacity on a mostly-sessionless base | up to 15 workers idle | fully used |
-   | Worst case for a sessioned user | none | waits for one sessionless job to finish |
-   | `claim_next()` cost | one counter | one counter + "is a sessioned job queued?" scan |
-
-   Borrowing is recommended because the early user base is mostly sessionless; a hard cap is the
-   right choice if the reservation must be absolute.
-2. Should a premium user without a session be able to take all five sessionless slots, or should
-   the share be balanced per user?
+   | Predictability for sessionless users | stable | varies with logged-in traffic |
+2. **Open** — should a premium user without a session be able to take all five sessionless
+   slots, or should the share be balanced per user?
 3. ~~Should the share also cap concurrent sessionless *uploads* on the bot client?~~
    **Answered:** no separate cap — the media gate already bounds sessionless preparation
    (`SPIDEY_MEDIA_CONCURRENCY` slots + `SPIDEY_MEDIA_PER_MINUTE` tokens on the bot client).

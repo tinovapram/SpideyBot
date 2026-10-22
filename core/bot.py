@@ -53,7 +53,9 @@ def initialize() -> None:
             metrics_host=_settings.metrics_host,
             metrics_port=_settings.metrics_port,
             session_max_live=_settings.session_max_live,
-            session_idle_seconds=_settings.session_idle_seconds,
+            session_idle_free=_settings.session_idle_seconds,
+            session_idle_pro=_settings.session_idle_pro_seconds,
+            session_idle_premium=_settings.session_idle_premium_seconds,
             max_concurrent_downloads=_settings.max_concurrent_downloads,
         )
     except config.ConfigError as exc:

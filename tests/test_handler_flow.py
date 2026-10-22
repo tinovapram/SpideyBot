@@ -64,3 +64,33 @@ async def test_rate_limited_request_is_reported(monkeypatch: pytest.MonkeyPatch)
 
     assert limited is True
     assert "Too many requests" in client.messages[0][1]
+
+
+async def test_user_client_activity_refreshes_the_session_idle_timer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    touched: list[int] = []
+    calls: list[int] = []
+
+    async def fake_magic(event) -> None:
+        calls.append(event.sender_id)
+
+    monkeypatch.setattr(handler_module.sessions, "touch", lambda user_id: touched.append(user_id))
+    handler = Handler(client=FakeClient(), manager=FakeManager())  # type: ignore[arg-type]
+    monkeypatch.setattr(handler, "magic_user_handler", fake_magic)
+
+    class RecordingClient:
+        def __init__(self) -> None:
+            self.handlers: list[object] = []
+
+        def add_event_handler(self, callback, _event_filter) -> None:
+            self.handlers.append(callback)
+
+    client = RecordingClient()
+    handler.register_user_handlers(client)  # type: ignore[arg-type]
+
+    magic = client.handlers[4]  # dl, dt, cancel, status, magic, timermedia
+    await magic(SimpleNamespace(sender_id=42))  # type: ignore[operator]
+
+    assert touched == [42]
+    assert calls == [42]

@@ -279,13 +279,16 @@ Sessions are plaintext Telethon SQLite files under `user_sessions/` (bind-mounte
 > local quick start uses `uv sync --frozen`. `PLAN.md` / `STRATEGY.md` carry a "historical"
 > banner. The in-bot `/dt` help text now matches reality, the dead `/upgrade` copy and hardcoded
 > upgrade button were removed, and a `LICENSE` file was added to back the README's MIT claim.
+> `/stop` — advertised in the `/login` success message but never implemented — now disconnects
+> the live client while keeping the stored session.
 
 `README.md`, `docs/ARCHITECTURE.md`, `docs/PLAN.md` and `docs/STRATEGY.md` are still "V4" plans, while the code is the V3 layout:
 
 - Referenced but missing: `handler/user.py`, `handler/outgoing.py`, `downloader/engines.py`, `tests/test_handler.py`.
 - README: "148 tests" (there are 11); Premium concurrency 8 (configured 5); no monthly quota dimension exists although the tier table lists one.
 - `/dt` is documented as "Download and auto-split into 1 GB chunks" ([handler/handler.py:76](../handler/handler.py)) but actually downloads a Telegram message via the user session.
-- `/upgrade` is advertised in `/start` and `/help` ([handler/handler.py:58](../handler/handler.py), [:360](../handler/handler.py)) but no handler is registered for it.
+- `/upgrade` is advertised in `/start` and `/help` ([handler/handler.py:58](../handler/handler.py), [:360](../handler/handler.py)) but no handler is registered for it. *Resolved — the copy was removed.*
+- `/stop` was advertised in the `/login` success message with no handler. *Resolved — `/stop` now disconnects the live client and keeps the saved session (`/logout` still revokes it).*
 - README claims MIT, but there is no `LICENSE` file.
 - Local quick start uses `python -m venv` + `pip`, while CI/Docker use `uv`.
 
@@ -339,7 +342,7 @@ Neither CI nor the Docker build pins transitive versions (`pip install ".[test]"
 ## Suggested order of work
 
 1. ~~**Unbreak the pipeline** — P0-1 (`Path`), P0-6 (ruff/pyright config, pinned tools), then make `main` green so tests gate merges.~~ ✅ Done
-2. ~~**Make advertised features real** — P0-2 (rate limiting), P0-3 (referrals), P1-1 (`/dt` client).~~ ✅ Done — `/upgrade` copy is still advertised without a handler; tracked under P3-1.
+2. ~~**Make advertised features real** — P0-2 (rate limiting), P0-3 (referrals), P1-1 (`/dt` client).~~ ✅ Done — the dead `/upgrade` copy was removed, and `/stop` is now a real command.
 3. ~~**Stability** — P0-4 (queue pruning), P0-5 (blocking ffmpeg), P1-2/P1-3 (TeraBox pool + N+1), P1-4/P1-5 (wake-up + backoff), P1-6 (queue position), P1-7 (readiness), P1-8 (staging cleanup).~~ ✅ Done
 4. ~~**Configuration hardening** — P2-1 … P2-5.~~ ✅ Done
 5. ~~**Docs, tests, lockfile** — P3-1 … P3-4, once the code above has settled.~~ ✅ Done

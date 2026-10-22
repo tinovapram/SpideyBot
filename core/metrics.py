@@ -39,6 +39,8 @@ class Metrics:
     media_prepared: int = 0
     media_wait_seconds: float = 0.0
     media_in_flight: int = 0
+    sessionless_active: int = 0
+    sessionless_deferred: int = 0
     send_flood_waits: int = 0
     send_retries: int = 0
     send_gate_wait_seconds: float = 0.0
@@ -103,6 +105,12 @@ class Metrics:
             "# HELP spideybot_queue_depth Current queued jobs.",
             "# TYPE spideybot_queue_depth gauge",
             f"spideybot_queue_depth {snapshot['queue_depth']}",
+            "# HELP spideybot_sessionless_active Running jobs for users without a session.",
+            "# TYPE spideybot_sessionless_active gauge",
+            f"spideybot_sessionless_active {snapshot['sessionless_active']}",
+            "# HELP spideybot_sessionless_deferred_total Sessionless claims deferred by the worker share.",
+            "# TYPE spideybot_sessionless_deferred_total counter",
+            f"spideybot_sessionless_deferred_total {snapshot['sessionless_deferred']}",
             "# HELP spideybot_active_sessions Current active user sessions.",
             "# TYPE spideybot_active_sessions gauge",
             f"spideybot_active_sessions {snapshot['active_sessions']}",

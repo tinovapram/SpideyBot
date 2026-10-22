@@ -32,6 +32,7 @@ def _update_metrics() -> None:
 _active_clients: dict[int, TelegramClient] = {}
 _last_used: dict[int, float] = {}
 _leases: dict[int, int] = {}
+_tiers: dict[int, str] = {}
 _fernet: Fernet | None = None
 
 
@@ -179,6 +180,14 @@ def create_login_client(user_id: int) -> TelegramClient:
 
 # ── Client lifecycle ──────────────────────────────────────────────
 
+_EVICTION_RANK = {"free": 0, "pro": 1, "premium": 2}
+
+
+def _eviction_rank(tier: str) -> int:
+    """Lower ranks go first: a free client is evicted before a paid one."""
+    return _EVICTION_RANK.get(tier, 0)
+
+
 async def start_client(user_id: int) -> bool:
     """Connect and cache the user's file-session client.
 
@@ -191,10 +200,27 @@ async def start_client(user_id: int) -> bool:
 
     max_live = max(1, config.get_settings().session_max_live)
     if len(_active_clients) >= max_live:
-        candidates = [uid for uid in _last_used if uid != user_id and not is_leased(uid)]
-        oldest_user = min(candidates, key=_last_used.get, default=None)
-        if oldest_user is not None:
-            await stop_client(oldest_user)
+        candidates = [
+            uid for uid in _active_clients if uid != user_id and not is_leased(uid)
+        ]
+        tiers = await _resolve_tiers(candidates) if candidates else {}
+        # Tier first, then age: the least-recently-used free client makes room
+        # before any paying user does.
+        victim = min(
+            candidates,
+            key=lambda uid: (
+                _eviction_rank(tiers.get(uid, "free")),
+                _last_used.get(uid, 0.0),
+            ),
+            default=None,
+        )
+        if victim is not None:
+            logger.info(
+                "Evicted client for capacity",
+                user_id=victim,
+                tier=tiers.get(victim, "free"),
+            )
+            await stop_client(victim)
         else:
             logger.warning("Active client limit reached", limit=max_live)
             return False
@@ -228,6 +254,7 @@ async def start_client(user_id: int) -> bool:
 
 async def stop_client(user_id: int) -> bool:
     client = _active_clients.pop(user_id, None)
+    _tiers.pop(user_id, None)
     if client is None:
         _last_used.pop(user_id, None)
         return False
@@ -269,6 +296,8 @@ def release(user_id: int) -> None:
         _leases[user_id] = remaining
     else:
         _leases.pop(user_id, None)
+    # The job just used the client; a long run must not look idle afterwards.
+    touch(user_id)
 
 
 def is_leased(user_id: int) -> bool:
@@ -276,14 +305,65 @@ def is_leased(user_id: int) -> bool:
     return _leases.get(user_id, 0) > 0
 
 
+def touch(user_id: int) -> None:
+    """Refresh *user_id*'s idle timer when their client is live."""
+    if user_id in _active_clients:
+        _last_used[user_id] = time.monotonic()
+
+
+def _min_idle_seconds(settings) -> int:
+    """Smallest configured idle, so young clients skip the tier lookup."""
+    values = [
+        getattr(settings, "session_idle_seconds", 1800),
+        getattr(settings, "session_idle_pro_seconds", 43200),
+        getattr(settings, "session_idle_premium_seconds", 86400),
+    ]
+    return max(1, min(values))
+
+
+async def _resolve_tiers(user_ids: list[int]) -> dict[int, str]:
+    """Map *user_ids* to their effective tier, cached for later sweeps."""
+    resolved: dict[int, str] = {}
+    try:
+        from sqlalchemy import select
+
+        from core.db import session_scope
+        from core.models import User
+        from core.tiers import effective_tier
+
+        async with session_scope() as session:
+            rows = await session.execute(
+                select(User.id, User.tier, User.tier_expiry, User.is_admin).where(
+                    User.id.in_(user_ids)
+                )
+            )
+            resolved = {
+                row.id: effective_tier(row.tier, row.tier_expiry, is_admin=row.is_admin)
+                for row in rows
+            }
+    except Exception as exc:
+        logger.warning("Unable to resolve tiers for session eviction", error=str(exc))
+    _tiers.update(resolved)
+    return {user_id: _tiers.get(user_id, "free") for user_id in user_ids}
+
+
 async def evict_idle_clients() -> int:
-    """Disconnect clients unused for the configured idle period (skipping leased)."""
-    idle_seconds = max(1, config.get_settings().session_idle_seconds)
+    """Disconnect clients idle past their tier's timeout (skipping leased)."""
+    settings = config.get_settings()
     now = time.monotonic()
-    stale = [
+    candidates = [
         user_id
         for user_id in list(_active_clients)
-        if not is_leased(user_id) and now - _last_used.get(user_id, now) >= idle_seconds
+        if not is_leased(user_id)
+        and now - _last_used.get(user_id, now) >= _min_idle_seconds(settings)
+    ]
+    if not candidates:
+        return 0
+    tiers = await _resolve_tiers(candidates)
+    stale = [
+        user_id
+        for user_id in candidates
+        if now - _last_used.get(user_id, now) >= settings.session_idle_for(tiers[user_id])
     ]
     for user_id in stale:
         await stop_client(user_id)

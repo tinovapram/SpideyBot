@@ -77,9 +77,10 @@ _HELP_COMMANDS = """
 """
 _HELP_NOTES = """
 **Notes**
-
+ 
     • One file at a time. Large files are split automatically if needed.
     • Terabox links require a logged-in account — use /account to manage sessions.
+    • `/stop` disconnects your session; `/logout` revokes and deletes it.
     • Reply to media and send your magic word (default: `WOW`) to download it.
     • Private photos/videos are auto-saved — manage via /setting.
 """
@@ -219,10 +220,16 @@ class Handler:
             raise
         position = await self.manager.get_queue_position(task.entry_id)
         if position > 0:
-            await status_msg.edit(
-                f"📋 Queued — position **#{position}**. "
-                f"Send `/cancel {task.entry_id}` to abort."
-            )
+            settings = get_settings()
+            slots = settings.sessionless_worker_slots
+            text = f"📋 Queued — position **#{position}**. Send `/cancel {task.entry_id}` to abort."
+            if slots and not sessions.is_client_active(user_id):
+                text += (
+                    f"\n\nℹ️ Sessionless jobs share **{slots} of "
+                    f"{settings.max_concurrent_downloads}** worker slots. "
+                    "Send /login to get your own slot."
+                )
+            await status_msg.edit(text)
 
     async def _link_command(self, event, *, usage: str) -> None:
         """Shared /dl and /dt implementation: parse the URL and enqueue it."""
@@ -556,6 +563,13 @@ class Handler:
         )
         lines.append(f"  Link limit: {size_limit(snap.tier, is_admin(user_id))[1]}")
 
+        settings = get_settings()
+        if settings.sessionless_worker_slots and not sessions.is_client_active(user_id):
+            lines.append(
+                f"  Workers: sessionless jobs share {settings.sessionless_worker_slots} of "
+                f"{settings.max_concurrent_downloads} slots — /login for your own"
+            )
+
         if not snap.can_download:
             lines.append("\n⚠️ **Quota reached** — try again tomorrow.")
 
@@ -748,23 +762,33 @@ class Handler:
         client only exists while the session is live, and the bot side stands
         down for exactly that window.
         """
+
+        def tracked(handler):
+            """Any activity on the user's client keeps its session alive."""
+
+            async def wrapper(event) -> None:
+                sessions.touch(event.sender_id)
+                await handler(event)
+
+            return wrapper
+
         client.add_event_handler(
-            self.dl_user_handler, events.NewMessage(outgoing=True, pattern=r"^\s*/dl\b")
+            tracked(self.dl_user_handler), events.NewMessage(outgoing=True, pattern=r"^\s*/dl\b")
         )
         client.add_event_handler(
-            self.dt_user_handler, events.NewMessage(outgoing=True, pattern=r"^\s*/dt\b")
+            tracked(self.dt_user_handler), events.NewMessage(outgoing=True, pattern=r"^\s*/dt\b")
         )
         client.add_event_handler(
-            self.cancel_handler, events.NewMessage(outgoing=True, pattern=r"^\s*/cancel\b")
+            tracked(self.cancel_handler), events.NewMessage(outgoing=True, pattern=r"^\s*/cancel\b")
         )
         client.add_event_handler(
-            self.status_handler, events.NewMessage(outgoing=True, pattern=r"^\s*/status\b")
+            tracked(self.status_handler), events.NewMessage(outgoing=True, pattern=r"^\s*/status\b")
         )
         client.add_event_handler(
-            self.magic_user_handler, events.NewMessage(outgoing=True, pattern=r"^\s*\S+\s*$")
+            tracked(self.magic_user_handler), events.NewMessage(outgoing=True, pattern=r"^\s*\S+\s*$")
         )
         client.add_event_handler(
-            self.timermedia_handler, events.NewMessage(func=lambda e: e.is_private and (e.photo or e.video) and e.media_unread)
+            tracked(self.timermedia_handler), events.NewMessage(func=lambda e: e.is_private and (e.photo or e.video) and e.media_unread)
         )
 
 

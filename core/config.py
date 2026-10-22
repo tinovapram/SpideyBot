@@ -99,7 +99,11 @@ class Settings(BaseSettings):
 
     # ── User sessions (on-demand lifecycle) ──────────────────────
     session_max_live: int = 50
-    session_idle_seconds: int = 600
+    # Idle timeout before a live client is disconnected (the session file is
+    # kept, so /start reconnects). Per tier: free, pro, premium.
+    session_idle_seconds: int = 1800  # free (also the fallback for unknown tiers)
+    session_idle_pro_seconds: int = 43200  # 12 h
+    session_idle_premium_seconds: int = 86400  # 24 h
 
     # ── Observability ───────────────────────────────────────────
     metrics_host: str = "0.0.0.0"
@@ -171,6 +175,14 @@ class Settings(BaseSettings):
         if self.media_concurrency > 0:
             return self.media_concurrency
         return max(1, self.sessionless_worker_slots)
+
+    def session_idle_for(self, tier: str) -> int:
+        """Idle timeout in seconds for *tier* (admins resolve to ``premium``)."""
+        if tier == "premium":
+            return max(1, self.session_idle_premium_seconds)
+        if tier == "pro":
+            return max(1, self.session_idle_pro_seconds)
+        return max(1, self.session_idle_seconds)
 
 
 def _known_env_keys() -> set[str]:

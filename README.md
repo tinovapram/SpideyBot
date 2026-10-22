@@ -85,6 +85,8 @@ All settings use the `SPIDEY_` env prefix. Copy `.env.example` to `.env` and fil
 | `SPIDEY_MEDIA_CONCURRENCY` | No | Media prepared in parallel on the shared bot client (default 5; `0` follows `SPIDEY_SESSIONLESS_WORKER_SLOTS`). Logged-in users prepare on their own session, bounded by their tier concurrency |
 | `SPIDEY_MEDIA_PER_MINUTE` / `SPIDEY_MEDIA_BURST` | No | Media prepared per minute per client (default 60), and how many may start at once (default 5) |
 | `SPIDEY_SEND_CHAT_PER_MINUTE` / `SPIDEY_SEND_BURST` | No | Message RPCs per chat (defaults 20 / 5); an album of 10 media costs one |
+| `SPIDEY_SESSIONLESS_WORKER_SLOTS` | No | Workers reserved for users without a session (default 5 of `SPIDEY_MAX_CONCURRENT_DOWNLOADS`); `0` disables the split |
+| `SPIDEY_SESSION_IDLE_SECONDS` / `_PRO_` / `_PREMIUM_` | No | Idle timeout before a live client is disconnected, per tier (defaults 30 min / 12 h / 24 h). The session file is kept, so `/start` reconnects |
 
 Unknown `SPIDEY_*` keys are logged at startup instead of being silently ignored, so a typo in
 `.env` is visible in the logs.
@@ -128,7 +130,8 @@ queue ahead of everyone (priority 0.2).
 | `/sites` | List supported platforms |
 | `/referral` | Get your invite link & stats |
 | `/login` | Start a Telegram user session (interactive 2FA flow) |
-| `/logout` | Disconnect your active session |
+| `/stop` | Disconnect your session but keep the saved login (`/start` reconnects) |
+| `/logout` | Revoke your session and delete the stored login |
 | `/bypass <URL>` | Resolve link shorteners (ouo, adfly, gplinks, etc.) to final destination |
 
 ### Admin commands

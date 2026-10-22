@@ -1,8 +1,10 @@
 """
-/login and /logout handlers.
+/login, /logout and /stop handlers.
 
 Multi-step conversation: phone → code → optional 2FA. The user's Telegram
 session is persisted as a Telethon file session (``user_sessions/<id>.session``).
+
+``/stop`` disconnects the live client but keeps that file; ``/logout`` removes it.
 """
 
 from __future__ import annotations
@@ -152,6 +154,35 @@ def register_login_handlers(bot) -> None:
             await event.client.send_message(event.chat_id, "🔓 Logged out successfully. Your session has been removed.")
         else:
             await event.client.send_message(event.chat_id, "ℹ️ You are not currently logged in.")
+
+    @bot.on(events.NewMessage(pattern=r"/stop(?:@\w+)?\s*$"))
+    async def stop_handler(event):
+        """Disconnect the live client while keeping the stored login."""
+        user_id = event.sender_id
+        if sessions.get_client(user_id) is None:
+            message = (
+                "ℹ️ **No active session to stop.**\n\n"
+                "Send /start to reconnect with your saved login."
+                if sessions.has_session(user_id)
+                else "ℹ️ **No active session.**\n\nSend /login to sign in first."
+            )
+            await event.client.send_message(event.chat_id, message)
+            return
+
+        if sessions.is_leased(user_id):
+            await event.client.send_message(
+                event.chat_id,
+                "⏳ **A download is still running on your session.**\n\n"
+                "Wait for it to finish, or cancel it with /cancel, then send /stop again.",
+            )
+            return
+
+        await sessions.stop_client(user_id)
+        await event.client.send_message(
+            event.chat_id,
+            "⏸️ **Session stopped.**\n\n"
+            "Your login is kept — send /start to reconnect, or /logout to revoke it.",
+        )
 
 
 async def _handle_2fa(conv, client, user_id):

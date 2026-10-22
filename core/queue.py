@@ -2,6 +2,11 @@
 
 Jobs intentionally disappear when the process stops. User accounts, quotas,
 cookies, and Telegram session files remain persistent elsewhere.
+
+A job whose user has no live Telegram session is **sessionless**: at most
+``SPIDEY_SESSIONLESS_WORKER_SLOTS`` of them may run at once, regardless of tier
+(see ``docs/DELIVERY_PIPELINE.md`` §8). Users with a live session, and admins,
+are always eligible.
 """
 
 from __future__ import annotations
@@ -76,9 +81,24 @@ class Job:
     status: str = QUEUED
     attempts: int = 0
     total_bytes: int | None = None
+    is_admin: bool = False
+    sessionless: bool = False
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     started_at: datetime | None = None
     finished_at: datetime | None = None
+
+
+def _is_sessionless(job: Job) -> bool:
+    """True when *job* belongs to a user without a live Telegram session.
+
+    Admins are treated as sessioned: they already bypass tier limits. The
+    check is a dict lookup plus ``is_connected()``, never an API call.
+    """
+    if job.is_admin:
+        return False
+    from core import sessions
+
+    return not sessions.is_client_active(job.user_id)
 
 
 async def enqueue(
@@ -97,6 +117,7 @@ async def enqueue(
         site=site,
         tier=tier,
         priority=PRIORITY_ADMIN if is_admin else tier_policy(tier).priority,
+        is_admin=is_admin,
     )
     async with _lock:
         _jobs[job.id] = job
@@ -107,25 +128,43 @@ async def enqueue(
 
 
 async def claim_next() -> Job | None:
-    """Claim the highest-priority queued job in this process."""
+    """Claim the highest-priority queued job in this process.
+
+    Sessionless jobs are skipped while ``SPIDEY_SESSIONLESS_WORKER_SLOTS`` of
+    them are already running (hard cap: no borrowing, so the share is a real
+    reservation for logged-in users). ``0`` disables the cap.
+    """
     async with _lock:
         active_by_user: dict[int, int] = {}
+        sessionless_running = 0
         for running_job in _jobs.values():
-            if running_job.status == RUNNING:
-                active_by_user[running_job.user_id] = active_by_user.get(running_job.user_id, 0) + 1
+            if running_job.status != RUNNING:
+                continue
+            active_by_user[running_job.user_id] = active_by_user.get(running_job.user_id, 0) + 1
+            if running_job.sessionless:
+                sessionless_running += 1
 
-        candidates = [
-            job
-            for job in _jobs.values()
-            if (
-                job.status == QUEUED
-                and active_by_user.get(job.user_id, 0) < tier_policy(job.tier).concurrent
-            )
-        ]
+        cap = max(0, get_settings().sessionless_worker_slots)
+        cap_hit = bool(cap) and sessionless_running >= cap
+
+        candidates: list[Job] = []
+        deferred = 0
+        for job in _jobs.values():
+            if job.status != QUEUED:
+                continue
+            if active_by_user.get(job.user_id, 0) >= tier_policy(job.tier).concurrent:
+                continue
+            if cap_hit and _is_sessionless(job):
+                deferred += 1
+                continue
+            candidates.append(job)
+        if deferred:
+            get_metrics().incr("sessionless_deferred", deferred)
         if not candidates:
             return None
         job = min(candidates, key=lambda item: (item.priority, item.created_at, item.id))
         job.status = RUNNING
+        job.sessionless = _is_sessionless(job)
         job.attempts += 1
         job.started_at = job.started_at or datetime.now(UTC)
     get_metrics().incr("queue_claims")
@@ -142,6 +181,10 @@ async def _update_gauges(discard: int | None = None) -> None:
         metrics = get_metrics()
         metrics.set("queue_depth", sum(job.status == QUEUED for job in _jobs.values()))
         metrics.set("active_downloads", sum(job.status == RUNNING for job in _jobs.values()))
+        metrics.set(
+            "sessionless_active",
+            sum(job.status == RUNNING and job.sessionless for job in _jobs.values()),
+        )
 
 
 async def active_count(user_id: int) -> int:
